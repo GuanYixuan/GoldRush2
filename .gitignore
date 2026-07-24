@@ -1,0 +1,8 @@
+.vscode/
+.agents/
+.codex/
+__pycache__/
+
+temp/
+
+.env
