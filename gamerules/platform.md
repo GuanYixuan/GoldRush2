@@ -521,6 +521,8 @@ Dashboard 上传弹窗会额外读取：
 - 选手代码运行异常或返回格式非法时，不一定表现为 `is_upload_log=2`。
 - `game_id=22373`、`22375`、`22376` 均为 `is_upload_log=1`、`is_parse_log=1`、`error_msg=""`，但 `get_game_log` 末尾存在 `forfeit` 行记录判负原因和部分详情。
 - 因此判断选手判负详情时，应同时检查 `get_game_info.error_msg` 和 `get_game_log` 中的 `forfeit`。
+- `viewer_side` 决定回放日志的完整可见方。`game_id=22501` 为自己挑战自己上传的 AI，`user_id=142`、`user_id2=142`、`viewer_side=1`，完整视角落在 `player1=test`。
+- `game_id=22540` 为真实被别人挑战的样本，`user_id=5`、`user_id2=142`、`viewer_side=2`，完整视角落在 `player2=player142`，对方 `player1=v15all` 仍按视野隐藏。
 
 ### 对局日志
 

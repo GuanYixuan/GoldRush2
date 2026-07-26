@@ -267,6 +267,14 @@ netGold = gold - vision_spent
 
 这与 `get_game_list_1.players[].coin_num` 中的 `-56`、`-71` 对应。
 
+视角与可见性：
+
+- `get_game_info.viewer_side` 决定回放日志的完整可见方。
+- `viewer_side=1` 时，`player1` 的 `order`、角色 `position/actions/pickup` 基本完整；`player2` 的位置和动作按视野隐藏，常见为 `position:null` 且缺少 `actions/pickup`。
+- `viewer_side=2` 时，上述关系反转，`vision_r` 的 key 也从 `"1"` 变为 `"2"`。
+- `game_id=22501` 中 `viewer_side=1`，`player1=test` 完整可见，`player2=player142` 大部分隐藏。
+- `game_id=22540` 中 `viewer_side=2`，`player2=player142` 完整可见，`player1=v15all` 大部分隐藏。
+
 ## Units
 
 分级：
@@ -297,6 +305,12 @@ netGold = gold - vision_spent
 delta = end_unit.gold - start_unit.gold
 ```
 
+行动记录可见性：
+
+- 本方角色在所有已查平台样本中均带 `actions`，可用于按步播放本轮移动。
+- 对方角色在可见时也可能带 `actions/pickup`，并非只能看到“瞬移”。例如 `game_id=22540` 中，`viewer_side=2`，对方 `player1` 的 `2000` 个 unit slot 中有 `335` 个带 `actions/pickup`。
+- 对方角色不可见时常见为 `position:null` 且缺少 `actions/pickup`；也存在少量 `position:null` 但保留 `actions: []` 或上一帧字段形态的情况。使用时应以当前位置和字段存在性共同判断，不要假定全程可还原。
+
 ## NPCs
 
 分级：
@@ -315,6 +329,12 @@ NPC 常见字段：
 - `pickup`: 本轮拾取金币数量。
 - `gold`: NPC 持有金币。
 - `cost`: NPC 行动耗时或成本字段。
+
+行动记录：
+
+- 平台可见样本中，出现于 `npcs[]` 的 NPC 条目全部带 `actions`，因此可见 NPC 通常不是只记录起终点，而是记录了本轮动作序列。
+- `game_id=22240` 中 `npcs[]` 共 `747` 条，全部带 `actions`；`game_id=22501` 中 `968/968`；`game_id=22540` 中 `1084/1084`。
+- 该结论只覆盖“出现在当前视角可见日志中的 NPC”。不可见 NPC 不会提供完整轨迹；它们可能只在重新进入视野时以新位置出现。
 
 `cost` 排查记录：
 

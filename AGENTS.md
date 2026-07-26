@@ -9,11 +9,16 @@
 ## 关于评测平台及其接口
 
 - 在需要进行评测平台自动化时，请参考`gamerules/platform.md`
-- 不得进行未经允许的提交操作，或泄露敏感信息
+    - 所需的key保存在`.env`文件中的`LOGIN_KEY`
+    - 不得进行未经允许的提交操作，或泄露敏感信息
 
 - 关于从评测平台上下载的日志/对局回放格式，请参考`gamerules/replay.md`
     - 评测平台下载的对局回放都是“站在玩家视角下的”，更多例子可参见官方给出的 `official_sdk/data/user`
     - `official_sdk/data/full`中的是一些一般无法得到的“上帝视角”回放
+
+## 关于策略开发
+- 策略开发时用到的官方接口请参考`official_sdk/code`
+    - 对于C++策略，优先采用相对include的方式链接官方的`official_sdk/code/game_api.h`
 
 ## 文档维护原则
 
