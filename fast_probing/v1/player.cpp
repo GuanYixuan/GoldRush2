@@ -18,10 +18,12 @@ constexpr int OPPOSITE[4] = {1, 0, 3, 2};
 constexpr Position CENTER{8, 8};
 
 struct BfsResult {
-    int dist[GRID_SIZE][GRID_SIZE];
-    int prev_r[GRID_SIZE][GRID_SIZE];
-    int prev_c[GRID_SIZE][GRID_SIZE];
-    int prev_action[GRID_SIZE][GRID_SIZE];
+    int8_t dist[GRID_SIZE][GRID_SIZE];
+    uint8_t prev_action[GRID_SIZE][GRID_SIZE];
+};
+
+struct TurnContext {
+    bool safe[2][GRID_SIZE][GRID_SIZE];
 };
 
 uint32_t g_rng = 0x9e3779b9u;
@@ -52,18 +54,17 @@ uint32_t fastRand(const GameInput* input) {
     return g_rng ^ mix;
 }
 
-bool visibleEnemyAt(const GameInput* input, int r, int c) {
+void buildTurnContext(const GameInput* input, TurnContext* ctx) {
+    bool enemy[GRID_SIZE][GRID_SIZE] = {};
+    uint8_t npc_count[GRID_SIZE][GRID_SIZE] = {};
+
     for (int i = 0; i < 2; ++i) {
-        Position p = input->visible_enemies[i];
-        if (validPos(p) && p.row == r && p.col == c) {
-            return true;
+        const Position p = input->visible_enemies[i];
+        if (validPos(p)) {
+            enemy[p.row][p.col] = true;
         }
     }
-    return false;
-}
 
-int npcCountAt(const GameInput* input, int r, int c) {
-    int count = 0;
     int n = input->num_visible_npcs;
     if (n < 0) {
         n = 0;
@@ -72,50 +73,42 @@ int npcCountAt(const GameInput* input, int r, int c) {
         n = MAX_NPCS;
     }
     for (int i = 0; i < n; ++i) {
-        Position p = input->visible_npcs[i].pos;
-        if (validPos(p) && p.row == r && p.col == c) {
-            ++count;
+        const Position p = input->visible_npcs[i].pos;
+        if (validPos(p)) {
+            ++npc_count[p.row][p.col];
         }
     }
-    return count;
+
+    for (int role = 0; role < 2; ++role) {
+        const Position other = input->my_units[1 - role];
+        for (int r = 0; r < GRID_SIZE; ++r) {
+            for (int c = 0; c < GRID_SIZE; ++c) {
+                const int cell = input->grid[r][c];
+                bool ok = (cell != -5 && cell != -3 && cell != -1);
+                ok = ok && !enemy[r][c] && npc_count[r][c] < 3;
+                ok = ok && !(other.row == r && other.col == c);
+                ctx->safe[role][r][c] = ok;
+            }
+        }
+    }
 }
 
-bool knownSafeCell(const GameInput* input, int role, int r, int c) {
+bool knownSafeCell(const TurnContext& ctx, int role, int r, int c) {
     if (!inBounds(r, c)) {
         return false;
     }
-
-    const int cell = input->grid[r][c];
-    if (cell == -5 || cell == -3 || cell == -1) {
-        return false;
-    }
-    if (visibleEnemyAt(input, r, c)) {
-        return false;
-    }
-    if (npcCountAt(input, r, c) >= 3) {
-        return false;
-    }
-
-    const Position other = input->my_units[1 - role];
-    if (other.row == r && other.col == c) {
-        return false;
-    }
-
-    return true;
+    return ctx.safe[role][r][c];
 }
 
 void initBfs(BfsResult* bfs) {
     for (int r = 0; r < GRID_SIZE; ++r) {
         for (int c = 0; c < GRID_SIZE; ++c) {
             bfs->dist[r][c] = -1;
-            bfs->prev_r[r][c] = -1;
-            bfs->prev_c[r][c] = -1;
-            bfs->prev_action[r][c] = 4;
         }
     }
 }
 
-void runBfs(const GameInput* input, int role, BfsResult* bfs) {
+void runBfs(const GameInput* input, const TurnContext& ctx, int role, BfsResult* bfs) {
     initBfs(bfs);
 
     int qr[GRID_SIZE * GRID_SIZE];
@@ -146,15 +139,13 @@ void runBfs(const GameInput* input, int role, BfsResult* bfs) {
         for (int a = 0; a < 4; ++a) {
             const int nr = r + DR[a];
             const int nc = c + DC[a];
-            if (!knownSafeCell(input, role, nr, nc)) {
+            if (!knownSafeCell(ctx, role, nr, nc)) {
                 continue;
             }
             if (bfs->dist[nr][nc] != -1) {
                 continue;
             }
             bfs->dist[nr][nc] = d + 1;
-            bfs->prev_r[nr][nc] = r;
-            bfs->prev_c[nr][nc] = c;
             bfs->prev_action[nr][nc] = a;
             qr[tail] = nr;
             qc[tail] = nc;
@@ -163,11 +154,11 @@ void runBfs(const GameInput* input, int role, BfsResult* bfs) {
     }
 }
 
-bool findBounce(const GameInput* input, int role, Position target, int* out_action) {
+bool findBounce(const TurnContext& ctx, int role, Position target, int* out_action) {
     for (int a = 0; a < 4; ++a) {
         const int nr = target.row + DR[a];
         const int nc = target.col + DC[a];
-        if (knownSafeCell(input, role, nr, nc)) {
+        if (knownSafeCell(ctx, role, nr, nc)) {
             *out_action = a;
             return true;
         }
@@ -175,17 +166,17 @@ bool findBounce(const GameInput* input, int role, Position target, int* out_acti
     return false;
 }
 
-int effectiveReachCost(const GameInput* input, int role, const BfsResult& bfs, Position target) {
+int effectiveReachCost(const TurnContext& ctx, int role, const BfsResult& bfs, Position target) {
     const int d = bfs.dist[target.row][target.col];
     if (d < 0 || d > S) {
         return INF;
     }
     if (d == 0) {
-        if (!knownSafeCell(input, role, target.row, target.col)) {
+        if (!knownSafeCell(ctx, role, target.row, target.col)) {
             return INF;
         }
         int bounce = 4;
-        return findBounce(input, role, target, &bounce) ? 2 : INF;
+        return findBounce(ctx, role, target, &bounce) ? 2 : INF;
     }
     return d;
 }
@@ -200,10 +191,8 @@ int reconstructPath(const BfsResult& bfs, Position target, int actions[S]) {
         const int action = bfs.prev_action[r][c];
         rev[len] = action;
         ++len;
-        const int pr = bfs.prev_r[r][c];
-        const int pc = bfs.prev_c[r][c];
-        r = pr;
-        c = pc;
+        r -= DR[action];
+        c -= DC[action];
     }
 
     for (int i = 0; i < len; ++i) {
@@ -218,12 +207,12 @@ void fillStay(int actions[S], int from) {
     }
 }
 
-void buildGoldActions(const GameInput* input, int role, const BfsResult& bfs,
+void buildGoldActions(const TurnContext& ctx, int role, const BfsResult& bfs,
                       Position target, int actions[S]) {
     int len = reconstructPath(bfs, target, actions);
 
     int bounce = 4;
-    if (findBounce(input, role, target, &bounce)) {
+    if (findBounce(ctx, role, target, &bounce)) {
         while (len + 1 < S) {
             actions[len] = bounce;
             actions[len + 1] = OPPOSITE[bounce];
@@ -234,7 +223,7 @@ void buildGoldActions(const GameInput* input, int role, const BfsResult& bfs,
     fillStay(actions, len);
 }
 
-int chooseSafeFallbackAction(const GameInput* input, int role, Position pos, uint32_t rnd) {
+int chooseSafeFallbackAction(const TurnContext& ctx, int role, Position pos, uint32_t rnd) {
     int best_action = 4;
     int best_dist = manhattan(pos, CENTER);
 
@@ -243,7 +232,7 @@ int chooseSafeFallbackAction(const GameInput* input, int role, Position pos, uin
             const int a = static_cast<int>((rnd + static_cast<uint32_t>(i)) & 3u);
             const int nr = pos.row + DR[a];
             const int nc = pos.col + DC[a];
-            if (!knownSafeCell(input, role, nr, nc)) {
+            if (!knownSafeCell(ctx, role, nr, nc)) {
                 continue;
             }
             const int d = absInt(nr - CENTER.row) + absInt(nc - CENTER.col);
@@ -264,12 +253,12 @@ int chooseSafeFallbackAction(const GameInput* input, int role, Position pos, uin
     return best_action;
 }
 
-void buildFallbackActions(const GameInput* input, int role, int actions[S]) {
+void buildFallbackActions(const GameInput* input, const TurnContext& ctx, int role, int actions[S]) {
     Position pos = input->my_units[role];
     uint32_t rnd = fastRand(input);
 
     for (int step = 0; step < S; ++step) {
-        const int action = chooseSafeFallbackAction(input, role, pos, rnd + static_cast<uint32_t>(step));
+        const int action = chooseSafeFallbackAction(ctx, role, pos, rnd + static_cast<uint32_t>(step));
         actions[step] = action;
         if (action != 4) {
             pos.row += DR[action];
@@ -292,8 +281,10 @@ extern "C" GameOutput moveDecision(const GameInput* input) {
     }
 
     BfsResult bfs[2];
-    runBfs(input, 0, &bfs[0]);
-    runBfs(input, 1, &bfs[1]);
+    TurnContext ctx;
+    buildTurnContext(input, &ctx);
+    runBfs(input, ctx, 0, &bfs[0]);
+    runBfs(input, ctx, 1, &bfs[1]);
 
     Position best_target{-1, -1};
     int best_role = -1;
@@ -308,8 +299,8 @@ extern "C" GameOutput moveDecision(const GameInput* input) {
             }
 
             const Position target{r, c};
-            const int cost0 = effectiveReachCost(input, 0, bfs[0], target);
-            const int cost1 = effectiveReachCost(input, 1, bfs[1], target);
+            const int cost0 = effectiveReachCost(ctx, 0, bfs[0], target);
+            const int cost1 = effectiveReachCost(ctx, 1, bfs[1], target);
             int role = 0;
             int cost = cost0;
             if (cost1 < cost0) {
@@ -330,10 +321,10 @@ extern "C" GameOutput moveDecision(const GameInput* input) {
     }
 
     if (best_role >= 0) {
-        buildGoldActions(input, best_role, bfs[best_role], best_target, out.actions);
+        buildGoldActions(ctx, best_role, bfs[best_role], best_target, out.actions);
     } else {
         best_role = static_cast<int>(fastRand(input) & 1u);
-        buildFallbackActions(input, best_role, out.actions);
+        buildFallbackActions(input, ctx, best_role, out.actions);
     }
 
     if (best_role == 0) {
