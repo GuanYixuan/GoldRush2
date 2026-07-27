@@ -403,6 +403,7 @@ NPC 常见字段：
 - 在 full 样本中，对每轮按玩家角色计算 `sum(start_unit.gold + end_unit.pickup - end_unit.gold)`，结果与 `end.burned` 在 `1500/1500` 个轮次完全一致。
 - full 样本中唯一观察到的踩踏处罚轮，`trample_events[].penalty` 合计 `30`，同轮 `end.burned=30`，说明踩踏损失被计入 `burned`。
 - 由于官方规则中还存在炸弹损失，且大量 `burned>0` 轮没有 `trample_events`，这些非踩踏损耗可推断为炸弹导致的玩家金币损失。
+- full 样本中可推断出 NPC 也会触发炸弹并使炸弹消失，但 NPC 触发本身不计入 `burned`；`burned` 仍应理解为玩家角色侧金币损耗。
 - 因此 `burned` 应理解为“本回合玩家角色金币损耗总额”，不是累计值；累计损耗需对每轮 `end.burned` 求和。
 
 ## Snapshot
