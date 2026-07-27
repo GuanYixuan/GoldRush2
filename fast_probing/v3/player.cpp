@@ -20,6 +20,7 @@ constexpr Position NO_BLOCK{-1, -1};
 
 uint32_t g_rng = 0x9e3779b9u;
 int g_bad_visible_rounds = 0;
+int g_current_vision_radius = 2;
 
 struct ActionPlan {
     int len;
@@ -43,6 +44,16 @@ inline bool validPos(Position p) {
     return inBounds(p.row, p.col);
 }
 
+inline int clampGrid(int x) {
+    if (x < 0) {
+        return 0;
+    }
+    if (x >= GRID_SIZE) {
+        return GRID_SIZE - 1;
+    }
+    return x;
+}
+
 inline uint32_t fastRand(const GameInput* input) {
     uint32_t mix = static_cast<uint32_t>(input->round + 1) * 0x85ebca6bu;
     mix ^= static_cast<uint32_t>((input->my_units[0].row + 1) * 31 + input->my_units[0].col);
@@ -64,9 +75,10 @@ inline bool visibleEnemyAt(const GameInput* input, int r, int c) {
 
 inline bool crowdedNpcAt(const GameInput* input, int r, int c) {
     int n = input->num_visible_npcs;
-    if (n < 0) {
-        n = 0;
-    } else if (n > MAX_NPCS) {
+    if (n < 3) {
+        return false;
+    }
+    if (n > MAX_NPCS) {
         n = MAX_NPCS;
     }
 
@@ -146,8 +158,7 @@ int usefulBouncePairs(int gold, bool already_entered_target) {
 int chooseStepToward(const GameInput* input, int role, Position pos, Position target,
                      uint32_t rnd, Position extra_block = NO_BLOCK) {
     const int cur = md(pos.row, pos.col, target);
-    int best_action = 4;
-    int best_dist = cur;
+    int fallback_action = 4;
 
     for (int i = 0; i < 4; ++i) {
         const int a = static_cast<int>((rnd + static_cast<uint32_t>(i)) & 3u);
@@ -157,32 +168,15 @@ int chooseStepToward(const GameInput* input, int role, Position pos, Position ta
             continue;
         }
         const int d = md(nr, nc, target);
-        if (d < best_dist) {
-            best_dist = d;
-            best_action = a;
+        if (fallback_action == 4) {
+            fallback_action = a;
+        }
+        if (d < cur) {
+            return a;
         }
     }
 
-    if (best_action != 4) {
-        return best_action;
-    }
-
-    int fallback = 4;
-    int fallback_dist = 1000000;
-    for (int i = 0; i < 4; ++i) {
-        const int a = static_cast<int>((rnd + static_cast<uint32_t>(i)) & 3u);
-        const int nr = pos.row + DR[a];
-        const int nc = pos.col + DC[a];
-        if (!safeCell(input, role, nr, nc, extra_block)) {
-            continue;
-        }
-        const int d = md(nr, nc, target);
-        if (d < fallback_dist) {
-            fallback_dist = d;
-            fallback = a;
-        }
-    }
-    return fallback;
+    return fallback_action;
 }
 
 ActionPlan buildMainActions(const GameInput* input, int role, Position target,
@@ -277,39 +271,59 @@ void composeOutput(int main_role, const int main_actions[S], int main_len,
     }
 }
 
-bool chooseGoldTarget(const GameInput* input, int* out_role, Position* out_target, int* out_gold) {
+inline void considerGoldCell(const GameInput* input, int r, int c,
+                             int* best_gold, int* best_dist, int* best_role,
+                             Position* best_target) {
+    const int gold = input->grid[r][c];
+    if (gold <= 0) {
+        return;
+    }
+
+    const int d0 = md(input->my_units[0].row, input->my_units[0].col, Position{r, c});
+    const int d1 = md(input->my_units[1].row, input->my_units[1].col, Position{r, c});
+    int role = 0;
+    int d = d0;
+    if (d1 < d0) {
+        role = 1;
+        d = d1;
+    }
+    if (d > S) {
+        return;
+    }
+
+    if (gold > *best_gold || (gold == *best_gold && d < *best_dist)) {
+        *best_gold = gold;
+        *best_dist = d;
+        *best_role = role;
+        *best_target = Position{r, c};
+    }
+}
+
+void scanVisionWindow(const GameInput* input, Position unit, int radius,
+                      int* best_gold, int* best_dist, int* best_role,
+                      Position* best_target) {
+    const int r0 = clampGrid(unit.row - radius);
+    const int r1 = clampGrid(unit.row + radius);
+    const int c0 = clampGrid(unit.col - radius);
+    const int c1 = clampGrid(unit.col + radius);
+    for (int r = r0; r <= r1; ++r) {
+        for (int c = c0; c <= c1; ++c) {
+            considerGoldCell(input, r, c, best_gold, best_dist, best_role, best_target);
+        }
+    }
+}
+
+bool chooseGoldTarget(const GameInput* input, int vision_radius,
+                      int* out_role, Position* out_target, int* out_gold) {
     int best_gold = -1;
     int best_dist = 1000000;
     int best_role = -1;
     Position best_target{-1, -1};
 
-    for (int r = 0; r < GRID_SIZE; ++r) {
-        for (int c = 0; c < GRID_SIZE; ++c) {
-            const int gold = input->grid[r][c];
-            if (gold <= 0) {
-                continue;
-            }
-
-            const int d0 = md(input->my_units[0].row, input->my_units[0].col, Position{r, c});
-            const int d1 = md(input->my_units[1].row, input->my_units[1].col, Position{r, c});
-            int role = 0;
-            int d = d0;
-            if (d1 < d0) {
-                role = 1;
-                d = d1;
-            }
-            if (d > S) {
-                continue;
-            }
-
-            if (gold > best_gold || (gold == best_gold && d < best_dist)) {
-                best_gold = gold;
-                best_dist = d;
-                best_role = role;
-                best_target = Position{r, c};
-            }
-        }
-    }
+    scanVisionWindow(input, input->my_units[0], vision_radius,
+                     &best_gold, &best_dist, &best_role, &best_target);
+    scanVisionWindow(input, input->my_units[1], vision_radius,
+                     &best_gold, &best_dist, &best_role, &best_target);
 
     if (best_role < 0) {
         return false;
@@ -324,31 +338,33 @@ bool chooseGoldTarget(const GameInput* input, int* out_role, Position* out_targe
 
 extern "C" GameOutput moveDecision(const GameInput* input) {
     GameOutput out = {};
-    fillStay(out.actions, 0);
     out.k = 6;
     out.order = 0;
     out.vp = 0;
 
     if (input == nullptr) {
+        fillStay(out.actions, 0);
         return out;
     }
     if (input->round == 0) {
         g_bad_visible_rounds = 0;
+        g_current_vision_radius = 2;
     }
 
+    const int vision_radius = g_current_vision_radius;
     int role = -1;
     Position target{-1, -1};
     int target_gold = 0;
     bool enable_bounce = true;
-    bool has_gold_target = chooseGoldTarget(input, &role, &target, &target_gold);
+    bool has_gold_target = chooseGoldTarget(input, vision_radius, &role, &target, &target_gold);
     if (!has_gold_target) {
         role = static_cast<int>(fastRand(input) & 1u);
         target = CENTER;
         enable_bounce = false;
     }
 
-    int main_actions[S] = {4, 4, 4, 4, 4, 4};
-    int side_actions[S] = {4, 4, 4, 4, 4, 4};
+    int main_actions[S];
+    int side_actions[S];
     const ActionPlan main_plan = buildMainActions(input, role, target, enable_bounce,
                                                   target_gold, main_actions);
     const int side_role = 1 - role;
@@ -372,6 +388,7 @@ extern "C" GameOutput moveDecision(const GameInput* input) {
     } else {
         out.vp = 0;
     }
+    g_current_vision_radius = out.vp == 2 ? 4 : 2;
 
     return out;
 }
