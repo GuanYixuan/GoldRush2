@@ -5,6 +5,6 @@ __pycache__/
 
 temp/
 
-.env
+.env*
 
 *.so
