@@ -347,7 +347,7 @@ Dashboard 上传弹窗会额外读取：
 - 模型名过长时也可能返回同一条校验提示；为减少变量，自动化探测中建议使用短字母数字名。
 - 上传成功以业务字段 `code=0` 和 `data.game_id` 存在为准，不应只看 HTTP 状态。
 - `code=0` 只表示已创建对局，不表示模型运行正常。异常判负或格式非法仍可能生成 `is_upload_log=1`、`is_parse_log=1` 的可解析回放，并在 `get_game_log` 末尾写入 `forfeit`。
-- 提交后建议轮询 `GET /api/user/get_game_info?id=<game_id>`，直到 `is_upload_log` 为 `1` 或 `2`；若 `is_parse_log=1`，再请求 `get_game_log` 检查是否存在 `forfeit`。
+- 提交后建议轮询 `GET /api/user/get_game_info?id=<game_id>`，直到 `is_upload_log=2` 或同时满足 `is_upload_log=1` 且 `is_parse_log=1`；只有 `is_parse_log=1` 后才请求 `get_game_log` 并检查是否存在 `forfeit`。
 
 实测记录：
 
@@ -518,6 +518,7 @@ Dashboard 上传弹窗会额外读取：
 
 补充实测：
 
+- `is_upload_log=1` 与 `is_parse_log=1` 不一定同时出现。`game_id=34096` 曾短暂出现 `is_upload_log=1`、`is_parse_log=0`，此时 `get_game_log` 仍不可按已完成回放解析；自动化脚本应继续轮询。
 - 选手代码运行异常或返回格式非法时，不一定表现为 `is_upload_log=2`。
 - `game_id=22373`、`22375`、`22376` 均为 `is_upload_log=1`、`is_parse_log=1`、`error_msg=""`，但 `get_game_log` 末尾存在 `forfeit` 行记录判负原因和部分详情。
 - 因此判断选手判负详情时，应同时检查 `get_game_info.error_msg` 和 `get_game_log` 中的 `forfeit`。
