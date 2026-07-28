@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,6 +50,36 @@ class ReplayVisualizerTests(unittest.TestCase):
 
         self.assertIsInstance(document.static_map[0][0], int)
 
+    def test_bomb_moving_out_of_view_is_not_trigger(self) -> None:
+        payload = _merged_payload()
+        merged = payload["rounds"][0]["merged"]
+        merged["start"] = copy.deepcopy(merged["start"])
+        merged["end"] = copy.deepcopy(merged["end"])
+        merged["start"]["grid"][3][4] = -3
+        merged["end"]["grid"][3][4] = -5
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "merged.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            _, bundles = open_replay(path)
+
+        self.assertFalse(any(annotation.marker == "!" for annotation in bundles[0].end.cell_annotations))
+
+    def test_visible_bomb_disappearance_is_trigger(self) -> None:
+        payload = _merged_payload()
+        merged = payload["rounds"][0]["merged"]
+        merged["start"] = copy.deepcopy(merged["start"])
+        merged["end"] = copy.deepcopy(merged["end"])
+        merged["start"]["grid"][3][4] = -3
+        merged["end"]["grid"][3][4] = 0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "merged.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            _, bundles = open_replay(path)
+
+        self.assertTrue(any(annotation.marker == "!" for annotation in bundles[0].end.cell_annotations))
+
 
 def _merged_payload() -> dict:
     grid = [[0 for _ in range(17)] for _ in range(17)]
@@ -96,4 +127,3 @@ def _merged_payload() -> dict:
 
 if __name__ == "__main__":
     unittest.main()
-
