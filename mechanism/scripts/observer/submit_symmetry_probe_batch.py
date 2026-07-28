@@ -40,6 +40,8 @@ READY_PARSE = 1
 LAYOUT_FILES = {
     "a": PROBE_ROOT / "layout_a.py",
     "ca": PROBE_ROOT / "layout_ca.py",
+    "m3a": PROBE_ROOT / "layout_m3_a.py",
+    "m3b": PROBE_ROOT / "layout_m3_b.py",
 }
 
 
@@ -372,7 +374,13 @@ def cmd_resolve_main(args: argparse.Namespace) -> None:
 
 def make_model_name(prefix: str, layout: str, index: int) -> str:
     safe_prefix = normalize_model_name(prefix)
-    layout_tag = "A" if layout == "a" else "C"
+    layout_tags = {
+        "a": "A",
+        "ca": "C",
+        "m3a": "M",
+        "m3b": "N",
+    }
+    layout_tag = layout_tags[layout]
     return normalize_model_name(f"{safe_prefix}{layout_tag}{index:03d}")
 
 

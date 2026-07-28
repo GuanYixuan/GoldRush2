@@ -49,6 +49,20 @@ conda run -n goldrush python mechanism/scripts/observer/submit_symmetry_probe_ba
 conda run -n goldrush python mechanism/scripts/observer/submit_symmetry_probe_batch.py run --layout a --map-id 1 --map-id 2 --count-per-map 5 --yes
 ```
 
+地图3使用专门布局，不复用 `layout a`：
+
+```bash
+conda run -n goldrush python mechanism/scripts/observer/submit_symmetry_probe_batch.py publish-main --layout m3a --yes
+conda run -n goldrush python mechanism/scripts/observer/submit_symmetry_probe_batch.py run --layout m3a --map-id 3 --count-per-map 5 --yes
+```
+
+互补布局 `m3b` 需要重新发布主号公开 probe 后再运行：
+
+```bash
+conda run -n goldrush python mechanism/scripts/observer/submit_symmetry_probe_batch.py publish-main --layout m3b --yes
+conda run -n goldrush python mechanism/scripts/observer/submit_symmetry_probe_batch.py run --layout m3b --map-id 3 --count-per-map 5 --yes
+```
+
 下载双方视角 replay：
 
 ```bash
