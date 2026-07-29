@@ -97,11 +97,33 @@
 
 - 该实验只证明 `dlopen` 二值可用性。
 - 不验证 headers、C API ABI、符号版本或推理性能。
-- ONNX Runtime C++/C 路线仍需测试 `dlsym` 获取 C API 入口，至少先拿版本字符串，再测试最小 session。
+- 后续实验已进一步确认 ONNX Runtime C API 入口和最小 session 可用，见下节。
 
 实验来源：
 
 - `temp/neural_submit_probe_20260729/experiment_e_summary.md`
+
+## C++ ONNX Runtime C API
+
+进一步探测结果：
+
+- `libonnxruntime.so` 和 `libonnxruntime.so.1` 均可通过 `dlsym("OrtGetApiBase")` 获取 C API 入口。
+- `GetVersionString()` 返回非空，说明 C API base 可用。
+- `GetApi(8/12/16/18/20/22)` 成功，`GetApi(29)` 失败。
+- 当前评测环境支持 ONNX Runtime C API 至少到 version `22`；不应直接使用本地最新版 header 的 `ORT_API_VERSION=29`。
+- 使用 C API version `8` 时，`CreateEnv`、`CreateSessionOptions`、`CreateSessionFromArray` 和一次 `Run` 最小 Identity ONNX 均成功。
+- 最小 Identity ONNX session 从内嵌 bytes 创建成功；该模型体积为 `87` B。
+
+工程建议：
+
+- C++ + ONNX Runtime 路线应通过 `dlopen` / `dlsym` 动态获取 C API，避免编译期链接。
+- 代码应显式请求已验证的 C API version，例如 `8` 或更高但不超过 `22`，不要直接使用未验证的最新 `ORT_API_VERSION`。
+- session 应缓存并复用；本实验中首次创建 env/session/run 的首轮 cost 约 `9e6..1.1e7` 原始值，后续回合回到几十量级。
+- 仍需单独测试真实 MLP ONNX 的 session 构造、推理耗时、输入输出 tensor 管理和模型大小。
+
+实验来源：
+
+- `temp/neural_submit_probe_20260729/experiment_fgh_summary.md`
 
 ## 耗时信号
 
@@ -154,11 +176,11 @@
 当前判断：
 
 - 最稳路线：C++ 内嵌权重 + 自写推理。
-- 值得继续 probe：C++ + ONNX Runtime C API，通过 `dlopen` / `dlsym` 动态获取入口，避免编译期链接。
+- 已验证基础可行、值得继续性能探测：C++ + ONNX Runtime C API，通过 `dlopen` / `dlsym` 动态获取入口，避免编译期链接。
 - 可行但需继续测速：Python + ONNX Runtime。
 
 路线取舍：
 
 - C++ 自写推理不依赖外部库，提交和运行可控，但需要将模型结构翻译为 C++。
-- C++ ONNX Runtime 现在已确认动态库可被 `dlopen`，但还未确认 C API 符号、ABI 和最小 session。
+- C++ ONNX Runtime 现在已确认动态库、C API 入口、最小 session 和一次 `Run` 可用，但还未确认真实模型推理成本。
 - Python ONNX Runtime 开发成本低，但 Python 调用和初始化成本明显更高，必须实测推理耗时。
