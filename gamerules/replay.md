@@ -522,11 +522,7 @@ NPC 常见字段：
 
 异常回传实验：
 
-- 实验资产位于 `temp/error_msg_probe_20260724/`。
-- A: `game_id=22373`，`raise RuntimeError("GR2_EXC_MARKER_A1_R0")` 后，`get_game_info.error_msg` 为空；`get_game_log` 第 3 行为 `forfeit`，其中 `exception_repr` 包含该 marker。
-- B: `game_id=22375`，先写 stdout/stderr 再抛异常；`error_msg` 为空，`forfeit.exception_repr` 仅包含异常 marker，stdout/stderr marker 均未出现。
-- C: `game_id=22376`，返回 `["GR2_RAW_RETURN_MARKER_C1_R0"]`；`error_msg` 为空，`forfeit.raw_return` 包含非法返回 marker，`reason` 为 `length_mismatch`。
-- LEN_EXC_256K: `game_id=22497`，抛出 `262144` 字符 ASCII payload；`forfeit.exception_repr` 字段长度为 `1024`，保留 `BEGIN`，不保留 `END`。
-- LEN_RAW_256K: `game_id=22498`，返回 `262144` 字符 ASCII payload；`forfeit.raw_return[0]` 字段长度为 `64`，保留 `BEGIN`，不保留 `END`。
-
-当前结论：列表级 `error_msg` 不是本次异常模型的回传通道；可见通道是可解析回放末尾的 `forfeit.exception_repr` 与 `forfeit.raw_return`。该通道会导致立即判负；在 256KB 纯 ASCII 长 payload 实验中，`exception_repr` 最终字段截断到 `1024` 字符，`raw_return[0]` 最终字段截断到 `64` 字符。转义规则和可见性边界仍需单独测试。
+- 列表级 `error_msg` 不是选手程序日志或异常详情的可靠回传通道。
+- Python 可见通道是可解析回放末尾的 `forfeit.exception_repr` 与 `forfeit.raw_return`，但会导致立即判负。
+- C++ `std::runtime_error::what()` 未进入 `forfeit.exception_repr`，C++ 非法 `GameOutput` 的 `raw_return` 也不包含结构体字段值。
+- 提交、回传通道、长度截断和 C++ 行为编码实验的详细结论集中维护在 `gamerules/submission.md`。

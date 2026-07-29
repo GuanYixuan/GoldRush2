@@ -341,13 +341,10 @@ Dashboard 上传弹窗会额外读取：
 
 参数约束与返回判读：
 
-- `model_names` 不接受下划线。实测 `probe_exc_20260724_01`、`probe_stream_exc_20260724_01`、`probe_raw_return_20260724_01` 均被拒绝。
-- 上述失败响应仍为 HTTP `200`，业务返回 `code=1`，`message="Model名称仅限字母和数字, 字母开头"`，且 `data.game_id` 为空。
-- 改用较短的字母数字名称可成功，例如 `ProbeA01`、`ProbeB01`、`ProbeC01`、`Norm01`。
-- 模型名过长时也可能返回同一条校验提示；为减少变量，自动化探测中建议使用短字母数字名。
 - 上传成功以业务字段 `code=0` 和 `data.game_id` 存在为准，不应只看 HTTP 状态。
 - `code=0` 只表示已创建对局，不表示模型运行正常。异常判负或格式非法仍可能生成 `is_upload_log=1`、`is_parse_log=1` 的可解析回放，并在 `get_game_log` 末尾写入 `forfeit`。
 - 提交后建议轮询 `GET /api/user/get_game_info?id=<game_id>`，直到 `is_upload_log=2` 或同时满足 `is_upload_log=1` 且 `is_parse_log=1`；只有 `is_parse_log=1` 后才请求 `get_game_log` 并检查是否存在 `forfeit`。
+- 模型名、文件大小、可用库、回传方式和工程路线等提交约束集中维护在 `gamerules/submission.md`。
 
 实测记录：
 
