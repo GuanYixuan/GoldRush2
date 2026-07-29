@@ -1,6 +1,6 @@
 # GoldRush2.0 策略提交约束
 
-本文集中记录策略提交、运行环境、文件大小、日志回传和工程路线相关结论。平台接口字段细节见 `gamerules/platform.md`，回放字段结构见 `gamerules/replay.md`。
+本文集中记录策略提交、运行环境、文件大小、日志回传和工程路线相关结论。平台接口字段细节见 `gamerules/platform.md`，回放字段结构见 `gamerules/replay.md`；神经网络推理测速和量化实验见 `docs/neural_inference.md`。
 
 ## 提交入口
 
@@ -119,30 +119,27 @@
 - C++ + ONNX Runtime 路线应通过 `dlopen` / `dlsym` 动态获取 C API，避免编译期链接。
 - 代码应显式请求已验证的 C API version，例如 `8` 或更高但不超过 `22`，不要直接使用未验证的最新 `ORT_API_VERSION`。
 - session 应缓存并复用；本实验中首次创建 env/session/run 的首轮 cost 约 `9e6..1.1e7` 原始值，后续回合回到几十量级。
-- 仍需单独测试真实 MLP ONNX 的 session 构造、推理耗时、输入输出 tensor 管理和模型大小。
+- 真实 CNN / Transformer / 端到端 ONNX 模型已进一步测速；详见 `docs/neural_inference.md`。
 
 实验来源：
 
 - `temp/neural_submit_probe_20260729/experiment_fgh_summary.md`
 
-## 耗时信号
+## 神经网络推理路线
 
-`players[].cost` 是 replay 中的决策耗时字段，前端会格式化为时间单位展示；精确计量口径仍未完全确认。以下数值均为 replay 原始值。
+`players[].cost` 是 replay 中的玩家策略本轮决策耗时字段，原始单位为纳秒；前端会格式化为 `ns` / `μs` / `ms` / `s` 展示。以下数值均为 replay 原始纳秒值。
 
-当前实验中可见的粗略信号：
+当前与提交直接相关的结论：
 
-- C++ 空逻辑或轻逻辑长期 cost 通常在几十量级，首轮可能因 `dlopen` 等初始化出现几十万到百万级峰值。
-- Python 空/轻逻辑 cost 通常在几十万到百万级原始值。
-- Python import probe 证明库可导入，但不能代表真实推理耗时。
-- Python lazy 初始化 `1MiB` / `4MiB` 运行时对象会让首轮 cost 抬升，但 replay cost 噪声较大，不能只凭单局精确归因。
+- 当前推荐路线：C++ `.so` 内嵌 ONNX bytes，通过 `dlopen("libonnxruntime.so")` 调用 ONNX Runtime C API。
+- `OrtEnv` / `OrtSession` / 常用 input tensor 应在 C++ 全局对象构造阶段初始化，避免计入首轮 `moveDecision`。
+- static INT8 QDQ 是当前首选量化路线；实测同时显著降低 `.so` 体积和推理耗时。
+- 目前更先撞线的是提交体积而非推理时间；`.so` 应保留明显余量，不要贴近 `16MiB`。
+- 详细测速矩阵、量化对照、参数量分布和扩容建议见 `docs/neural_inference.md`。
 
 性能相关实验来源：
 
-- `temp/neural_submit_probe_20260729/experiment_a_summary.md`
-- `temp/neural_submit_probe_20260729/experiment_b_summary.md`
-- `temp/neural_submit_probe_20260729/experiment_c_summary.md`
-- `temp/neural_submit_probe_20260729/experiment_d_summary.md`
-- `temp/neural_submit_probe_20260729/experiment_e_summary.md`
+- `docs/neural_inference.md`
 
 ## 日志与回传
 
@@ -175,12 +172,6 @@
 
 当前判断：
 
-- 最稳路线：C++ 内嵌权重 + 自写推理。
-- 已验证基础可行、值得继续性能探测：C++ + ONNX Runtime C API，通过 `dlopen` / `dlsym` 动态获取入口，避免编译期链接。
-- 可行但需继续测速：Python + ONNX Runtime。
-
-路线取舍：
-
-- C++ 自写推理不依赖外部库，提交和运行可控，但需要将模型结构翻译为 C++。
-- C++ ONNX Runtime 现在已确认动态库、C API 入口、最小 session 和一次 `Run` 可用，但还未确认真实模型推理成本。
-- Python ONNX Runtime 开发成本低，但 Python 调用和初始化成本明显更高，必须实测推理耗时。
+- 首选：C++ + ONNX Runtime C API + static INT8 QDQ。
+- 备选：C++ 内嵌权重 + 自写推理；该路线不依赖外部库，但需要将模型结构翻译为 C++。
+- 不优先：Python + ONNX Runtime；开发成本低，但 Python 调用和初始化成本更高，除非另做针对性测速。
