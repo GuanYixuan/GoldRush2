@@ -15,6 +15,12 @@ mechanism/
   data/
     raw/        # 下载的 replay/log 原始数据，尽量保持平台返回原样
     processed/  # 派生表、特征与可供建模使用的输出
+  results/      # 各项机理的实验结果与分析
+    gold/
+      gold_generation_observation.md  # 金币生成机理主结果文档
+    bomb/
+      bomb_generation_observation.md  # 炸弹生成机理主结果文档
+    npc/                              # 还没有明确主结果文档
 ```
 
 ## 边界约定
