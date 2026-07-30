@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 
-from .constants import ACTION_DELTAS, GRID_SIZE, MOVE_BUDGET, VALID_ACTIONS
+from .constants import ACTION_DELTAS, GRID_SIZE, MOVE_BUDGET, REGION_COUNT, VALID_ACTIONS
 
 
 class Action(IntEnum):
@@ -129,3 +129,27 @@ class InteractionEvents:
     pickups: tuple[PickupEvent, ...] = ()
     bomb_triggers: tuple[BombTriggerEvent, ...] = ()
     tramples: tuple[TrampleEvent, ...] = ()
+
+
+@dataclass(frozen=True)
+class GoldGenerationEvent:
+    position: Position
+    amount: int
+
+
+@dataclass
+class RegionStat:
+    id: int = 0
+    enter: int = 0
+    leave: int = 0
+    gold_generated: int = 0
+    gold_collected: int = 0
+    gold_remaining: int = 0
+    occupants: int = 0
+
+
+@dataclass
+class Snapshot:
+    window_begin: int = 0
+    window_end: int = 0
+    regions: list[RegionStat] = field(default_factory=lambda: [RegionStat() for _ in range(REGION_COUNT)])
