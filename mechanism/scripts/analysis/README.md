@@ -114,6 +114,46 @@ conda run -n goldrush python mechanism/scripts/analysis/extract_bomb_features.py
 conda run -n goldrush python mechanism/scripts/analysis/extract_bomb_features.py --run-id <run_id> --skip-transitions
 ```
 
+## `analyze_static2_generation.py`
+
+从 `gold_features/<run_id>/cell_transitions.csv` 抽取外围 `static_map=2` 高额 batch 的专题分析表。默认读取地图1、地图2、地图3 M3-A、地图3 M3-B 四批数据。
+
+脚本同时输出两个观测口径：
+
+- `is_high_batch_observed`：`static2_delta_sum >= 50 or static2_max_delta >= 20`，用于触发时序、region 与外围普通格耦合分析。
+- `is_full_high_batch_observed`：`static2_delta_sum >= 50`，用于 batch total / positive cell count 等金额分布估计。
+
+默认输入：
+
+```text
+mechanism/data/processed/gold_features/<run_id>/cell_transitions.csv
+```
+
+默认输出：
+
+```text
+mechanism/data/processed/static2_analysis/maps123_static2_generation/
+```
+
+输出文件：
+
+- `static2_region_rounds.csv`：按 run / game / round / region 聚合的 `static_map=2` 和同 region `static_map=0` 事件，包含两个 high batch 判定字段。
+- `static2_batches.csv`：每个 observed high batch 一行，包含 batch total、positive cells、是否 full high、同区/其它区普通格事件。
+- `static2_batch_cells.csv`：observed high batch 内每个正增量 `static_map=2` 格一行。
+- `summary.json`：分析摘要。
+
+常用命令：
+
+```bash
+conda run -n goldrush python mechanism/scripts/analysis/analyze_static2_generation.py
+```
+
+指定批次：
+
+```bash
+conda run -n goldrush python mechanism/scripts/analysis/analyze_static2_generation.py --run-id <run_id> --run-id <run_id>
+```
+
 ## `extract_npc_features.py`
 
 从双视角合并 replay 抽取 NPC 行为建模特征表。脚本只使用可连续观察的 NPC 轨迹做 round / step 级样本，即同一轮 `start.npcs[id]` 与 `end.npcs[id]` 均可见且 `end.npcs[id].actions` 存在。NPC 与可见炸弹的交互按 `dispatch_order` 保守重放，未观测到的炸弹不会被补全。

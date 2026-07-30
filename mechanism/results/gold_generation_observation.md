@@ -31,6 +31,7 @@ mechanism/data/processed/gold_features/<run_id>/
 
 - 中心区距离模型与独立触发：`mechanism/results/center_distance_model_comparison.md`
 - 外围普通格生成：`mechanism/results/outer_static0_generation_analysis.md`
+- 外围 `static_map=2` 高额 batch：`mechanism/results/static2_generation_analysis.md`
 
 ## Snapshot 对齐
 
@@ -84,19 +85,21 @@ if Bernoulli(center_rate(row, col)):
 
 ## 外围 `static_map=2` 高额 Batch
 
-外围 `region != 1 && static_map=2` 存在高额 batch 生成。以单轮单区域 `static2 delta_sum >= 50` 作为保守定义：
+外围 `region != 1 && static_map=2` 存在高额 batch 生成。当前使用 observed / full 两个观测口径：
 
-| 数据 | game-rounds | high batch | high rate | 同轮多 high region | batch total mean | range |
-| --- | ---: | ---: | ---: | ---: | ---: | --- |
-| 地图1 | `49400` | `4037` | `0.08172` | `0` | `88.1719` | `50..112` |
-| 地图2 | `49400` | `4122` | `0.08344` | `0` | `88.3503` | `53..112` |
-| 地图3 pooled | `98800` | `7167` | `0.07254` | `0` | `80.8122` | `50..112` |
+| 数据 | game-rounds | observed high | observed rate | full high | partial-only | full batch total mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 地图1 | `49400` | `4067` | `0.08233` | `4037` | `30` | `88.1719` |
+| 地图2 | `49400` | `4127` | `0.08354` | `4122` | `5` | `88.3503` |
+| 地图3 pooled | `98800` | `8166` | `0.08265` | `7167` | `999` | `80.8122` |
 
 结论：
 
-- 三张图均支持“同一 game-round 至多一个外围 region 触发 high batch”。
-- 地图3可见 high rate 和 batch mean 低于地图1/2，可能由地图结构和单局 `static_map=2` 可见覆盖共同造成；核心结构没有变化。
-- 第一版生成器可把 high batch 作为外围生成主事件，再采样区域与 batch total。
+- `observed high` 判据为 `static2_delta_sum >= 50 or static2_max_delta >= 20`，用于触发时序和耦合；`full high` 判据为 `static2_delta_sum >= 50`，用于金额分布估计。
+- 三张图均支持“同一 game-round 至多一个外围 region 触发 high batch”；地图3 observed 口径有 `4` 个同轮多 region 例外，数量很小。
+- high batch 不是每回合独立 Bernoulli；相邻 high batch 存在 `8` 回合最小间隔，主体间隔为 `8..16`。
+- 地图3 observed high rate 与地图1/2接近；原 full 口径偏低主要由 `static_map=2` 漏观察造成。
+- 第一版生成器应把 high batch 作为带间隔状态的外围主事件，再采样区域、batch total 与金额分配。
 
 ## 外围普通格小额生成
 
@@ -107,14 +110,14 @@ if Bernoulli(center_rate(row, col)):
 | 数据 | 条件 | events | exposure event rate | amount/event |
 | --- | --- | ---: | ---: | ---: |
 | 地图1 | high 所在 region | `0` | `0.000000` |  |
-| 地图1 | high 之外 region | `15359` | `0.034571` | `5.5049` |
-| 地图1 | 未观测到 high | `121` | `0.000018` | `5.3471` |
+| 地图1 | high 之外 region | `15480` | `0.034576` | `5.5037` |
+| 地图1 | 未观测到 high | `0` | `0.000000` |  |
 | 地图2 | high 所在 region | `0` | `0.000000` |  |
-| 地图2 | high 之外 region | `16127` | `0.033203` | `5.3132` |
-| 地图2 | 未观测到 high | `30` | `0.000004` | `4.7000` |
-| 地图3 pooled | high 所在 region | `0` | `0.000000` |  |
-| 地图3 pooled | high 之外 region | `26838` | `0.035345` | `5.4036` |
-| 地图3 pooled | 未观测到 high | `3857` | `0.000299` | `5.4651` |
+| 地图2 | high 之外 region | `16151` | `0.033212` | `5.3118` |
+| 地图2 | 未观测到 high | `6` | `0.000001` | `6.0000` |
+| 地图3 pooled | high 所在 region | `1` | `0.000003` | `1.0000` |
+| 地图3 pooled | high 之外 region | `30331` | `0.035130` | `5.4116` |
+| 地图3 pooled | 未观测到 high | `363` | `0.000028` | `5.3967` |
 
 触发后金额主要落在 `1..11`，但偏向小金额，不建议用均匀 `1..11`。第一版应使用外围普通格经验 categorical 分布。
 
@@ -130,7 +133,7 @@ if static2_high_batch_triggered:
         add sample_outer_static0_amount()
 ```
 
-地图1/2 的 `no_high` 背景几乎为 0；地图3 `no_high` 稍高，但仍比 `other_high` 弱两个数量级，且可能混入未完整观测到的 high batch。第一版不建议把它建成强背景率。
+地图1/2 的 `no_high` 背景几乎为 0；地图3 `no_high` 在新 observed 口径下也降到很弱。第一版不建议把它建成强背景率。
 
 ## 建模建议
 
@@ -144,11 +147,21 @@ for each round t:
         if Bernoulli(p):
             add UniformInteger(1, 11)
 
-    # outer high batch
-    if Bernoulli(p_static2_high_batch):
+    # outer high batch, stateful gap trigger
+    if t == state.next_static2_round:
         high_region = sample_outer_region()
         total = sample_static2_batch_total()
-        allocate total over static_map=2 cells in high_region
+        k_static2 = sample_static2_positive_cell_count()
+        static2_cells = sample_static2_cells_by_region_weight(
+            high_region,
+            k_static2,
+        )
+        base = total // k_static2
+        rem = total % k_static2
+        for cell in static2_cells:
+            add base
+        for cell in sample_without_replacement(static2_cells, rem):
+            add 1
 
         # coupled outer ordinary gold
         k = sample_outer_static0_event_count_given_high()
@@ -159,6 +172,8 @@ for each round t:
         for cell in cells:
             add sample_outer_static0_amount()
 
+        state.next_static2_round = t + sample_static2_gap()
+
     # optional residual background
     # 可先关闭；若开启，应保持远弱于 high batch 伴随项。
 ```
@@ -167,8 +182,9 @@ for each round t:
 
 - `B`：中心径向斜率第一版取 `0.065` 或沿用地图1/2 的 `0.06735`。
 - `A`：按地图或目标校准；地图1/2 约 `0.0596`，地图3 pooled 约 `0.0564`。
-- `p_static2_high_batch`：地图1/2 约 `0.0826`，地图3可见约 `0.0725`。
-- `static2_batch_total`：优先使用经验 categorical；地图1/2 mean 约 `88.26`，地图3可见 mean 约 `80.81`。
+- `static2_gap`：优先使用 observed high 的经验 categorical；三图主体为 `8..16`。粗仿真可先用 `UniformInteger(8, 16)`。
+- `static2_batch_total`：优先使用 full high 的经验 categorical；地图1/2 mean 约 `88.26`，地图3 full 口径 mean 约 `80.81`。
+- `static2_positive_cell_count`：完整可见地图1/2中约 `k=3: 1.4%`、`k=4: 22.4%`、`k=5: 76.2%`；选中子集存在格子级偏置，不能完全由中心/边缘距离解释。
 - `outer_static0_amount`：使用经验 categorical，均值约 `5.4`。
 
 后续如果要进一步提升精度，应优先补更完整的同局外围覆盖，而不是把当前单布局漏观测解释成机制变化。
