@@ -132,7 +132,8 @@ if Bernoulli(center_rate(row, col)):
 - 三张图均支持“同一 game-round 至多一个外围 region 触发 high batch”；地图3 observed 口径有 `4` 个同轮多 region 例外，数量很小。
 - high batch 不是每回合独立 Bernoulli；相邻 high batch 存在 `8` 回合最小间隔，主体间隔为 `8..16`。
 - 地图3 observed high rate 与地图1/2接近；原 full 口径偏低主要由 `static_map=2` 漏观察造成。
-- 第一版生成器应把 high batch 作为带间隔状态的外围主事件，再采样区域、batch total 与金额分配。
+- high batch 触发后，正增量作用于 high region 内未被玩家/NPC/炸弹占用的 `static_map=2` 候选格；完整可见样本中没有证据支持额外随机子集采样。
+- 第一版生成器应把 high batch 作为带间隔状态的外围主事件，再采样区域和 batch total，并按合法候选格均分金额。
 
 ## 外围普通格小额生成
 
@@ -193,18 +194,20 @@ for each round t:
     if t == state.next_static2_round:
         high_region = sample(config.static2_region_dist)
         total = sample(config.static2_total_dist)
-        k_static2 = sample(config.static2_positive_cell_count_dist)
-        static2_cells = sample_static2_cells(
-            high_region,
-            k_static2,
-            config.static2_cell_subset_mode,
-            config.static2_cell_subset_weights,
-        )
+        static2_cells = [
+            cell for cell in static2_cells_by_region[high_region]
+            if not occupied_by_player_or_npc(cell) and not blocked_by_bomb(cell)
+        ]
+        if not static2_cells:
+            state.next_static2_round = t + sample(config.static2_gap_dist)
+            continue
+
+        k_static2 = len(static2_cells)
         base = total // k_static2
         rem = total % k_static2
         for cell in static2_cells:
             add base
-        # remainder is uniformly assigned within selected static2 cells
+        # remainder is uniformly assigned within legal static2 cells
         for cell in sample_without_replacement(static2_cells, rem):
             add 1
 
@@ -226,13 +229,10 @@ for each round t:
 | --- | --- | --- | --- |
 | `center_A` | 中心区总体触发强度 | 地图1/2 约 `0.0596`，地图3 pooled 约 `0.0564` | 每局轻微扰动，例如围绕 fit 值做 `0.9..1.1` scale |
 | `center_B` | 中心区到中心平方距离衰减 | `0.065` 或地图1/2 `0.06735` | 小幅扰动，保持径向结构不变 |
-| `static2_first_round_dist` | 每局第一次 high batch 的回合 | 用 observed high 的首触发经验分布 | 随机初始相位，避免策略记死固定开局节奏 |
+| `static2_first_round_dist` | 每局第一次 high batch 的回合 | 按地图/布局使用 observed high 经验 categorical；当前支持 `8..14` | 在经验分布附近扰动；粗训练可用 `UniformInteger(8,14)`，不建议用 `0..16` |
 | `static2_gap_dist` | 相邻 high batch 间隔 | observed high 经验 categorical；主体 `8..16` | 在经验分布、`UniformInteger(8,16)`、轻微长尾版本间采样 |
 | `static2_region_dist` | high batch 触发的外围 region | 近似均匀，或按地图/布局经验权重 | 对 region 权重做 Dirichlet 扰动 |
 | `static2_total_dist` | full high batch total | full high 经验 categorical；地图1/2 mean 约 `88.26`，地图3 full 约 `80.81` | 经验分布加轻微 scale/shift，但保持离散峰值 |
-| `static2_positive_cell_count_dist` | high region 内被加钱的 static2 格数 | 完整可见地图1/2：`k=3:1.4%`、`k=4:22.4%`、`k=5:76.2%` | 在经验分布附近扰动；不建议改成逐格独立 Bernoulli |
-| `static2_cell_subset_mode` | 给定 region 和 k 后如何选 static2 子集 | `empirical_cell_weight`；简化版可用 `uniform_without_replacement` | 训练时混合经验权重与均匀抽样，提升鲁棒性 |
-| `static2_cell_subset_weights` | region / cell 级子集或遗漏权重 | 使用地图1/2完整可见样本估计；距离只作弱先验 | 每局对权重加平滑/扰动，避免过拟合单格偏置 |
 | `outer_static0_event_count_dist_given_high` | high batch 后其它外围 region 普通格事件数 | 经验分布，主体 `3..5` | 对事件数分布小幅扰动 |
 | `outer_static0_amount_dist` | 外围普通格触发后金额 | 经验 categorical，均值约 `5.4` | 在经验分布附近扰动；不建议用均匀 `1..11` 替代 |
 | `outer_static0_residual_rate` | 未观测 high 时的弱背景生成率 | 默认为 `0` 或极弱；地图3 no-high 残差也很小 | 可采样极弱背景率，但应远弱于 high batch 伴随项 |
@@ -246,15 +246,15 @@ for each round t:
 - 中心区触发后金额固定为 `UniformInteger(1, 11)`。
 - 初始金币先在固定 50 个中心格上各放 `1`，再额外执行一次中心小额生成 tick。
 - static2 high batch 使用状态化 gap 触发，不使用逐回合 Bernoulli。
-- static2 金额按 batch total 在选中格上近似均分。
-- static2 余数分配固定为在选中格内均匀随机分配。
+- static2 high batch 作用于 high region 内未被玩家/NPC/炸弹占用的 `static_map=2` 候选格；占用格不获得本次正增量。
+- static2 金额按 batch total 在合法候选格上近似均分。
+- static2 余数分配固定为在合法候选格内均匀随机分配。
 - 外围 static0 小额生成依附 static2 high batch。
 
 建议随机化的数值：
 
 - 中心区 `A/B`。
-- static2 首触发、gap、region 权重、batch total、positive cell count。
-- static2 子集选择权重。
+- static2 首触发、gap、region 权重、batch total。
 - outer static0 事件数、金额分布和极弱 residual 背景。
 
 RL 训练中 actor 不应看到 `GoldGenerationConfig` 的真实参数；这些属于 simulator privileged state。固定评估应包含 `fit` 配置和若干 holdout 随机化配置，分别衡量机制拟合表现和机制误差鲁棒性。

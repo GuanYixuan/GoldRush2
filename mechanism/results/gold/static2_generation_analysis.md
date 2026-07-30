@@ -75,6 +75,33 @@ is_full_high_batch_observed =
 
 地图3的 full batch total mean 仍低于地图1/2，主要可能来自地图3静态结构和单局 `static_map=2` 可见覆盖差异；触发机制结构本身没有变化。
 
+## 首次触发时间
+
+本文使用 `observed high` 口径统计每局第一次 static2 high batch。现有 `cell_transitions.csv` 不包含 `window=[0,4]` 的回合间 transition，但 400 局 snapshot 的首个窗口中外围 region 的 `gold_generated` 均为 `0`，官方 full replay 的 `window=[0,4]` 外围生成也为 `0`；因此当前数据支持首次 high batch 不早于 round `8`。
+
+按地图统计：
+
+| 数据 | games | min | max | mean | first round 分布 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 地图1 | `100` | `8` | `13` | `11.90` | `{8:10, 12:60, 13:30}` |
+| 地图2 | `100` | `8` | `14` | `11.60` | `{8:30, 11:10, 13:30, 14:30}` |
+| 地图3 pooled | `200` | `8` | `14` | `10.75` | `{8:44, 9:34, 10:50, 13:16, 14:56}` |
+| 全部 | `400` | `8` | `14` | `11.25` | `{8:84, 9:34, 10:50, 11:10, 12:60, 13:76, 14:86}` |
+
+地图3两批采集的首次触发分布差异明显：
+
+| run_id | games | first round 分布 |
+| --- | ---: | --- |
+| `symobs-m3a-map3-100-20260728-200953` | `100` | `{9:13, 10:15, 13:16, 14:56}` |
+| `symobs-m3b-map3-100-20260728-202647` | `100` | `{8:44, 9:21, 10:35}` |
+
+实现建议：
+
+- 不建议继续用 `0..16` 均匀 offset；该分布会产生大量当前未观测到的 `0..7` 首触发。
+- 对齐 replay 的 `fit` 配置应使用按地图/布局的经验 categorical。
+- 若暂时不区分地图/布局，粗略训练配置可用全局经验分布，或至少使用 `UniformInteger(8,14)` 而不是 `0..16`。
+- 首次触发分布与后续 gap 分布应分开建模：首次触发支持目前为 `8..14`，后续 gap 主体为 `8..16`。
+
 ## 触发间隔
 
 high batch 不是每回合独立 Bernoulli。按同一 game 内相邻 high batch 的 round gap 统计：
@@ -199,62 +226,58 @@ batch total 与 positive cell count 强相关：
 | 4 | `4593` | `91.55` | `64..112` |
 | 5 | `5141` | `95.33` | `80..112` |
 
-地图3的 `2/3` positive cell batch 更多，是其 batch total mean 较低的重要原因；这可能反映地图3 static2 几何/可见覆盖，而不是单格金额机制改变。
+低 positive cell count 样本的 total mean 明显偏低，主要来自候选格未完整暴露或被动态对象/炸弹遮挡的观测口径；不能直接解释为官方先随机采样了较小的 `k`。
 
-## 候选格选择与金额分配
+## 候选格占用与金额分配
 
-地图1/2 的漏观察较少，可用 `visible_static2_cells=5` 的 full high batch 分析 high region 内 5 个 `static_map=2` 候选格的选择过程。
+占用回查由 `mechanism/scripts/analysis/analyze_static2_occupancy.py` 完成。该脚本把每个 observed high batch 回到 merged replay 中，统计 high region 的全部 `static_map=2` 候选格、当前回合 start 的玩家/NPC占用格、炸弹格、以及正增量格。
 
-在该干净口径下，positive cell count 分布为：
-
-| 数据 | batches | k=3 | k=4 | k=5 |
-| --- | ---: | ---: | ---: | ---: |
-| 地图1 | `2158` | `38` | `546` | `1574` |
-| 地图2 | `2202` | `23` | `432` | `1747` |
-| 地图1/2 combined | `4360` | `1.4%` | `22.4%` | `76.2%` |
-
-这说明 high batch 不是“5 个 static2 格各自独立触发”。更像是一次 batch 先决定覆盖格数 `k`，其中多数覆盖全部 5 格，少数覆盖 4 格，极少覆盖 3 格。
-
-`k=4` 时等价于“5 个候选格中漏掉 1 个”。实测遗漏格不是完全均匀：
-
-| 数据 | region | 最高遗漏格 | 遗漏次数 | 最低遗漏格 | 遗漏次数 |
-| --- | ---: | --- | ---: | --- | ---: |
-| 地图1 | 2 | `(1,6)` | `70` | `(0,12)` | `9` |
-| 地图1 | 4 | `(15,6)` | `94` | `(15,10)` | `25` |
-| 地图2 | 2 | `(0,8)` | `45` | `(1,12)` | `26` |
-| 地图2 | 3 | `(9,1)` | `37` | `(5,0)` | `12` |
-
-遗漏率与距离存在弱到中等关系，但不足以完全解释：
-
-| 特征 | 与遗漏率相关 |
-| --- | ---: |
-| 到中心平方欧氏距离 | `-0.459` |
-| 到中心曼哈顿距离 | `-0.529` |
-| 到中心切比雪夫距离 | `-0.328` |
-| 到边缘距离 | `+0.328` |
-
-方向上，越靠中心的 static2 格越容易被漏掉，越贴边的格越不容易被漏掉。但同距离格仍有明显差异，例如地图1 region 2 的 `(1,6)` 与 `(1,10)` 距离特征相同，遗漏率分别为 `0.479` 和 `0.137`。因此不建议只用中心距离或边缘距离替代格子级经验权重。
-
-金额分配过程更清晰：同一个 full high batch 内，各正增量格子的金额差几乎总是 `0` 或 `1`。因此它更像是先采样 batch total `T`，再把 `T` 均分到选中的 `k` 个格：
+默认输出：
 
 ```text
+mechanism/data/processed/static2_occupancy_analysis/maps123_static2_occupancy/
+```
+
+全量 1/2/3 observed high batch 中，正增量从未落在被占用候选格上：
+
+| 口径 | batches | 有 blocked 候选 | positive on blocked | positive cells > legal candidates |
+| --- | ---: | ---: | ---: | ---: |
+| all observed high | `16360` | `8108` | `0` | `0` |
+| all full high | `15326` | `7086` | `0` | `0` |
+
+在全部候选格干净可见、且没有炸弹遮挡的 full high 样本中，positive cell count 精确等于未被玩家/NPC占用的合法候选数：
+
+| 口径 | blocked candidates | batches | positive cell count | mean total |
+| --- | ---: | ---: | --- | ---: |
+| 地图1/2 full high，5候选全可见 | 0 | `3321` | `{5:3321}` | `95.25` |
+| 地图1/2 full high，5候选全可见 | 1 | `978` | `{4:978}` | `95.04` |
+| 地图1/2 full high，5候选全可见 | 2 | `61` | `{3:61}` | `93.66` |
+| 1/2/3 full high，候选全可见 | 0 | `5141` | `{5:5141}` | `95.33` |
+| 1/2/3 full high，候选全可见 | 1 | `2071` | `{4:2071}` | `95.18` |
+| 1/2/3 full high，候选全可见 | 2 | `116` | `{3:116}` | `94.31` |
+| 1/2/3 full high，候选全可见 | 3 | `3` | `{2:3}` | `95.33` |
+
+因此当前数据更支持：
+
+- high batch 选中一个外围 region 后，尝试作用于该 region 内全部 `static_map=2` 候选格。
+- 被玩家/NPC占用的候选格不会获得本次正增量；炸弹格在 clean-visible 口径下不可直接验证，但全量统计同样没有观测到正增量落在炸弹格。
+- 官方没有延后整个 high batch：存在 blocked candidate 时同回合仍在其它合法候选格生成。
+- 当前样本没有出现所有候选格都被占用的极端情况；若模拟器遇到 `legal_candidates=0`，第一版可直接跳过本次 static2 金币分配并继续推进下一次 gap。
+
+金额分配过程更清晰：同一个 full high batch 内，各正增量格子的金额差几乎总是 `0` 或 `1`。因此它更像是先采样 batch total `T`，再把 `T` 均分到合法候选格：
+
+```text
+k = len(legal_static2_cells)
 base = T // k
 rem = T % k
 
-for cell in selected_cells:
+for cell in legal_static2_cells:
     add base
-for cell in sample_without_replacement(selected_cells, rem):
+for cell in sample_without_replacement(legal_static2_cells, rem):
     add 1
 ```
 
-完整 5 候选格样本中，`T` 主要在 `80..112`，且 `80..95` 与 `96..112` 两个区间的 `k` 分布几乎一致：
-
-| T 区间 | batches | k=3 | k=4 | k=5 |
-| --- | ---: | ---: | ---: | ---: |
-| `80..95` | `2176` | `1.5%` | `22.5%` | `76.0%` |
-| `96..112` | `2184` | `1.3%` | `22.4%` | `76.3%` |
-
-第一版建议把 `T` 与 `k` 近似独立采样，但格子子集选择保留按 region / cell 的经验权重；若要进一步简化，可先用 `sample_without_replacement(candidates, k)`，但这会丢掉已观测到的格子级偏置。
+完整可见 full high 样本中，`T` 主要在 `80..112`，且 blocked candidates 为 `0/1/2` 时 mean total 分别约 `95.33/95.18/94.31`，说明 `T` 与动态占用基本无关；占用主要改变分母 `k`，从而提高剩余合法格的单格金额。
 
 ## 单格金额
 
@@ -282,7 +305,7 @@ high batch 内 `static_map=2` 正增量单格金额主体落在 `16..28`，但�
 | `29..37` | `6.35%` |
 | `>=38` | `0.66%` |
 
-不建议把 high batch 简单建成“独立采样若干单格金额再相加”。更稳定的结构是先采样 batch total 或 positive cell count，再分配到 region 内 `static_map=2` 格。
+不建议把 high batch 简单建成“独立采样若干单格金额再相加”。更稳定的结构是先采样 batch total，再分配到 high region 内未被动态对象占用的 `static_map=2` 合法格。
 
 ## Non-high static2 正事件
 
@@ -319,9 +342,15 @@ for each round t:
 
     high_region = sample_outer_region()
     total = sample_empirical_static2_batch_total(map_id)
-    k = sample_empirical_static2_positive_cell_count(map_id)
-    cells = sample_static2_cells_by_region_weight(high_region, k)
+    cells = [
+        cell for cell in static2_cells[high_region]
+        if not occupied_by_player_or_npc(cell) and not blocked_by_bomb(cell)
+    ]
+    if not cells:
+        state.next_static2_round = t + sample_empirical_static2_gap(map_id)
+        continue
 
+    k = len(cells)
     base = total // k
     rem = total % k
     for cell in cells:
@@ -338,16 +367,15 @@ for each round t:
 gap ~ UniformInteger(8, 16)
 region ~ near-uniform over outer regions
 total ~ empirical_static2_batch_total
-k ~ EmpiricalCategorical({3: 0.014, 4: 0.224, 5: 0.762})
-selected_cells ~ sample_without_replacement(static2_cells[region], k)
-split total nearly evenly over selected_cells
+cells = unoccupied static2 cells in high region
+split total nearly evenly over cells
 ```
 
 关键点：
 
 1. 不要把 high batch 触发写成每回合独立 Bernoulli；相邻 high batch 存在 `8` 回合最小间隔，主体为 `8..16`。
 2. 同一回合同一时间只触发一个外围 region。
-3. high region 内 static2 候选格多数全覆盖，少数覆盖 4 格，极少覆盖 3 格；子集选择存在格子级偏置。
-4. static2 金额不是单格独立采样，而是 batch total 在选中格上近似均分。
+3. high region 内 static2 候选格在未被玩家/NPC占用时全覆盖；占用格不获得本次正增量。
+4. static2 金额不是单格独立采样，而是 batch total 在合法候选格上近似均分。
 5. high batch 所在 region 的普通格近似不生成，小额普通格生成发生在其它外围 region。
 6. 地图3 batch total 较低和 non-high 中等片段较多，应优先解释为地图结构/可见覆盖差异，后续可按地图单独校准参数。
