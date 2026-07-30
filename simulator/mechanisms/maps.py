@@ -1,0 +1,369 @@
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from typing import Sequence
+
+from ..constants import GRID_SIZE, MAX_NPCS, STATIC_EMPTY, STATIC_OBSTACLE, STATIC_SPECIAL_NON_BLOCKING
+from ..errors import SimulatorRuleError
+from ..state import GameState, NpcState, PlayerState, UnitState
+from ..types import Position
+
+StaticGrid = tuple[tuple[int, ...], ...]
+
+
+@dataclass(frozen=True)
+class MapTemplate:
+    map_id: int
+    name: str
+    static_grid: StaticGrid
+    obstacles: frozenset[Position]
+    special_cells: frozenset[Position]
+
+    @staticmethod
+    def from_static_grid(map_id: int, name: str, static_grid: Sequence[Sequence[int]]) -> MapTemplate:
+        grid = _normalize_static_grid(static_grid)
+        obstacles = frozenset(Position(row, col) for row in range(GRID_SIZE) for col in range(GRID_SIZE) if grid[row][col] == STATIC_OBSTACLE)
+        special_cells = frozenset(
+            Position(row, col) for row in range(GRID_SIZE) for col in range(GRID_SIZE) if grid[row][col] == STATIC_SPECIAL_NON_BLOCKING
+        )
+        return MapTemplate(map_id=map_id, name=name, static_grid=grid, obstacles=obstacles, special_cells=special_cells)
+
+    def __post_init__(self) -> None:
+        grid = _normalize_static_grid(self.static_grid)
+        expected_obstacles = frozenset(
+            Position(row, col) for row in range(GRID_SIZE) for col in range(GRID_SIZE) if grid[row][col] == STATIC_OBSTACLE
+        )
+        expected_special = frozenset(
+            Position(row, col) for row in range(GRID_SIZE) for col in range(GRID_SIZE) if grid[row][col] == STATIC_SPECIAL_NON_BLOCKING
+        )
+        if self.obstacles != expected_obstacles:
+            raise SimulatorRuleError(f"map {self.map_id} obstacle set does not match static_grid")
+        if self.special_cells != expected_special:
+            raise SimulatorRuleError(f"map {self.map_id} special cell set does not match static_grid")
+
+
+@dataclass(frozen=True)
+class SpawnConfig:
+    p1_units: tuple[Position, Position] = (Position(0, 0), Position(16, 16))
+    p2_units: tuple[Position, Position] = (Position(0, 16), Position(16, 0))
+    npc_ids: tuple[int, ...] = tuple(range(-1, -MAX_NPCS - 1, -1))
+    npc_position: Position = Position(8, 8)
+
+    def __post_init__(self) -> None:
+        player_positions = self.p1_units + self.p2_units
+        if len(set(player_positions)) != len(player_positions):
+            raise SimulatorRuleError("player spawn positions must be unique")
+        for pos in player_positions + (self.npc_position,):
+            if not pos.in_bounds():
+                raise SimulatorRuleError(f"spawn position out of bounds: {pos}")
+        if len(set(self.npc_ids)) != len(self.npc_ids):
+            raise SimulatorRuleError(f"NPC ids must be unique: {self.npc_ids}")
+
+
+@dataclass(frozen=True)
+class MapPool:
+    templates: tuple[MapTemplate, ...]
+
+    def __post_init__(self) -> None:
+        if not self.templates:
+            raise SimulatorRuleError("map pool cannot be empty")
+        ids = [template.map_id for template in self.templates]
+        if len(set(ids)) != len(ids):
+            raise SimulatorRuleError(f"map ids must be unique: {ids}")
+
+    def sample(self, rng: random.Random) -> MapTemplate:
+        return self.templates[rng.randrange(len(self.templates))]
+
+    def get(self, map_id: int) -> MapTemplate:
+        for template in self.templates:
+            if template.map_id == map_id:
+                return template
+        raise KeyError(f"unknown map_id: {map_id}")
+
+
+def build_initial_state(template: MapTemplate, spawn: SpawnConfig | None = None) -> GameState:
+    spawn = SpawnConfig() if spawn is None else spawn
+    _validate_spawn_against_map(template, spawn)
+    return GameState(
+        round_index=0,
+        players={
+            1: PlayerState(1, [UnitState(0, spawn.p1_units[0]), UnitState(1, spawn.p1_units[1])]),
+            2: PlayerState(2, [UnitState(0, spawn.p2_units[0]), UnitState(1, spawn.p2_units[1])]),
+        },
+        obstacles=template.obstacles,
+        npcs={npc_id: NpcState(npc_id, spawn.npc_position) for npc_id in spawn.npc_ids},
+    )
+
+
+def built_in_public_map_pool() -> MapPool:
+    return MapPool(
+        templates=(
+            _template_from_cells(1, "official_map_1", _MAP1_OBSTACLES, _MAP1_SPECIAL),
+            _template_from_cells(2, "official_map_2", _MAP2_OBSTACLES, _MAP2_SPECIAL),
+            _template_from_cells(3, "official_map_3", _MAP3_OBSTACLES, _MAP3_SPECIAL),
+        )
+    )
+
+
+def _validate_spawn_against_map(template: MapTemplate, spawn: SpawnConfig) -> None:
+    for pos in spawn.p1_units + spawn.p2_units + (spawn.npc_position,):
+        if pos in template.obstacles:
+            raise SimulatorRuleError(f"spawn position overlaps obstacle on map {template.map_id}: {pos}")
+
+
+def _template_from_cells(
+    map_id: int,
+    name: str,
+    obstacle_coords: tuple[tuple[int, int], ...],
+    special_coords: tuple[tuple[int, int], ...],
+) -> MapTemplate:
+    overlap = set(obstacle_coords) & set(special_coords)
+    if overlap:
+        raise SimulatorRuleError(f"map {map_id} obstacle/special overlap: {sorted(overlap)}")
+
+    grid = [[STATIC_EMPTY for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
+    for row, col in obstacle_coords:
+        grid[row][col] = STATIC_OBSTACLE
+    for row, col in special_coords:
+        grid[row][col] = STATIC_SPECIAL_NON_BLOCKING
+    return MapTemplate.from_static_grid(map_id, name, grid)
+
+
+def _normalize_static_grid(static_grid: Sequence[Sequence[int]]) -> StaticGrid:
+    if len(static_grid) != GRID_SIZE:
+        raise SimulatorRuleError(f"static grid must have {GRID_SIZE} rows")
+    rows = []
+    for row_index, row in enumerate(static_grid):
+        if len(row) != GRID_SIZE:
+            raise SimulatorRuleError(f"static grid row {row_index} must have {GRID_SIZE} columns")
+        values = tuple(int(value) for value in row)
+        invalid = [value for value in values if value not in (STATIC_EMPTY, STATIC_OBSTACLE, STATIC_SPECIAL_NON_BLOCKING)]
+        if invalid:
+            raise SimulatorRuleError(f"static grid row {row_index} has invalid values: {invalid}")
+        rows.append(values)
+    return tuple(rows)
+
+
+_MAP1_OBSTACLES = (
+    (0, 3),
+    (0, 13),
+    (2, 1),
+    (2, 2),
+    (2, 14),
+    (2, 15),
+    (3, 0),
+    (3, 3),
+    (3, 13),
+    (3, 16),
+    (4, 4),
+    (4, 12),
+    (5, 5),
+    (5, 11),
+    (6, 3),
+    (6, 13),
+    (7, 7),
+    (7, 9),
+    (8, 4),
+    (8, 6),
+    (8, 10),
+    (8, 12),
+    (9, 7),
+    (9, 9),
+    (10, 3),
+    (10, 13),
+    (11, 5),
+    (11, 11),
+    (12, 4),
+    (12, 12),
+    (13, 0),
+    (13, 3),
+    (13, 13),
+    (13, 16),
+    (14, 1),
+    (14, 2),
+    (14, 14),
+    (14, 15),
+    (16, 3),
+    (16, 13),
+)
+
+_MAP1_SPECIAL = (
+    (0, 4),
+    (0, 5),
+    (0, 12),
+    (1, 6),
+    (1, 10),
+    (5, 0),
+    (5, 16),
+    (7, 1),
+    (7, 15),
+    (9, 2),
+    (9, 14),
+    (11, 0),
+    (11, 16),
+    (12, 3),
+    (12, 13),
+    (15, 6),
+    (15, 10),
+    (16, 4),
+    (16, 5),
+    (16, 12),
+)
+
+_MAP2_OBSTACLES = (
+    (2, 2),
+    (2, 6),
+    (2, 10),
+    (2, 14),
+    (4, 4),
+    (4, 8),
+    (4, 12),
+    (6, 2),
+    (6, 6),
+    (6, 10),
+    (6, 14),
+    (8, 4),
+    (8, 12),
+    (10, 2),
+    (10, 6),
+    (10, 10),
+    (10, 14),
+    (12, 4),
+    (12, 8),
+    (12, 12),
+    (14, 2),
+    (14, 6),
+    (14, 10),
+    (14, 14),
+)
+
+_MAP2_SPECIAL = (
+    (0, 4),
+    (0, 8),
+    (1, 6),
+    (1, 12),
+    (3, 10),
+    (5, 0),
+    (5, 16),
+    (7, 2),
+    (7, 14),
+    (9, 1),
+    (9, 15),
+    (11, 3),
+    (11, 13),
+    (12, 0),
+    (12, 16),
+    (13, 10),
+    (15, 6),
+    (15, 12),
+    (16, 4),
+    (16, 8),
+)
+
+_MAP3_OBSTACLES = (
+    (2, 2),
+    (2, 3),
+    (2, 4),
+    (2, 12),
+    (2, 13),
+    (2, 14),
+    (3, 2),
+    (3, 3),
+    (3, 4),
+    (3, 12),
+    (3, 13),
+    (3, 14),
+    (4, 4),
+    (4, 5),
+    (4, 6),
+    (4, 7),
+    (4, 9),
+    (4, 10),
+    (4, 11),
+    (4, 12),
+    (5, 4),
+    (5, 5),
+    (5, 6),
+    (5, 7),
+    (5, 9),
+    (5, 10),
+    (5, 11),
+    (5, 12),
+    (6, 4),
+    (6, 5),
+    (6, 6),
+    (6, 7),
+    (6, 9),
+    (6, 10),
+    (6, 11),
+    (6, 12),
+    (8, 4),
+    (8, 5),
+    (8, 6),
+    (8, 10),
+    (8, 11),
+    (8, 12),
+    (10, 4),
+    (10, 5),
+    (10, 6),
+    (10, 7),
+    (10, 9),
+    (10, 10),
+    (10, 11),
+    (10, 12),
+    (11, 4),
+    (11, 5),
+    (11, 6),
+    (11, 7),
+    (11, 9),
+    (11, 10),
+    (11, 11),
+    (11, 12),
+    (12, 4),
+    (12, 5),
+    (12, 6),
+    (12, 7),
+    (12, 9),
+    (12, 10),
+    (12, 11),
+    (12, 12),
+    (13, 2),
+    (13, 3),
+    (13, 4),
+    (13, 12),
+    (13, 13),
+    (13, 14),
+    (14, 2),
+    (14, 3),
+    (14, 4),
+    (14, 12),
+    (14, 13),
+    (14, 14),
+)
+
+_MAP3_SPECIAL = (
+    (0, 6),
+    (0, 7),
+    (0, 8),
+    (0, 9),
+    (0, 10),
+    (6, 0),
+    (6, 16),
+    (7, 0),
+    (7, 16),
+    (8, 0),
+    (8, 16),
+    (9, 0),
+    (9, 16),
+    (10, 0),
+    (10, 16),
+    (16, 6),
+    (16, 7),
+    (16, 8),
+    (16, 9),
+    (16, 10),
+)
+
+
+__all__ = ["MapPool", "MapTemplate", "SpawnConfig", "build_initial_state", "built_in_public_map_pool"]

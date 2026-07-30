@@ -13,13 +13,9 @@ def apply_player_turn(state: GameState, player_id: int, output: GameOutput) -> l
     if player_id not in state.players:
         raise ValueError(f"unknown player id: {player_id}")
 
-    unit_actions = _split_unit_actions(output)
-    unit_order = (0, 1) if output.order == 0 else (1, 0)
-
     events: list[MovementEvent] = []
-    for unit_id in unit_order:
-        for action in unit_actions[unit_id]:
-            events.append(apply_player_step(state, player_id, unit_id, action))
+    for unit_id, action in iter_player_steps(output):
+        events.append(apply_player_step(state, player_id, unit_id, action))
     return events
 
 
@@ -126,6 +122,12 @@ def apply_npc_step(state: GameState, npc_id: int, action: int | Action) -> Movem
         to_pos=to_pos,
         status=MoveStatus.MOVED,
     )
+
+
+def iter_player_steps(output: GameOutput) -> tuple[tuple[int, Action], ...]:
+    unit_actions = _split_unit_actions(output)
+    unit_order = (0, 1) if output.order == 0 else (1, 0)
+    return tuple((unit_id, action) for unit_id in unit_order for action in unit_actions[unit_id])
 
 
 def _split_unit_actions(output: GameOutput) -> dict[int, tuple[Action, ...]]:
