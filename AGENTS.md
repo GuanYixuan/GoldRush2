@@ -34,6 +34,8 @@
 - 关于从评测平台上下载的日志/对局回放格式，请参考`gamerules/replay.md`
     - 评测平台下载的对局回放都是“基于玩家视角的”，更多例子可参见官方给出的 `official_sdk/data/user`
     - `official_sdk/data/full`中的是一些一般无法得到的“上帝视角”回放
+    - `mechanism/data/processed/merged_replays`下有大量通过双玩家视角合并得到的回放，其视野较大，适合游戏规则/机理分析。
+        - 其格式参见`docs/merged_replay_schema.md`
 
 ## 代码编写原则
 - Fail-fast 暴露问题优先，减少隐式回退。
