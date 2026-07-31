@@ -1,0 +1,160 @@
+from __future__ import annotations
+
+import unittest
+from dataclasses import dataclass
+
+from simulator.config import EpisodeConfig, RulesConfig
+from simulator.envs.round_step import RoundStepConfig, RoundStepEnv, RoundStepMechanisms
+from simulator.mechanisms.bombs import BernoulliBombRefresher, BombConfig
+from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, OuterGoldConfig, OuterGoldGenerator
+from simulator.mechanisms.maps import SpawnConfig
+from simulator.types import Action, GameOutput, GoldGenerationEvent, Position
+
+
+class RoundStepEnvTests(unittest.TestCase):
+    def test_reset_returns_action_time_observations_after_resource_generation(self) -> None:
+        mechanisms = _quiet_mechanisms()
+        mechanisms.center_gold = _FixedGoldGenerator(
+            (
+                GoldGenerationEvent(Position(0, 1), 5),
+                GoldGenerationEvent(Position(0, 15), 6),
+            )
+        )
+        env = RoundStepEnv(
+            config=RoundStepConfig(_one_round_episode()),
+            mechanisms=mechanisms,
+            spawn=SpawnConfig(npc_ids=()),
+        )
+
+        observations = env.reset()
+
+        self.assertEqual(observations[1].round, 0)
+        self.assertEqual(observations[1].grid[0][1], 5)
+        self.assertEqual(observations[2].grid[0][15], 6)
+
+    def test_step_uses_explicit_first_player_id_and_player_outputs(self) -> None:
+        env = RoundStepEnv(
+            config=RoundStepConfig(_one_round_episode()),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+            p90_latency_ns={1: 1, 2: 2},
+        )
+        env.reset()
+
+        result = env.step(
+            {
+                1: _sequence_output(Action.RIGHT),
+                2: _stay_output(),
+            },
+            first_player_id=2,
+        )
+
+        self.assertTrue(result.terminated)
+        self.assertEqual(result.trace.first_player_id, 2)
+        self.assertEqual(result.trace.transition_result.dispatch_order, (2, 1))
+        self.assertEqual(result.state.player_unit(1, 0).position, Position(0, 1))
+        self.assertEqual(result.observations, {})
+        self.assertEqual(result.game_result.winner_id, 1)
+
+    def test_step_returns_next_round_observations_when_not_terminated(self) -> None:
+        env = RoundStepEnv(
+            config=RoundStepConfig(EpisodeConfig(rules=RulesConfig(round_count=2, snapshot_period=1), seed=7, map_id=1)),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+            p90_latency_ns={1: 1, 2: 2},
+        )
+        env.reset()
+
+        result = env.step({1: _stay_output(), 2: _stay_output()}, first_player_id=1)
+
+        self.assertFalse(result.terminated)
+        self.assertEqual(result.observations[1].round, 1)
+        self.assertTrue(result.observations[1].snapshot_valid)
+        self.assertIsNone(result.game_result)
+
+    def test_replay_records_rounds_without_policy_or_reward_fields(self) -> None:
+        env = RoundStepEnv(
+            config=RoundStepConfig(EpisodeConfig(rules=RulesConfig(round_count=2), seed=7, map_id=1)),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+            record_replay=True,
+            p90_latency_ns={1: 1, 2: 2},
+        )
+        env.reset()
+
+        first = env.step({1: _stay_output(), 2: _stay_output()}, first_player_id=1)
+        second = env.step({1: _stay_output(), 2: _stay_output()}, first_player_id=2)
+
+        self.assertEqual(len(first.replay["rounds"]), 1)
+        self.assertEqual(len(second.replay["rounds"]), 2)
+        self.assertNotIn("reward", second.replay["rounds"][0])
+        self.assertEqual(second.replay["rounds"][1]["events"]["dispatch_order"], [2, 1])
+
+    def test_terminal_tie_without_latency_leaves_game_result_unset(self) -> None:
+        env = RoundStepEnv(
+            config=RoundStepConfig(_one_round_episode()),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+        )
+        env.reset()
+
+        result = env.step({1: _stay_output(), 2: _stay_output()}, first_player_id=1)
+
+        self.assertTrue(result.terminated)
+        self.assertIsNone(result.game_result)
+
+    def test_step_before_reset_fails_fast(self) -> None:
+        env = RoundStepEnv(config=RoundStepConfig(_one_round_episode()), mechanisms=_quiet_mechanisms())
+
+        with self.assertRaisesRegex(Exception, "not reset"):
+            env.step({1: _stay_output(), 2: _stay_output()}, first_player_id=1)
+
+    def test_minimal_round_step_can_run_500_rounds(self) -> None:
+        env = RoundStepEnv(
+            config=RoundStepConfig(EpisodeConfig(rules=RulesConfig(round_count=500), seed=1, map_id=1)),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+            p90_latency_ns={1: 1, 2: 2},
+        )
+        observations = env.reset()
+
+        last = None
+        while observations:
+            last = env.step({1: _stay_output(), 2: _stay_output()}, first_player_id=1)
+            observations = last.observations
+
+        assert last is not None
+        self.assertEqual(last.state.round_index, 500)
+        self.assertTrue(last.terminated)
+
+
+def _one_round_episode() -> EpisodeConfig:
+    return EpisodeConfig(rules=RulesConfig(round_count=1, snapshot_period=1), seed=7, map_id=1)
+
+
+def _quiet_mechanisms() -> RoundStepMechanisms:
+    return RoundStepMechanisms(
+        center_gold=CenterGoldGenerator(CenterGoldConfig(center_a=0.0)),
+        outer_gold=OuterGoldGenerator(OuterGoldConfig(first_round_offset_weights=((999, 1),))),
+        bomb_refresher=BernoulliBombRefresher(BombConfig(0.0)),
+    )
+
+
+def _stay_output() -> GameOutput:
+    return GameOutput(actions=(Action.STAY,) * 6, k=3, order=0, vp=0)
+
+
+def _sequence_output(first_action: Action) -> tuple[int, ...]:
+    return (int(first_action), int(Action.STAY), int(Action.STAY), int(Action.STAY), int(Action.STAY), int(Action.STAY), 1, 0, 0)
+
+
+@dataclass
+class _FixedGoldGenerator:
+    events: tuple[GoldGenerationEvent, ...]
+
+    def generate(self, *_args) -> tuple[GoldGenerationEvent, ...]:
+        return self.events
+
+
+if __name__ == "__main__":
+    unittest.main()

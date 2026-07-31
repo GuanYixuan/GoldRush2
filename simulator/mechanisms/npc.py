@@ -11,6 +11,7 @@ from ..types import Action, Position
 from .maps import MapTemplate, StaticGrid
 
 NPC_PATH_LENGTH = 3
+NPC_CENTER = Position(8, 8)
 OPPOSITE_ACTIONS = {
     Action.UP: Action.DOWN,
     Action.DOWN: Action.UP,
@@ -27,12 +28,13 @@ class NpcPath:
 
 @dataclass(frozen=True)
 class M4aWeights:
-    gold: float = 2.073989
-    enter_bomb: float = -2.795283
-    stay: float = -3.120374
-    straight3: float = 1.183404
-    backtrack: float = -0.562663
-    bomb_trapped_stay: float = 10.776788
+    gold: float = 2.106687
+    enter_bomb: float = -2.796592
+    stay: float = -3.126171
+    straight3: float = 1.212827
+    backtrack: float = -0.580930
+    bomb_trapped_stay: float = 10.882944
+    center: float = 0.180587
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,7 @@ class M4aNpcPolicy:
                 straight3=weights.straight3 + rng.uniform(-0.8, 0.8),
                 backtrack=weights.backtrack + rng.uniform(-0.5, 0.5),
                 bomb_trapped_stay=weights.bomb_trapped_stay + rng.uniform(-3.0, 3.0),
+                center=weights.center + rng.uniform(-0.14, 0.14),
             )
             temperature *= _log_uniform(rng, 0.7, 1.5)
             bomb_blind_p = rng.uniform(0.0, 0.15)
@@ -189,6 +192,7 @@ def score_path(
         + weights.straight3 * features["straight3"]
         + weights.backtrack * features["backtrack"]
         + weights.bomb_trapped_stay * features["bomb_trapped_stay"]
+        + weights.center * features["center_delta_chebyshev"]
     )
 
 
@@ -221,6 +225,7 @@ def path_features(state: GameState, start: Position, path: NpcPath, *, bombs_vis
         "straight3": float(_is_straight3(path.actions)),
         "backtrack": float(_has_backtrack(path.actions)),
         "bomb_trapped_stay": float(bombs_visible and _is_bomb_trapped_stay(state, start, path)),
+        "center_delta_chebyshev": float(_center_chebyshev(start) - _center_chebyshev(path.positions[-1])),
     }
 
 
@@ -277,6 +282,10 @@ def _is_bomb_trapped_stay(state: GameState, start: Position, path: NpcPath) -> b
     return bool(legal_neighbors) and all(position in state.bombs for position in legal_neighbors)
 
 
+def _center_chebyshev(position: Position) -> int:
+    return max(abs(position.row - NPC_CENTER.row), abs(position.col - NPC_CENTER.col))
+
+
 def _log_uniform(rng: random.Random, low: float, high: float) -> float:
     if low <= 0.0 or high <= low:
         raise SimulatorRuleError(f"invalid log-uniform bounds: low={low}, high={high}")
@@ -292,6 +301,7 @@ def _jitter_profile(weights: M4aWeights, temperature: float, scale: float, rng: 
             straight3=weights.straight3 + rng.gauss(0.0, 0.1 * scale * abs(weights.straight3)),
             backtrack=weights.backtrack + rng.gauss(0.0, 0.1 * scale * abs(weights.backtrack)),
             bomb_trapped_stay=weights.bomb_trapped_stay + rng.gauss(0.0, 0.1 * scale * abs(weights.bomb_trapped_stay)),
+            center=weights.center + rng.gauss(0.0, 0.1 * scale * abs(weights.center)),
         ),
         temperature * _log_uniform(rng, 0.9, 1.1),
     )

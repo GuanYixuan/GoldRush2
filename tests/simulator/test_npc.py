@@ -13,6 +13,7 @@ from simulator.mechanisms.npc import (
     NpcPolicyConfig,
     enumerate_legal_paths,
     path_features,
+    score_path,
 )
 from simulator.state import GameState, NpcState, PlayerState, UnitState
 from simulator.types import Action, Position
@@ -47,8 +48,52 @@ class NpcPolicyTests(unittest.TestCase):
         self.assertEqual(features["dynamic_reward_div10"], 0.9)
         self.assertEqual(features["enter_bomb_count"], 1.0)
         self.assertEqual(features["backtrack"], 1.0)
+        self.assertEqual(features["center_delta_chebyshev"], 0.0)
         self.assertEqual(state.gold[Position(1, 2)], 10)
         self.assertEqual(state.bombs, {Position(1, 2)})
+
+    def test_path_features_include_center_delta_chebyshev(self) -> None:
+        state = _state(npcs={-1: Position(8, 5)})
+        center_path = NpcPath(
+            actions=(Action.RIGHT, Action.RIGHT, Action.RIGHT),
+            positions=(Position(8, 6), Position(8, 7), Position(8, 8)),
+        )
+        away_path = NpcPath(
+            actions=(Action.LEFT, Action.LEFT, Action.LEFT),
+            positions=(Position(8, 4), Position(8, 3), Position(8, 2)),
+        )
+
+        self.assertEqual(path_features(state, Position(8, 5), center_path)["center_delta_chebyshev"], 3.0)
+        self.assertEqual(path_features(state, Position(8, 5), away_path)["center_delta_chebyshev"], -3.0)
+
+    def test_score_path_uses_center_weight(self) -> None:
+        state = _state(npcs={-1: Position(8, 5)})
+        path = NpcPath(
+            actions=(Action.RIGHT, Action.RIGHT, Action.RIGHT),
+            positions=(Position(8, 6), Position(8, 7), Position(8, 8)),
+        )
+        weights = M4aWeights(
+            gold=0.0,
+            enter_bomb=0.0,
+            stay=0.0,
+            straight3=0.0,
+            backtrack=0.0,
+            bomb_trapped_stay=0.0,
+            center=2.0,
+        )
+
+        self.assertEqual(score_path(state, Position(8, 5), path, weights), 6.0)
+
+    def test_default_weights_match_m4a_center_profile(self) -> None:
+        weights = M4aWeights()
+
+        self.assertAlmostEqual(weights.gold, 2.106687)
+        self.assertAlmostEqual(weights.enter_bomb, -2.796592)
+        self.assertAlmostEqual(weights.stay, -3.126171)
+        self.assertAlmostEqual(weights.straight3, 1.212827)
+        self.assertAlmostEqual(weights.backtrack, -0.580930)
+        self.assertAlmostEqual(weights.bomb_trapped_stay, 10.882944)
+        self.assertAlmostEqual(weights.center, 0.180587)
 
     def test_stay_does_not_pick_up_gold_underfoot(self) -> None:
         state = _state(npcs={-1: Position(1, 1)}, gold={Position(1, 1): 10})

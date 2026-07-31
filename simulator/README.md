@@ -1,13 +1,13 @@
 # GoldRush2 本地模拟器
 
-`simulator/` 是 GoldRush2.0 的本地游戏环境包，服务于规则单测、replay 对齐、策略调试和后续 RL 训练。实现时以 `gamerules/gamerules.md` 为规则事实来源；官方未公开的机制必须放在可替换的近似模型中，不得写死成确定规则。
+`simulator/` 是 GoldRush2.0 的本地游戏环境包，服务于规则单测、replay 对齐、策略调试和后续训练实验。实现时以 `gamerules/gamerules.md` 为规则事实来源；官方未公开的机制必须放在可替换的近似模型中，不得写死成确定规则。
 
 ## 设计目标
 
 - 复刻已确认的官方规则层：移动、碰撞、拾取、炸弹、踩踏、视野、快照、胜负结算。
 - 隔离未公开机制层：金币生成、炸弹刷新、NPC 策略、地图/障碍采样。
 - 生成贴近官方 SDK 的 `GameInput` / `GameOutput`，便于本地策略调试。
-- 为 RL 主链路提供稳定环境接口，支持快速 opponent 先手、NPC 居中、agent 后手的训练分布。
+- 为上层训练/实验系统提供稳定 round-step 接口；先后手、策略调用和训练目标由上层决定。
 - 输出结构化事件，方便单测、replay 对齐和可视化排查。
 - 导出 simulator 专用上帝视角 replay，便于本地整局复盘、训练失败分析和机制调参。
 
@@ -57,7 +57,7 @@ simulator/
   envs/
     __init__.py
     duel.py         # 双策略本地对战 runner
-    rl.py           # 单智能体 against-league 环境接口
+    round_step.py   # 双玩家整回合 step 接口，不定义 reward/policy/order
 
   replay/
     __init__.py
@@ -224,16 +224,17 @@ NPC 策略默认口径：
 - 第一版随机化采用 episode-level profile：每局开始时采样一套全局 M4a 权重、`temperature` 和 `bomb_blind_p`，整局内固定。
 - per-NPC jitter 作为可选项，默认可关闭；若开启，只在 episode reset 时对每个 NPC 采样固定小扰动，幅度约为全局扰动的 `20%`。不要每次 NPC 决策重抽权重。
 
-默认 M4a score：
+默认 M4a + center score：
 
 ```text
 score(path) =
-    2.073989 * dynamic_reward_div10(path)
-  - 2.795283 * enter_bomb_count(path)
-  - 3.120374 * stay_count(path)
-  + 1.183404 * straight3(path)
-  - 0.562663 * backtrack(path)
-  + 10.776788 * bomb_trapped_stay(path)
+    2.106687 * dynamic_reward_div10(path)
+  - 2.796592 * enter_bomb_count(path)
+  - 3.126171 * stay_count(path)
+  + 1.212827 * straight3(path)
+  - 0.580930 * backtrack(path)
+  + 10.882944 * bomb_trapped_stay(path)
+  + 0.180587 * center_delta_chebyshev(path)
 ```
 
 特征定义：
@@ -244,6 +245,7 @@ score(path) =
 - `straight3`：三步同向且非停。
 - `backtrack`：存在相邻两步反向移动，即 `(上,下)`、`(下,上)`、`(左,右)`、`(右,左)`。
 - `bomb_trapped_stay`：起点所有合法相邻非停格都是当前炸弹，且候选 path 为 `[停,停,停]`。
+- `center_delta_chebyshev = start_chebyshev - end_chebyshev`，其中 `chebyshev(pos) = max(abs(row - 8), abs(col - 8))`。该项修正 baseline M4a 对中心区域 NPC 聚集的低估。
 
 M5c 暂不作为默认实现。它的 held-out NLL 更低、形状统计更贴近 replay，但首动作和前两步 argmax 正确率低于 M4a，且参数更多。后续若需要统计复现 profile，可在 M4a 基础上增加 `first_two_same_nonstay`、`last_two_same_nonstay` 和 `sandwich` 三项；不要把它们混入默认 M4a。
 
@@ -257,6 +259,7 @@ episode reset:
     w_straight += Uniform(-0.8, 0.8)
     w_backtrack += Uniform(-0.5, 0.5)
     w_bomb_trapped_stay += Uniform(-3.0, 3.0)
+    w_center += Uniform(-0.14, 0.14)
     temperature *= LogUniform(0.7, 1.5)
     bomb_blind_p ~ Uniform(0.0, 0.15)
 ```
@@ -285,7 +288,7 @@ episode reset:
 
 ### `replay/`
 
-负责把 simulator 自身运行过程导出为本地调试 replay。该层读取完整 `GameState`、玩家输出、`TransitionResult` 和机制事件，但不实现游戏规则。
+负责把 simulator 自身运行过程导出为本地调试 replay。该层读取完整 `GameState`、玩家输出、`TransitionResult` 和机制事件，但不实现游戏规则。完整格式说明见 `docs/simulator_replay_schema.md`。
 
 推荐 canonical 格式为单个 JSON 文档：
 
@@ -336,16 +339,9 @@ episode reset:
 
 环境层调用 `rules/`、`mechanisms/` 和 `observation/`，但不实现规则细节。
 
-第一阶段至少支持这些行动顺序模式：
+`envs.round_step` 是面向上层实验/训练系统的核心薄适配接口。它不定义 reward，不调用 policy，不给 P1/P2 附加训练身份，也不决定先后手；调用方必须显式传入 P1/P2 的 `GameOutput` 和 `first_player_id`。每次 `step()` 推进完整一回合，返回双方下一轮 observation、trace、终局状态和可选 replay。
 
-| 模式 | 用途 |
-| --- | --- |
-| `agent_after_opponent` | 主训练分布：快速 opponent 行动，NPC 行动，agent 行动。 |
-| `agent_before_opponent` | 反事实评估。 |
-| `random_order` | 少量鲁棒性评估。 |
-| `cost_based` | 预留真实耗时排序接口。 |
-
-注意：即使 agent 后手，双方策略收到的 observation 也必须来自同一个行动前状态。
+`envs.duel` 是便利 runner，用于本地 smoke、固定策略对战和 replay 生成。它可以调用 policy/provider 并按配置选择先后手，但不应成为上层训练系统的强依赖。
 
 ## 核心数据流
 
@@ -353,11 +349,12 @@ episode reset:
 EpisodeConfig
   -> map_provider.sample()
   -> GameState
+  -> mechanisms generate gold/bomb before action-time observation
   -> make_observation(state, player_id)
-  -> policy.move_decision(GameInput)
-  -> mechanisms generate gold/bomb/npc actions
-  -> rules.transition(state, player_actions, mechanism_events, order_mode)
-  -> next_state + events
+  -> caller provides P1/P2 GameOutput and first_player_id
+  -> NPC actions sampled from post-fast-player decision snapshot
+  -> rules.transition_started_round()
+  -> next observations + trace + optional replay
 ```
 
 ## 第一阶段实现顺序
@@ -374,8 +371,8 @@ EpisodeConfig
    - 7.3 已完成机制本体：`mechanisms.npc` 提供 seeded NPC 策略 approximation，默认实现 simultaneous-start M4a path-level softmax。必须只产生不会越界/撞障碍的动作，因为 `rules.movement.apply_npc_step()` 对 NPC 非法动作 fail-fast。已覆盖同 seed 可复现、每个 NPC 每回合 3 个动作、合法 path 枚举、动态拾金/炸弹风险特征、`bomb_blind_p`、同一轮 7 个 NPC 基于同一决策快照生成 actions。transition/env 接入时应先生成全体 NPC actions，再按随机 dispatch order 执行结算。
    - 7.4 已完成：`mechanisms.bombs` 提供固定 20 回合刷新周期和 `p_bomb=0.0795` 的 Bernoulli 候选格采样，严格执行刷新约束。
    - 7.5 已完成：`simulator.replay` 实现 `goldrush2_simulator_full_replay` recorder/exporter，记录完整上帝视角 start/end、双方输出、机制事件、规则事件和 snapshot。该格式是 simulator 调试产物，不伪装成官方 NDJSON 或 merged replay。已覆盖固定小局输出 JSON 可稳定复现，且不会写出 `npc.gold` 或 `grid=-2/-4` canonical 标记。
-   - 7.6 `envs.duel` 或最小 duel runner：先组装完整 500 回合本地对战 smoke test，再考虑 RL API。输入两个 policy/output provider，按指定先后手模式调用 `transition_one_round()`，输出最终 `GameState`、`GameResult`、每回合事件、snapshot 和可选 simulator full replay。验收测试：两个固定策略在固定机制 seed 下整局可复现，且所有规则层不变量检查通过。
-8. 最后补 `envs.rl`，不要在规则层尚未稳定时先接训练接口。
+   - 7.6 已完成：`envs.duel` 提供最小本地对战 runner。输入两个 policy/output provider，支持 `agent_after_opponent`、`agent_before_opponent`、`random_order`、`cost_based` 先后手模式；每轮先执行资源生成，再用同一行动前状态生成双方 observation，随后按先手玩家、NPC、后手玩家顺序调用 transition 规则入口。输出最终 `GameState`、`GameResult`、每回合 trace、snapshot 和可选 simulator full replay。已覆盖固定机制 seed 下 replay 可复现和 500 回合最小 smoke。
+8. 已完成：`envs.round_step` 提供无训练假设的双玩家 round-level stepping API。`reset()` 返回行动时 observation；`step(player_outputs, first_player_id)` 接收双方已生成输出和显式先手方，推进完整一轮。该层不定义 reward、不调用 policy、不决定先后手、不固定任何玩家的训练身份。已覆盖资源生成先于 observation、显式先手、可选 replay、终局结果和 500 回合最小 smoke。
 
 ## 质量要求
 
