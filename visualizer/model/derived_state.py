@@ -83,9 +83,17 @@ class DerivedStateBuilder:
             end_frame = _source_frame(document, record, "end")
             start = _build_frame(record.round_index, FramePhase.START, start_frame)
             end = _build_frame(record.round_index, FramePhase.END, end_frame)
-            motions = _build_motions(start.entities, end.entities)
-            cell_annotations = tuple(_build_cell_annotations(start_frame, end_frame))
-            floating_labels = tuple(_build_floating_labels(start.entities, end.entities))
+            raw_round = record.raw_round if isinstance(record.raw_round, dict) else {}
+            if document.kind == ReplayKind.SIMULATOR_FULL:
+                motions = _build_simulator_motions(raw_round)
+                cell_annotations = tuple(_build_simulator_cell_annotations(raw_round))
+                floating_labels = tuple(_build_simulator_floating_labels(raw_round))
+                events = tuple(_build_simulator_events(record.round_index, raw_round, floating_labels, cell_annotations))
+            else:
+                motions = _build_motions(start.entities, end.entities)
+                cell_annotations = tuple(_build_cell_annotations(start_frame, end_frame))
+                floating_labels = tuple(_build_floating_labels(start.entities, end.entities))
+                events = tuple(_build_events(record.round_index, start_frame, end_frame, floating_labels, cell_annotations))
             end = FrameState(
                 round_index=end.round_index,
                 phase=end.phase,
@@ -96,7 +104,6 @@ class DerivedStateBuilder:
                 cell_annotations=cell_annotations,
                 floating_labels=floating_labels,
             )
-            events = tuple(_build_events(record.round_index, start_frame, end_frame, floating_labels, cell_annotations))
             bundles.append(FrameBundle(round_index=record.round_index, start=start, end=end, motions=motions, events=events))
         return tuple(bundles)
 
@@ -166,10 +173,11 @@ def _build_entities(frame: dict, visible_by: Grid | None) -> list[EntityDisplayS
                     continue
                 position = _position(unit.get("position"))
                 actions = _actions(unit.get("actions"))
+                unit_id = _int(unit.get("id"), index)
                 result.append(
                     EntityDisplayState(
-                        ref=EntityRef(EntityKind.UNIT, pid, index),
-                        label=f"P{pid}U{index}",
+                        ref=EntityRef(EntityKind.UNIT, pid, unit_id),
+                        label=f"P{pid}U{unit_id}",
                         position=position,
                         gold=_optional_int(unit.get("gold")),
                         actions=actions,
@@ -202,6 +210,105 @@ def _build_entities(frame: dict, visible_by: Grid | None) -> list[EntityDisplayS
                 )
             )
     return result
+
+
+def _build_simulator_motions(raw_round: dict) -> tuple[MotionAnnotation, ...]:
+    points_by_ref: dict[EntityRef, list[Position]] = {}
+    for movement in _simulator_movements(raw_round):
+        ref = _movement_ref(movement)
+        if ref is None:
+            continue
+        from_pos = _position(movement.get("from_pos"))
+        to_pos = _position(movement.get("to_pos"))
+        if from_pos is None or to_pos is None:
+            continue
+        points = points_by_ref.setdefault(ref, [from_pos])
+        if points[-1] != from_pos:
+            points.append(from_pos)
+        if movement.get("status") == "moved" and points[-1] != to_pos:
+            points.append(to_pos)
+
+    motions: list[MotionAnnotation] = []
+    for ref, points in points_by_ref.items():
+        deduped = tuple(points)
+        if len(deduped) < 2:
+            continue
+        motions.append(
+            MotionAnnotation(
+                ref=ref,
+                start=deduped[0],
+                end=deduped[-1],
+                points=deduped,
+                style=MotionStyle.SOLID_POLYLINE,
+                confidence=Confidence.CERTAIN,
+            )
+        )
+    return tuple(motions)
+
+
+def _build_simulator_floating_labels(raw_round: dict) -> tuple[FloatingLabelAnnotation, ...]:
+    labels: list[FloatingLabelAnnotation] = []
+    for interaction in _simulator_interactions(raw_round):
+        for pickup in interaction.get("pickups") or []:
+            if not isinstance(pickup, dict):
+                continue
+            ref = _actor_ref(pickup.get("actor"))
+            picked = _int(pickup.get("picked_gold"), 0)
+            if ref is not None and picked > 0:
+                labels.append(FloatingLabelAnnotation(ref, f"+{picked}", Confidence.CERTAIN))
+        for bomb in interaction.get("bomb_triggers") or []:
+            if not isinstance(bomb, dict):
+                continue
+            ref = _actor_ref(bomb.get("actor"))
+            lost = _int(bomb.get("lost_gold"), 0)
+            if ref is not None and lost > 0:
+                labels.append(FloatingLabelAnnotation(ref, f"-{lost}", Confidence.CERTAIN))
+        for trample in interaction.get("tramples") or []:
+            if not isinstance(trample, dict):
+                continue
+            ref = _actor_ref(trample.get("actor"))
+            penalty = _int(trample.get("penalty"), 0)
+            if ref is not None and penalty > 0:
+                labels.append(FloatingLabelAnnotation(ref, f"-{penalty}", Confidence.CERTAIN))
+    return tuple(labels)
+
+
+def _build_simulator_cell_annotations(raw_round: dict) -> tuple[CellAnnotation, ...]:
+    annotations: list[CellAnnotation] = []
+    for interaction in _simulator_interactions(raw_round):
+        for bomb in interaction.get("bomb_triggers") or []:
+            if isinstance(bomb, dict):
+                pos = _position(bomb.get("position"))
+                if pos is not None:
+                    annotations.append(CellAnnotation(pos, "!", Confidence.CERTAIN))
+        for trample in interaction.get("tramples") or []:
+            if isinstance(trample, dict):
+                pos = _position(trample.get("position"))
+                if pos is not None:
+                    annotations.append(CellAnnotation(pos, "T", Confidence.CERTAIN))
+    return tuple(annotations)
+
+
+def _build_simulator_events(
+    round_index: int,
+    raw_round: dict,
+    floating_labels: tuple[FloatingLabelAnnotation, ...],
+    cell_annotations: tuple[CellAnnotation, ...],
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for label in floating_labels:
+        events.append({"round": round_index, "kind": "entity_label", "entity": str(label.ref), "text": label.text})
+    for annotation in cell_annotations:
+        if annotation.marker == "!":
+            events.append({"round": round_index, "kind": "bomb_triggered", "text": f"炸弹触发于 ({annotation.position.row}, {annotation.position.col})"})
+        elif annotation.marker == "T":
+            events.append({"round": round_index, "kind": "trample", "text": f"踩踏于 ({annotation.position.row}, {annotation.position.col})"})
+    dispatch_order = ((raw_round.get("events") or {}).get("dispatch_order") if isinstance(raw_round.get("events"), dict) else None)
+    if isinstance(dispatch_order, list):
+        first = next((item for item in dispatch_order if isinstance(item, int) and item > 0), None)
+        if first is not None:
+            events.append({"round": round_index, "kind": "first_player", "text": f"P{first} 先行动"})
+    return events
 
 
 def _build_motions(
@@ -307,6 +414,54 @@ def _build_events(
     return events
 
 
+def _simulator_movements(raw_round: dict) -> list[dict]:
+    events = raw_round.get("events")
+    if not isinstance(events, dict):
+        return []
+    movements = events.get("movement")
+    if not isinstance(movements, list):
+        return []
+    return [movement for movement in movements if isinstance(movement, dict)]
+
+
+def _simulator_interactions(raw_round: dict) -> list[dict]:
+    events = raw_round.get("events")
+    if not isinstance(events, dict):
+        return []
+    interactions = events.get("interactions")
+    if not isinstance(interactions, list):
+        return []
+    return [interaction for interaction in interactions if isinstance(interaction, dict)]
+
+
+def _movement_ref(movement: dict) -> EntityRef | None:
+    player_id = _int(movement.get("player_id"), 0)
+    unit_id = _int(movement.get("unit_id"), 0)
+    if player_id == 0:
+        return EntityRef(EntityKind.NPC, None, unit_id)
+    if player_id > 0:
+        return EntityRef(EntityKind.UNIT, player_id, unit_id)
+    return None
+
+
+def _actor_ref(actor: object) -> EntityRef | None:
+    if not isinstance(actor, dict):
+        return None
+    kind = actor.get("kind")
+    if kind == "player_unit":
+        player_id = _optional_int(actor.get("player_id"))
+        unit_id = _optional_int(actor.get("unit_id"))
+        if player_id is None or unit_id is None:
+            return None
+        return EntityRef(EntityKind.UNIT, player_id, unit_id)
+    if kind == "npc":
+        npc_id = _optional_int(actor.get("npc_id"))
+        if npc_id is None:
+            return None
+        return EntityRef(EntityKind.NPC, None, npc_id)
+    return None
+
+
 def _trace_actions(start: Position, actions: tuple[int, ...]) -> tuple[Position, ...]:
     row = start.row
     col = start.col
@@ -379,6 +534,8 @@ def _is_complete(entity: dict, position: Position | None, actions: tuple[int, ..
     explicit = entity.get("is_complete")
     if isinstance(explicit, bool):
         return explicit
+    if position is not None and "id" in entity and "actions" not in entity and "pickup" not in entity:
+        return True
     return position is not None and "actions" in entity and "pickup" in entity
 
 

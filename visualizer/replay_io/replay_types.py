@@ -14,6 +14,7 @@ class ReplayKind(str, Enum):
 
     OFFICIAL = "official"
     MERGED = "merged"
+    SIMULATOR_FULL = "simulator_full"
 
 
 @dataclass(frozen=True)

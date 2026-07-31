@@ -4,12 +4,12 @@
 
 ## 目标
 
-可视化器服务于本地 replay 回看与策略失败分析。第一版只读取 replay 文件，并把官方单视角与双账号合并格式统一投影为可显示的回合帧。
+可视化器服务于本地 replay 回看与策略失败分析。第一版只读取 replay 文件，并把官方单视角、双账号合并格式和 simulator full replay 统一投影为可显示的回合帧。
 
 核心目标：
 
-- 同时支持官方 NDJSON replay 和双账号合并 JSON replay。
-- 用唯一 auto 视角展示 replay：官方文件展示文件自身视角，合并文件展示联合视野。
+- 同时支持官方 NDJSON replay、双账号合并 JSON replay 和 simulator full JSON replay。
+- 用唯一 auto 视角展示 replay：官方文件展示文件自身视角，合并文件展示联合视野，simulator 文件展示完整上帝视角。
 - 清楚展示未知信息边界。
 - 用静态标注表达移动、拾取、炸弹、踩踏等关键事件。
 - 保持实现足够薄，不引入 AntWar 那套特征工程和 evaluator overlay 复杂度。
@@ -32,7 +32,7 @@ local replay file
 
 - 读取本地文件。
 - 判断 replay 类型。
-- 解析官方 NDJSON 与合并 JSON。
+- 解析官方 NDJSON、合并 JSON 与 simulator JSON。
 - 规范化静态地图中的字符串数字。
 - 保留原始 round/view 对象，避免丢失未来分析所需字段。
 - 输出 `ReplayDocument`。
@@ -48,7 +48,7 @@ local replay file
 职责：
 
 - 将 `ReplayDocument` 转为 `FrameBundle`。
-- 自动选择显示数据源：official 使用 `raw_round`，merged 使用 `rounds[].merged`。
+- 自动选择显示数据源：official 使用 `raw_round`，merged 使用 `rounds[].merged`，simulator 使用 `raw_round.start/end/events`。
 - 生成 `FrameState.start` 与 `FrameState.end`。
 - 生成移动箭头、浮动文字、地图格标注和事件摘要。
 - 管理置信度：`certain`、`partial`、`unknown`。
@@ -77,7 +77,7 @@ local replay file
 
 `ReplayDocument` 是 replay I/O 层输出的中立模型：
 
-- `kind`: `official` 或 `merged`
+- `kind`: `official`、`merged` 或 `simulator_full`
 - `players`: 玩家名映射
 - `static_map`: `17x17` 静态地图，值已转为整数
 - `rounds`: 规范化回合列表
@@ -107,10 +107,12 @@ local replay file
 - 官方 NDJSON replay：展示该文件本身包含的单视角数据。`viewer_side` 若由外部元信息提供，只作为详情信息，不触发视图切换。
 - 双账号合并 JSON replay：只读取每轮 `merged` 层，展示联合视野。
 - 合并 replay 顶层 `source.views[*].log_ref` 只作为来源引用，第一版可视化器不追读这些原始 NDJSON。
+- simulator full JSON replay：读取每轮 `start/end` 完整状态，并从 `events.movement/interactions` 派生轨迹和事件标注。
 
 重要约束：
 
 - `merged.grid` 不是上帝视角。
+- simulator `grid` 是资源层，不包含玩家/NPC/迷雾标记。
 - `visible_by=0` 的格子必须显示为未知。
 - 不可见实体不能通过规则猜位置。
 
@@ -141,9 +143,9 @@ local replay file
 
 已实现：
 
-- `replay_io` 能解析官方 NDJSON 与 `goldrush2_merged_replay` JSON。
+- `replay_io` 能解析官方 NDJSON、`goldrush2_merged_replay` JSON 与 `goldrush2_simulator_full_replay` JSON。
 - `model` 能按 auto 视角输出每回合 start/end 的地图、实体、分数和 `visible_by`。
-- `model` 能生成实线/虚线箭头、`+n/-n`、炸弹触发和踩踏格标注。
+- `model` 能生成实线/虚线箭头、`+n/-n`、炸弹触发和踩踏格标注；simulator replay 优先使用 `events` 中的确定事件。
 - UI 能打开本地 replay、跳转回合、播放/暂停、切换 start/end、显示分数、实体和事件摘要。
 - 已有标准库 `unittest` 覆盖 parser、derived state 和 playback。
 
@@ -152,10 +154,8 @@ local replay file
 1. 增加实体点击选择与右侧详情联动。
 2. 增加 snapshot 区域表格。
 3. 优化同格多实体、长路径箭头和文字避让。
-4. 为真实 merged replay 样本补稳定测试资产或更完整的合成样本。
+4. 为真实 merged/simulator replay 样本补稳定测试资产或更完整的合成样本。
 
 ## 依赖说明
 
-AntWar 使用 PySide6。当前 `goldrush` conda 环境尚未安装 PySide6，因此 GUI 实现前需要明确是否引入该依赖。
-
-在引入 GUI 依赖之前，`replay_io` 和 `model` 应保持纯 Python，可在无 Qt 环境中测试。
+当前 GUI 使用 PySide6；`replay_io` 和 `model` 保持纯 Python，可在无 Qt 环境中测试。

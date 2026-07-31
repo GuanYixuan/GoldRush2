@@ -2,19 +2,20 @@
 
 `visualizer/` 是 GoldRush2.0 的本地 replay 可视化器工作区。第一版只面向回放文件，不接入策略输入、不运行选手代码、不访问评测平台。
 
-当前已实现一个 PySide6 MVP，可打开本地 official NDJSON 或 merged JSON replay。
+当前已实现一个 PySide6 MVP，可打开本地 official NDJSON、merged JSON 或 simulator full JSON replay。
 
 ## 输入范围
 
-支持两类本地 replay：
+支持三类本地 replay：
 
 - 官方 replay：`gamerules/replay.md` 描述的 NDJSON 格式。
 - 双账号合并 replay：`docs/merged_replay_schema.md` 描述的 `goldrush2_merged_replay` JSON 格式。
+- simulator replay：`docs/simulator_replay_schema.md` 描述的 `goldrush2_simulator_full_replay` JSON 格式。
 
 暂不支持：
 
 - 策略 `GameInput` 可视化。
-- 本地策略运行或模拟器。
+- 本地策略运行。
 - 平台在线下载、提交或发起对局。
 - 预测模型、特征工程或 evaluator overlay。
 
@@ -23,7 +24,7 @@
 第一版压缩为三层：
 
 ```text
-replay_io/  # 读取 official NDJSON / merged JSON，并规范化为 ReplayDocument
+replay_io/  # 读取 official NDJSON / merged JSON / simulator JSON，并规范化为 ReplayDocument
 model/      # ReplayDocument -> FrameBundle；生成路径、事件和静态标注
 ui/         # 播放状态、窗口、scene 图层和用户交互
 ```
@@ -45,6 +46,7 @@ ui/         # 播放状态、窗口、scene 图层和用户交互
 - 炸弹或踩踏损失：实体头顶显示 `-n`，并在事件面板说明来源。
 - 炸弹触发格：地图格叠加红色感叹号。
 - 合并 replay 的联合视野：必须区分未知格与已观察空地；`visible_by` 保留在详情数据中，第一版不做来源 mask 视图切换。
+- simulator replay 使用上帝视角，不显示迷雾；移动、拾金、炸弹和踩踏优先使用 `events` 中的确定事件。
 
 ## 当前文件
 
@@ -79,6 +81,12 @@ conda run -n goldrush python -m visualizer.main official_sdk/data/user/g3.txt
 conda run -n goldrush python -m visualizer.main mechanism/data/processed/merged_replays/symobs-a-map1-100-20260727-231446/36300.json
 ```
 
+打开 simulator replay：
+
+```bash
+conda run -n goldrush python -m visualizer.main temp/simulator_smoke_replays/stay_players_default_mechanisms_map1_seed2026073101.json
+```
+
 运行最小测试：
 
 ```bash
@@ -90,4 +98,4 @@ PYTHONDONTWRITEBYTECODE=1 conda run -n goldrush python -m unittest tests.visuali
 1. 改进实体选择与右侧详情联动。
 2. 增加 snapshot 区域表格。
 3. 优化同格多实体、长路径箭头和文字避让。
-4. 为真实 merged replay 样本补固定测试资产或更稳定的测试构造。
+4. 为真实 merged/simulator replay 样本补固定测试资产或更稳定的测试构造。

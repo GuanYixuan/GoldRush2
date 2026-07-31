@@ -8,6 +8,7 @@ from .replay_types import Grid, RawObject, ReplayDocument, ReplayKind, ReplayLoa
 
 GRID_SIZE = 17
 MERGED_FORMAT = "goldrush2_merged_replay"
+SIMULATOR_FORMAT = "goldrush2_simulator_full_replay"
 
 
 class ReplayLoader:
@@ -38,7 +39,9 @@ def _load_auto(source_path: Path, text: str) -> ReplayDocument:
         return _load_official_ndjson(source_path, text)
     if isinstance(payload, dict) and payload.get("format") == MERGED_FORMAT:
         return _load_merged_document(source_path, payload)
-    raise ReplayLoadError("JSON replay 目前只支持 goldrush2_merged_replay 格式")
+    if isinstance(payload, dict) and payload.get("format") == SIMULATOR_FORMAT:
+        return _load_simulator_document(source_path, payload)
+    raise ReplayLoadError("JSON replay 目前只支持 goldrush2_merged_replay 或 goldrush2_simulator_full_replay 格式")
 
 
 def _load_json_document(source_path: Path, text: str) -> ReplayDocument:
@@ -48,7 +51,9 @@ def _load_json_document(source_path: Path, text: str) -> ReplayDocument:
         raise ReplayLoadError(f"JSON 解析失败: line {exc.lineno}, column {exc.colno}: {exc.msg}") from exc
     if isinstance(payload, dict) and payload.get("format") == MERGED_FORMAT:
         return _load_merged_document(source_path, payload)
-    raise ReplayLoadError("JSON replay 目前只支持 goldrush2_merged_replay 格式")
+    if isinstance(payload, dict) and payload.get("format") == SIMULATOR_FORMAT:
+        return _load_simulator_document(source_path, payload)
+    raise ReplayLoadError("JSON replay 目前只支持 goldrush2_merged_replay 或 goldrush2_simulator_full_replay 格式")
 
 
 def _load_merged_document(source_path: Path, payload: dict[str, Any]) -> ReplayDocument:
@@ -77,6 +82,39 @@ def _load_merged_document(source_path: Path, payload: dict[str, Any]) -> ReplayD
 
     return ReplayDocument(
         kind=ReplayKind.MERGED,
+        source_path=source_path.resolve(),
+        players=players,
+        static_map=static_map,
+        rounds=tuple(rounds),
+        forfeit=_optional_object(payload.get("forfeit")),
+    )
+
+
+def _load_simulator_document(source_path: Path, payload: dict[str, Any]) -> ReplayDocument:
+    players = _players(payload.get("players"))
+    static_map = _grid(payload.get("maps"), "maps")
+    rounds_payload = payload.get("rounds")
+    if not isinstance(rounds_payload, list):
+        raise ReplayLoadError("simulator replay 缺少 rounds 数组")
+
+    rounds: list[ReplayRoundRecord] = []
+    for index, item in enumerate(rounds_payload):
+        if not isinstance(item, dict):
+            raise ReplayLoadError(f"rounds[{index}] 不是对象")
+        round_index = _int(item.get("round"), f"rounds[{index}].round")
+        if not isinstance(item.get("start"), dict) or not isinstance(item.get("end"), dict):
+            raise ReplayLoadError(f"rounds[{index}] 缺少 start/end 对象")
+        rounds.append(
+            ReplayRoundRecord(
+                round_index=round_index,
+                merged=None,
+                raw_round=item,
+                viewer_side=None,
+            )
+        )
+
+    return ReplayDocument(
+        kind=ReplayKind.SIMULATOR_FULL,
         source_path=source_path.resolve(),
         players=players,
         static_map=static_map,
