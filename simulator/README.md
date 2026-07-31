@@ -324,11 +324,13 @@ episode reset:
 - NPC 仍不维护 `npc.gold`；导出格式不得伪造该字段。
 - 文件必须通过 `format="goldrush2_simulator_full_replay"` 与官方 NDJSON、`goldrush2_merged_replay` 明确区分。
 
-第一版实现建议：
+当前已实现：
 
 - `replay.recorder` 记录初始地图、seed、机制配置和每回合 start/end 状态及事件。
 - `replay.schema` 固定 JSON 字段和版本号。
 - `replay.export` 只写出 simulator full JSON；若后续为了现有 visualizer 快速兼容需要 official-like NDJSON，应作为 adapter 明确标注，不作为 canonical schema。
+
+当前 `serialize_state()` 会 fail-fast 检查资源格不变量：金币数必须为正，金币/炸弹不能落在障碍上，炸弹不能和金币重合。NPC 只导出 `id` 与 `position`，不包含 `gold`。
 
 ### `envs/`
 
@@ -371,7 +373,7 @@ EpisodeConfig
    - 7.2 基本完成：`mechanisms.gold.CenterGoldGenerator` 已实现中心区域小额金币生成 approximation；`OuterGoldGenerator` 已实现 stateful `static_grid == 2` high batch 与伴随外围 `static_grid == 0` 小额金币，首次 high batch offset 暂定 `UniformInteger(8, 14)`。已覆盖同 seed 可复现、不生成在障碍/炸弹/玩家/NPC/已有金币格、不直接修改状态、非法配置 fail-fast。剩余参数观察项是动态占用导致候选不足时的官方处理。
    - 7.3 已完成机制本体：`mechanisms.npc` 提供 seeded NPC 策略 approximation，默认实现 simultaneous-start M4a path-level softmax。必须只产生不会越界/撞障碍的动作，因为 `rules.movement.apply_npc_step()` 对 NPC 非法动作 fail-fast。已覆盖同 seed 可复现、每个 NPC 每回合 3 个动作、合法 path 枚举、动态拾金/炸弹风险特征、`bomb_blind_p`、同一轮 7 个 NPC 基于同一决策快照生成 actions。transition/env 接入时应先生成全体 NPC actions，再按随机 dispatch order 执行结算。
    - 7.4 已完成：`mechanisms.bombs` 提供固定 20 回合刷新周期和 `p_bomb=0.0795` 的 Bernoulli 候选格采样，严格执行刷新约束。
-   - 7.5 `simulator.replay`：实现 `goldrush2_simulator_full_replay` recorder/exporter，记录完整上帝视角 start/end、双方输出、机制事件、规则事件和 snapshot。该格式是 simulator 调试产物，不伪装成官方 NDJSON 或 merged replay。验收测试：固定小局输出 JSON 可稳定复现，字段可被 schema 校验，且不会写出 `npc.gold` 或 `grid=-2/-4` canonical 标记。
+   - 7.5 已完成：`simulator.replay` 实现 `goldrush2_simulator_full_replay` recorder/exporter，记录完整上帝视角 start/end、双方输出、机制事件、规则事件和 snapshot。该格式是 simulator 调试产物，不伪装成官方 NDJSON 或 merged replay。已覆盖固定小局输出 JSON 可稳定复现，且不会写出 `npc.gold` 或 `grid=-2/-4` canonical 标记。
    - 7.6 `envs.duel` 或最小 duel runner：先组装完整 500 回合本地对战 smoke test，再考虑 RL API。输入两个 policy/output provider，按指定先后手模式调用 `transition_one_round()`，输出最终 `GameState`、`GameResult`、每回合事件、snapshot 和可选 simulator full replay。验收测试：两个固定策略在固定机制 seed 下整局可复现，且所有规则层不变量检查通过。
 8. 最后补 `envs.rl`，不要在规则层尚未稳定时先接训练接口。
 
