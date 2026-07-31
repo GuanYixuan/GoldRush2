@@ -216,8 +216,8 @@ NPC 策略默认口径：
 - 每个 NPC 行动时枚举当前位置出发的所有合法 3-step path；合法性只排除边界和 `static_grid == 1` 障碍。NPC 与玩家、NPC 之间可重叠，不作为阻挡。
 - 候选 path 应按 `(map_id/static_grid, start_pos)` 缓存；每个起点候选数很小，允许全枚举。
 - 对每条 path 计算 M4a score 后按 `softmax(score / temperature)` 采样，不做 argmax 硬选择。
-- 决策阶段可以使用当前上帝视角状态作为近似局面；执行阶段必须仍按真实规则逐步结算金币和炸弹。
-- 同一轮按 dispatch order 依次决策和执行 NPC；更早 NPC 已拾取的金币、触发的炸弹会影响后续 NPC 的 path score。
+- 决策阶段使用同一个 NPC 决策快照同时为 7 个 NPC 生成 actions；该快照取先手玩家行动后、任何 NPC 执行前的状态。不要因为前序 NPC 已采样 path 就修改后序 NPC 的 score。
+- 执行阶段按随机 permutation 依次执行已生成的 actions，并按真实规则逐步结算金币和炸弹。前序 NPC 的拾金/踩炸弹只影响后序 NPC 的执行结算，不影响同轮已生成的决策 score。
 - 第一版随机化采用 episode-level profile：每局开始时采样一套全局 M4a 权重、`temperature` 和 `bomb_blind_p`，整局内固定。
 - per-NPC jitter 作为可选项，默认可关闭；若开启，只在 episode reset 时对每个 NPC 采样固定小扰动，幅度约为全局扰动的 `20%`。不要每次 NPC 决策重抽权重。
 
@@ -225,17 +225,17 @@ NPC 策略默认口径：
 
 ```text
 score(path) =
-    2.064294 * dynamic_reward_div10(path)
-  - 2.800031 * enter_bomb_count(path)
-  - 3.131701 * stay_count(path)
-  + 1.186625 * straight3(path)
-  - 0.569309 * backtrack(path)
-  + 10.777999 * bomb_trapped_stay(path)
+    2.073989 * dynamic_reward_div10(path)
+  - 2.795283 * enter_bomb_count(path)
+  - 3.120374 * stay_count(path)
+  + 1.183404 * straight3(path)
+  - 0.562663 * backtrack(path)
+  + 10.776788 * bomb_trapped_stay(path)
 ```
 
 特征定义：
 
-- `dynamic_reward_div10 = dynamic_pickup_reward / 10`；`dynamic_pickup_reward` 按 path 内每次移动进入金币格时的 `ceil(0.65 * remaining_gold)` 累加，并同步扣减该 path 的局部剩余金币。
+- `dynamic_reward_div10 = dynamic_pickup_reward / 10`；`dynamic_pickup_reward` 按 path 内每次移动进入金币格时的 `ceil(0.65 * remaining_gold)` 累加，并同步扣减该 path 的局部剩余金币。该局部扣减只用于评估当前候选 path，不影响同轮其它 NPC 的决策 score。
 - `enter_bomb_count`：path 中移动进入当前仍存在炸弹格的次数；候选 path 内进入炸弹后，该局部炸弹从后续步移除。
 - `stay_count`：三步动作中 `action=4` 的次数。
 - `straight3`：三步同向且非停。
@@ -366,7 +366,7 @@ EpisodeConfig
 7. 引入默认机制近似模型。该步骤拆成如下子阶段：
    - 7.1 已完成：`mechanisms.maps` 提供 3 张公开地图 pool、固定出生点配置、seeded 均匀抽样和初始 `GameState` 构造。
    - 7.2 基本完成：`mechanisms.gold.CenterGoldGenerator` 已实现中心区域小额金币生成 approximation；`OuterGoldGenerator` 已实现 stateful `static_grid == 2` high batch 与伴随外围 `static_grid == 0` 小额金币，首次 high batch offset 暂定 `UniformInteger(8, 14)`。已覆盖同 seed 可复现、不生成在障碍/炸弹/玩家/NPC/已有金币格、不直接修改状态、非法配置 fail-fast。剩余参数观察项是动态占用导致候选不足时的官方处理。
-   - 7.3 `mechanisms.npc`：提供 seeded NPC 策略 approximation，默认实现 M4a path-level softmax。必须只产生不会越界/撞障碍的动作，因为 `rules.movement.apply_npc_step()` 对 NPC 非法动作 fail-fast。验收测试：同 seed 可复现，每个 NPC 每回合 3 个动作，NPC 可与玩家/NPC 重叠但不撞墙、不撞障碍；同一轮按 dispatch order 依次决策和执行，前序 NPC 的拾金/踩炸弹会影响后序 NPC 的 score。
+   - 7.3 `mechanisms.npc`：提供 seeded NPC 策略 approximation，默认实现 simultaneous-start M4a path-level softmax。必须只产生不会越界/撞障碍的动作，因为 `rules.movement.apply_npc_step()` 对 NPC 非法动作 fail-fast。验收测试：同 seed 可复现，每个 NPC 每回合 3 个动作，NPC 可与玩家/NPC 重叠但不撞墙、不撞障碍；同一轮先基于同一决策快照生成 7 个 NPC actions，再按随机 permutation 执行，前序 NPC 的拾金/踩炸弹只影响后序 NPC 的执行结算。
    - 7.4 已完成：`mechanisms.bombs` 提供固定 20 回合刷新周期和 `p_bomb=0.0795` 的 Bernoulli 候选格采样，严格执行刷新约束。
    - 7.5 `simulator.replay`：实现 `goldrush2_simulator_full_replay` recorder/exporter，记录完整上帝视角 start/end、双方输出、机制事件、规则事件和 snapshot。该格式是 simulator 调试产物，不伪装成官方 NDJSON 或 merged replay。验收测试：固定小局输出 JSON 可稳定复现，字段可被 schema 校验，且不会写出 `npc.gold` 或 `grid=-2/-4` canonical 标记。
    - 7.6 `envs.duel` 或最小 duel runner：先组装完整 500 回合本地对战 smoke test，再考虑 RL API。输入两个 policy/output provider，按指定先后手模式调用 `transition_one_round()`，输出最终 `GameState`、`GameResult`、每回合事件、snapshot 和可选 simulator full replay。验收测试：两个固定策略在固定机制 seed 下整局可复现，且所有规则层不变量检查通过。

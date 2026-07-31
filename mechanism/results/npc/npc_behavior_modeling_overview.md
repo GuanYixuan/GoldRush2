@@ -160,14 +160,17 @@ NPC 对邻接炸弹有强避让信号：
 ```text
 每轮：
     先确定 fast_player / slow_player
-    对 7 个 NPC 采样一个随机 permutation
-    按 dispatch_order 依次行动
+    对 7 个 NPC 采样一个随机 permutation 作为执行顺序
 
-每个 NPC 行动时：
-    枚举所有合法 3-step path
-    基于当前局面为每条 path 计算 score
-    按 softmax(score / temperature) 采样 path
-    执行 path，并按真实规则结算金币和炸弹
+NPC 决策阶段：
+    固定一个 NPC 决策快照，即先手玩家行动后、任何 NPC 执行前的状态
+    对 7 个 NPC 分别枚举所有合法 3-step path
+    基于同一个决策快照为每条 path 计算 score
+    按 softmax(score / temperature) 为每个 NPC 采样 path
+
+NPC 执行阶段：
+    按随机 permutation 依次执行已采样 path
+    每步按真实规则结算金币和炸弹
 ```
 
 第一版模拟器推荐使用 M4a 作为默认 score：
@@ -185,7 +188,7 @@ score(path) =
 其中：
 
 - `dynamic_reward_div10 = dynamic_pickup_reward / 10`。
-- `dynamic_pickup_reward(path)`：按当前金币堆和 `ceil(65%)` 规则模拟该 NPC path 的收益。
+- `dynamic_pickup_reward(path)`：按 NPC 决策快照中的金币堆和 `ceil(65%)` 规则模拟该 NPC path 的收益；只扣减该候选 path 内部的局部剩余金币，不扣减同轮其它 NPC 的候选或已采样 path。
 - `enter_bomb_count(path)`：path 中移动进入当前可见炸弹格的次数；炸弹是强负效用，不是硬约束。
 - `stay_count(path)`：三步动作中 `action=4` 的次数。
 - `straight3(path)`：三步同向且非停。
@@ -193,6 +196,8 @@ score(path) =
 - `bomb_trapped_stay(path)`：起点所有合法相邻非停格都是当前可见炸弹，且候选 path 为 `[4,4,4]`。
 
 M5c 加入 `first_two_same_nonstay`、`last_two_same_nonstay` 和 `sandwich` 后，valid NLL 更低、形状统计更贴近 replay，但首动作和前两步 argmax 正确率低于 M4a。出于简洁、易实现和调参稳定性，第一版 simulator 默认不加入 M5 细形状项；M5c 保留为统计复现 profile 或后续 ablation 对照。
+
+决策时序对照见 `npc_path_policy_fit.md`：在同一 train/valid split 下，`simultaneous_start` 口径的 M4a valid NLL 为 `3.267048`，优于 `ordered` 口径的 `3.285297`。因此第一版 simulator 默认采用“同时生成 7 个 NPC actions，再按随机顺序执行结算”，而不是“按执行顺序逐个决策并立即执行”。
 
 该模型的定位是：
 
@@ -258,25 +263,32 @@ score(path) =
 | M5b + last two same | `3.252415` | `7.124%` |
 | M5c + sandwich | `3.250092` | `7.114%` |
 
-从复现统计分布看 M5c 的 NLL 最低；从简洁易行和 prefix argmax 正确率看，M4a 更适合作为第一版模拟器默认 NPC 策略中心。
+上表是 ordered 特征口径下的逐项拟合结果。从复现统计分布看 M5c 的 NLL 最低；从简洁易行和 prefix argmax 正确率看，M4a 更适合作为第一版模拟器默认 NPC 策略中心。
+
+后续补充的决策时序对照显示，在 M1/M2a/M3c/M4a 上，`simultaneous_start` 口径均优于 `ordered` 口径。第一版 simulator 因此使用 simultaneous-start M4a 权重：
+
+| timing | model | valid NLL | top1 | actual path prob |
+| --- | --- | ---: | ---: | ---: |
+| ordered | M4a | `3.285297` | `17.52%` | `6.852%` |
+| simultaneous_start | M4a | `3.267048` | `18.08%` | `7.097%` |
 
 默认 M4a：
 
 ```text
 score(path) =
-    2.064294 * dynamic_reward_div10(path)
-  - 2.800031 * enter_bomb_count(path)
-  - 3.131701 * stay_count(path)
-  + 1.186625 * straight3(path)
-  - 0.569309 * backtrack(path)
-  + 10.777999 * bomb_trapped_stay(path)
+    2.073989 * dynamic_reward_div10(path)
+  - 2.795283 * enter_bomb_count(path)
+  - 3.120374 * stay_count(path)
+  + 1.183404 * straight3(path)
+  - 0.562663 * backtrack(path)
+  + 10.776788 * bomb_trapped_stay(path)
 ```
 
 其中 `dynamic_reward_div10 = dynamic_pickup_reward / 10`。M2a 已足以校正直接踩炸弹频率；原 M2 中 `adjacent_bomb_count` 增益极小且权重为小正值，暂不建议进入默认策略。M3/M4a 显示 path shape 是强解释项，尤其 `stay_count` 和 `straight3` 能分别解释 NPC 几乎走满三步、三步直线显著高于 uniform 的现象。
 
-另见 `npc_step_count_and_zero_move_analysis.md`：当 NPC 所有合法相邻非停方向都是可见炸弹时，`P(0步)` 约为 `97.95%`。M4a 引入的 `bomb_trapped_stay` 专门修正该稀有例外；在本次 valid trapped 子集上，M3c 给 `[4,4,4]` 的平均概率约 `0.007%`，M4a 提升到 `59.47%`。M5 系列继承该修正。
+另见 `npc_step_count_and_zero_move_analysis.md`：当 NPC 所有合法相邻非停方向都是可见炸弹时，`P(0步)` 约为 `97.95%`。M4a 引入的 `bomb_trapped_stay` 专门修正该稀有例外；在 ordered valid trapped 子集上，M3c 给 `[4,4,4]` 的平均概率约 `0.007%`，M4a 提升到 `59.47%`。M5 系列继承该修正。
 
-M5c 可作为统计复现 profile：
+M5c 可作为 ordered 特征口径下的统计复现 profile；若后续需要在 simulator 中启用 M5c，应按 `simultaneous_start` 口径重新拟合后再冻结默认权重：
 
 ```text
 score(path) =

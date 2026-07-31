@@ -235,6 +235,46 @@ mechanism/data/processed/npc_policy_fit/maps123_ordered_m1_m5_path_shape_sample7
 - M4a 在 path top1、首动作正确、前两个动作正确上均高于 M5 系列。
 - M5 系列给正确 prefix 的 softmax 概率质量略高，尤其前两步；这与 M5 更偏向统计分布校准的定位一致。
 
+## 决策时序对照
+
+为区分“按 `dispatch_order` 执行结算”和“NPC 决策是否也逐个看到前序 NPC 的状态变化”，补充比较两种特征口径：
+
+- `ordered`：按 `dispatch_order` 用前序 NPC 的真实 action 先扣减可见金币和炸弹，再为当前 NPC 候选 path 计算特征。
+- `simultaneous_start`：同一轮 7 个 NPC 都基于同一个 round-start NPC 决策快照计算候选 path 特征，不扣减前序 NPC；执行结算仍可按随机 `dispatch_order` 发生。
+
+输出文件：
+
+```text
+temp/npc_decision_timing_comparison.csv
+```
+
+两种口径使用相同 run、相同抽样和相同 train/valid split：
+
+| timing | model | valid NLL | top1 | actual path prob |
+| --- | --- | ---: | ---: | ---: |
+| ordered | M1 | `4.122165` | `17.06%` | `2.964%` |
+| simultaneous_start | M1 | `4.093327` | `17.94%` | `3.174%` |
+| ordered | M2a | `4.052143` | `18.51%` | `3.260%` |
+| simultaneous_start | M2a | `4.023021` | `19.39%` | `3.484%` |
+| ordered | M3c | `3.287138` | `17.51%` | `6.838%` |
+| simultaneous_start | M3c | `3.268881` | `18.06%` | `7.083%` |
+| ordered | M4a | `3.285297` | `17.52%` | `6.852%` |
+| simultaneous_start | M4a | `3.267048` | `18.08%` | `7.097%` |
+
+`simultaneous_start` 在上述所有模型上均优于 `ordered`。这说明当前数据更支持“同轮 NPC 同时基于同一决策快照产出 actions，随后按随机顺序执行结算”，而不是“后序 NPC 决策时看到前序 NPC 已经执行后的状态”。
+
+simultaneous-start M4a 拟合权重为：
+
+```text
+score(path) =
+    2.073989 * dynamic_reward_div10(path)
+  - 2.795283 * enter_bomb_count(path)
+  - 3.120374 * stay_count(path)
+  + 1.183404 * straight3(path)
+  - 0.562663 * backtrack(path)
+  + 10.776788 * bomb_trapped_stay(path)
+```
+
 ## 实验结论
 
 - 动态 `65%` path reward 是稳定的一阶信号，M1 相比 uniform 显著改善 NLL。
@@ -242,5 +282,6 @@ mechanism/data/processed/npc_policy_fit/maps123_ordered_m1_m5_path_shape_sample7
 - path shape 是最强的后续增益来源：`stay_count`、`straight3`、`backtrack` 分别修正停留、直线和折返统计。
 - `bomb_trapped_stay` 的全局 NLL 增益很小，但在炸弹封路条件下能把 `[4,4,4]` 概率从近似 `0` 提升到约 `59%`。
 - M5c 的 held-out NLL 最低，形状特征均值最接近 replay；M4a 的 prefix argmax 指标更好且参数更少。
+- 决策时序对照中，`simultaneous_start` 明确优于 `ordered`，因此第一版 simulator 默认应同时生成 7 个 NPC actions，再按随机 `dispatch_order` 执行。
 
 推荐建模结论不在本文冻结，统一见 `npc_behavior_modeling_overview.md`。

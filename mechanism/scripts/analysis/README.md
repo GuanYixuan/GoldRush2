@@ -154,6 +154,64 @@ conda run -n goldrush python mechanism/scripts/analysis/analyze_static2_generati
 conda run -n goldrush python mechanism/scripts/analysis/analyze_static2_generation.py --run-id <run_id> --run-id <run_id>
 ```
 
+## `analyze_static2_occupancy.py`
+
+回查 observed high batch 触发时 high region 的 `static_map=2` 候选格是否被玩家/NPC/炸弹占用，并统计正增量是否落在 blocked candidates 上。默认读取 `analyze_static2_generation.py` 的输出和地图1、地图2、地图3 M3-A、地图3 M3-B 的 merged replay。
+
+默认输入：
+
+```text
+mechanism/data/processed/static2_analysis/maps123_static2_generation/
+mechanism/data/processed/merged_replays/<run_id>/*.json
+```
+
+默认输出：
+
+```text
+mechanism/data/processed/static2_occupancy_analysis/maps123_static2_occupancy/
+```
+
+输出文件：
+
+- `static2_occupancy_batches.csv`：每个 observed high batch 一行，包含候选格数、干净可见候选格数、动态对象/炸弹 blocked 格数、合法候选格数、正增量格数。
+- `summary.json`：按 all observed / full high / 全候选干净可见等口径汇总 blocked 分布和 positive cell count 分布。
+
+常用命令：
+
+```bash
+conda run -n goldrush python mechanism/scripts/analysis/analyze_static2_occupancy.py
+```
+
+## `analyze_initial_gold.py`
+
+分析 `round=0.start.grid` 中开局已经存在的初始金币，并用首个 snapshot 窗口验证初始化模型。默认读取官方 `official_sdk/data/full/g*.txt` 三局上帝视角 replay，以及地图1、地图2、地图3 M3-A、地图3 M3-B 四批 `gold_features`。
+
+默认输入：
+
+```text
+official_sdk/data/full/g*.txt
+mechanism/data/processed/gold_features/<run_id>/snapshot_windows.csv
+```
+
+默认输出：
+
+```text
+mechanism/data/processed/initial_gold_analysis/full_and_snapshots/
+```
+
+输出文件：
+
+- `official_full_initial_gold.csv`：官方 full replay 的初始金币分区统计。
+- `initial_center_base_cells.csv`：3 局共同出现初始金币的 50 个中心格坐标。
+- `snapshot_window0_model_comparison.csv`：首个 snapshot 窗口下的初始化模型对比。
+- `summary.json`：分析摘要。
+
+常用命令：
+
+```bash
+conda run -n goldrush python mechanism/scripts/analysis/analyze_initial_gold.py
+```
+
 ## `extract_npc_features.py`
 
 从双视角合并 replay 抽取 NPC 行为建模特征表。脚本只使用可连续观察的 NPC 轨迹做 round / step 级样本，即同一轮 `start.npcs[id]` 与 `end.npcs[id]` 均可见且 `end.npcs[id].actions` 存在。NPC 与可见炸弹的交互按 `dispatch_order` 保守重放，未观测到的炸弹不会被补全。
@@ -182,4 +240,39 @@ mechanism/data/processed/npc_features/<run_id>/
 
 ```bash
 conda run -n goldrush python mechanism/scripts/analysis/extract_npc_features.py --run-id <run_id>
+```
+
+## `fit_npc_path_policy.py`
+
+拟合 NPC 3-step path-level softmax 策略。脚本读取双视角合并 replay，按同轮 NPC 调度顺序用前序 NPC 的真实行动扣减可见金币和炸弹，再为当前 NPC 的所有合法 3-step path 计算特征并拟合 M1/M2a/M2/M3/M4a/M5。
+
+默认输入：
+
+```text
+mechanism/data/processed/merged_replays/<run_id>/*.json
+```
+
+默认输出：
+
+```text
+mechanism/data/processed/npc_policy_fit/<fit_id>/
+```
+
+输出文件：
+
+- `weights.json`：各模型权重。
+- `metrics.json`：拟合参数、样本计数、train/valid 指标和特征均值。
+- `feature_ablation.csv`：M0/M1/M2a/M2/M3/M4a/M5 的 NLL、top-k、MRR 等对照。
+- `validation_summary.csv`：实际 path、模型期望和 uniform 期望的特征均值。
+
+常用命令：
+
+```bash
+conda run -n goldrush python mechanism/scripts/analysis/fit_npc_path_policy.py --fit-id <fit_id>
+```
+
+覆盖全部 game 但抽样减小计算量：
+
+```bash
+conda run -n goldrush python mechanism/scripts/analysis/fit_npc_path_policy.py --sample-mod 10 --max-samples-per-run 0 --fit-id <fit_id>
 ```
