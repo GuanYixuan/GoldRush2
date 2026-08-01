@@ -10,7 +10,7 @@ from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, Out
 from simulator.mechanisms.maps import SpawnConfig
 from simulator.types import Action, GameOutput, GoldGenerationEvent, Position
 from training.opponents import OpponentSpec
-from training.rl import PairedEpisodeSampler, SingleAgentEnvConfig, SingleAgentGoldRushEnv
+from training.rl import SingleAgentEnvConfig, SingleAgentGoldRushEnv
 
 
 class RLEnvTests(unittest.TestCase):
@@ -69,22 +69,6 @@ class RLEnvTests(unittest.TestCase):
         self.assertEqual(rewards, [-1.0, -1.0])
         self.assertEqual(winners, [2, 1])
 
-    def test_paired_sampler_runs_swapped_agent_sides_as_independent_episode_rewards(self) -> None:
-        sampler = PairedEpisodeSampler(
-            config=SingleAgentEnvConfig(episode=_one_round_episode(), opponent_spec=_stay_opponent_spec()),
-            mechanisms=_quiet_mechanisms(),
-            spawn=SpawnConfig(npc_ids=()),
-        )
-
-        pair = sampler.rollout_pair(_stay_policy, seed=11, map_id=1)
-
-        self.assertEqual(pair.first.agent_player_id, 1)
-        self.assertEqual(pair.second.agent_player_id, 2)
-        self.assertEqual(pair.first.total_reward, -1.0)
-        self.assertEqual(pair.second.total_reward, -1.0)
-        self.assertEqual(pair.pair_score, -1.0)
-        self.assertEqual(pair.first.reset.info["opponent_spec"], pair.second.reset.info["opponent_spec"])
-
     def test_step_before_reset_fails_fast(self) -> None:
         env = SingleAgentGoldRushEnv(config=SingleAgentEnvConfig(episode=_one_round_episode(), opponent_spec=_stay_opponent_spec()))
 
@@ -114,10 +98,6 @@ def _stay_output() -> GameOutput:
 
 def _sequence_output(first_action: Action) -> GameOutput:
     return GameOutput(actions=(int(first_action), int(Action.STAY), int(Action.STAY), int(Action.STAY), int(Action.STAY), int(Action.STAY)), k=1, order=0, vp=0)
-
-
-def _stay_policy(_observation) -> GameOutput:
-    return _stay_output()
 
 
 @dataclass

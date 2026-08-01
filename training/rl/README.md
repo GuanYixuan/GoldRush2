@@ -13,6 +13,7 @@
 ## 主要入口
 
 - `SingleAgentGoldRushEnv`：单局环境。
-- `PairedEpisodeSampler`：用相同 seed / map / opponent spec 跑两局，分别让 agent 作为 P1 和 P2。
+- `BatchRolloutSampler`：直接驱动 `SingleAgentGoldRushEnv` 批量采样 paired episodes，并输出 `EpisodeBatch`。
+- `Transition` / `Trajectory` / `EpisodeBatch`：rollout 数据结构。episode 步数从 `len(trajectory.transitions)` 派生，不作为单独字段冻结。
 
 训练时仍应把两条 episode trajectory 作为独立样本；pair 只用于采样组织、评估聚合和降噪统计。
