@@ -163,16 +163,50 @@ high region 计数：
 | 地图3 pooled | `2120` | `1985` | `2010` | `2051` |
 | 全部 | `3992` | `3683` | `4115` | `4570` |
 
-相邻 high batch 的 region transition 中，同 region 连续触发是允许的：
+相邻 high batch 的 region transition 中，同 region 连续触发是允许的，且不是纯粹由 region 总体不均匀导致。下表的“独立基线”按实际 prev / next region 边际分布计算，即如果相邻 region 独立时预期的 repeat rate：
 
-| 数据 | transitions | same-region transitions |
-| --- | ---: | ---: |
-| 地图1 | `3967` | `1302` |
-| 地图2 | `4027` | `1215` |
-| 地图3 pooled | `7966` | `2265` |
-| 全部 | `15960` | `4782` |
+| 数据 | transitions | same-region transitions | repeat rate | 独立基线 | 差值 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 地图1 | `3967` | `1302` | `0.3282` | `0.2554` | `+0.0728` |
+| 地图2 | `4027` | `1215` | `0.3017` | `0.2564` | `+0.0453` |
+| 地图3 pooled | `7966` | `2265` | `0.2843` | `0.2502` | `+0.0341` |
+| 地图1/2 combined | `7994` | `2517` | `0.3149` | `0.2556` | `+0.0593` |
+| 全部 | `15960` | `4782` | `0.2996` | `0.2515` | `+0.0481` |
 
-region 计数和 batch total mean 都受可见覆盖影响，不宜直接解释为真实 region 权重。第一版生成器可先用近似均匀 region，或按地图/布局使用经验权重。
+因此当前数据支持 region 选择存在一阶 persistence：上一轮 high batch 的 region 比独立模型下更容易再次出现。该效应在地图1/2更明显，地图3较弱但同向。
+
+按 prev region 分层的转移率：
+
+| 数据 | prev region | next 2 | next 3 | next 4 | next 5 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 地图1 | 2 | `0.257` | `0.218` | `0.225` | `0.300` |
+| 地图1 | 3 | `0.259` | `0.255` | `0.261` | `0.225` |
+| 地图1 | 4 | `0.207` | `0.130` | `0.397` | `0.267` |
+| 地图1 | 5 | `0.181` | `0.237` | `0.211` | `0.370` |
+| 地图2 | 2 | `0.297` | `0.214` | `0.230` | `0.259` |
+| 地图2 | 3 | `0.269` | `0.274` | `0.179` | `0.278` |
+| 地图2 | 4 | `0.175` | `0.159` | `0.296` | `0.369` |
+| 地图2 | 5 | `0.219` | `0.203` | `0.250` | `0.327` |
+| 地图3 pooled | 2 | `0.293` | `0.213` | `0.297` | `0.197` |
+| 地图3 pooled | 3 | `0.272` | `0.291` | `0.204` | `0.234` |
+| 地图3 pooled | 4 | `0.285` | `0.167` | `0.269` | `0.279` |
+| 地图3 pooled | 5 | `0.198` | `0.285` | `0.234` | `0.284` |
+
+地图1/2中 region `4/5` 的自重复更强；地图3转移更均匀。gap 分层看，`8..16` 各 gap 下 repeat rate 均在独立基线之上附近波动，没有只由某个固定 gap 贡献的迹象。
+
+region 计数和 batch total mean 都受可见覆盖影响，不宜直接解释为真实 region 权重。第一版生成器可先用近似均匀 region，或按地图/布局使用经验权重；更贴近数据的版本应把 region 选择建成一阶 Markov：
+
+```text
+if previous_high_region exists:
+    with p_repeat:
+        high_region = previous_high_region
+    otherwise:
+        high_region = sample_other_or_empirical_region()
+else:
+    high_region = sample_first_region_dist()
+```
+
+粗略参数可先令 `p_repeat` 落在 `0.28..0.33`，地图1/2略高、地图3略低；如果追求回放拟合，则直接使用按地图的经验转移矩阵。
 
 ## Batch Total 分布
 
@@ -340,7 +374,7 @@ for each round t:
     if t != state.next_static2_round:
         continue
 
-    high_region = sample_outer_region()
+    high_region = sample_outer_region_conditioned_on_previous()
     total = sample_empirical_static2_batch_total(map_id)
     cells = [
         cell for cell in static2_cells[high_region]
@@ -365,7 +399,7 @@ for each round t:
 
 ```text
 gap ~ UniformInteger(8, 16)
-region ~ near-uniform over outer regions
+region ~ near-uniform over outer regions, or first-order Markov
 total ~ empirical_static2_batch_total
 cells = unoccupied static2 cells in high region
 split total nearly evenly over cells
@@ -375,7 +409,8 @@ split total nearly evenly over cells
 
 1. 不要把 high batch 触发写成每回合独立 Bernoulli；相邻 high batch 存在 `8` 回合最小间隔，主体为 `8..16`。
 2. 同一回合同一时间只触发一个外围 region。
-3. high region 内 static2 候选格在未被玩家/NPC占用时全覆盖；占用格不获得本次正增量。
-4. static2 金额不是单格独立采样，而是 batch total 在合法候选格上近似均分。
-5. high batch 所在 region 的普通格近似不生成，小额普通格生成发生在其它外围 region。
-6. 地图3 batch total 较低和 non-high 中等片段较多，应优先解释为地图结构/可见覆盖差异，后续可按地图单独校准参数。
+3. 相邻 high batch 的 region 存在一阶 persistence；简化版可近似均匀，拟合版建议使用按地图经验转移矩阵。
+4. high region 内 static2 候选格在未被玩家/NPC占用时全覆盖；占用格不获得本次正增量。
+5. static2 金额不是单格独立采样，而是 batch total 在合法候选格上近似均分。
+6. high batch 所在 region 的普通格近似不生成，小额普通格生成发生在其它外围 region。
+7. 地图3 batch total 较低和 non-high 中等片段较多，应优先解释为地图结构/可见覆盖差异，后续可按地图单独校准参数。

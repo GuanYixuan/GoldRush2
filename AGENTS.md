@@ -8,7 +8,7 @@
 
 ## 关于本地环境/工具
 
-- 开发过程使用`goldrush` conda环境
+- 开发过程使用`goldrush` conda环境，若希望看到实时回显请使用`conda run --no-capture-output -n goldrush <command>`
     - 在开发主线功能时，如果发现环境内没有所需包，请提出安装或使用当前包实现，但不要为了“使用当前包实现”而自行造轮子
 - 仓库内通用辅助脚本参考`tools/README.md`；新增或修改项目通用工具时应同步更新该文档。
 
