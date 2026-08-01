@@ -8,6 +8,8 @@ from simulator.envs.round_step import RoundStepConfig, RoundStepEnv, RoundStepMe
 from simulator.mechanisms.bombs import BernoulliBombRefresher, BombConfig
 from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, OuterGoldConfig, OuterGoldGenerator
 from simulator.mechanisms.maps import SpawnConfig
+from simulator.mechanisms.npc import M4aWeights, NpcEpisodeProfile
+from simulator.state import GameState
 from simulator.types import Action, GameOutput, GoldGenerationEvent, Position
 
 
@@ -55,6 +57,25 @@ class RoundStepEnvTests(unittest.TestCase):
         self.assertEqual(result.state.player_unit(1, 0).position, Position(0, 1))
         self.assertEqual(result.observations, {})
         self.assertEqual(result.game_result.winner_id, 1)
+
+    def test_npc_plans_from_action_time_state_before_first_player_executes(self) -> None:
+        npc_policy = _RecordingNpcPolicy()
+        mechanisms = _quiet_mechanisms()
+        mechanisms.center_gold = _FixedGoldGenerator((GoldGenerationEvent(Position(0, 1), 5),))
+        mechanisms.npc_policy = npc_policy
+        env = RoundStepEnv(
+            config=RoundStepConfig(_one_round_episode()),
+            mechanisms=mechanisms,
+            spawn=SpawnConfig(npc_ids=(-1,), npc_position=Position(8, 8)),
+            p90_latency_ns={1: 1, 2: 2},
+        )
+        env.reset()
+
+        env.step({1: _sequence_output(Action.RIGHT), 2: _stay_output()}, first_player_id=1)
+
+        assert npc_policy.decision_state is not None
+        self.assertEqual(npc_policy.decision_state.gold[Position(0, 1)], 5)
+        self.assertEqual(npc_policy.decision_state.player_unit(1, 0).position, Position(0, 0))
 
     def test_step_returns_next_round_observations_when_not_terminated(self) -> None:
         env = RoundStepEnv(
@@ -154,6 +175,21 @@ class _FixedGoldGenerator:
 
     def generate(self, *_args) -> tuple[GoldGenerationEvent, ...]:
         return self.events
+
+
+class _RecordingNpcPolicy:
+    def __init__(self) -> None:
+        self.decision_state: GameState | None = None
+
+    def sample_profile(self, _state: GameState, _rng) -> NpcEpisodeProfile:
+        return NpcEpisodeProfile(weights=M4aWeights(), temperature=1.0, bomb_blind_p=0.0)
+
+    def sample_order(self, state: GameState, _rng) -> tuple[int, ...]:
+        return tuple(sorted(state.npcs))
+
+    def decide_all(self, decision_state: GameState, _template, npc_order: tuple[int, ...], _rng, _profile) -> dict[int, tuple[Action, ...]]:
+        self.decision_state = decision_state
+        return {npc_id: (Action.STAY, Action.STAY, Action.STAY) for npc_id in npc_order}
 
 
 if __name__ == "__main__":

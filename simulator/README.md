@@ -219,7 +219,8 @@ NPC 策略默认口径：
 - 每个 NPC 行动时枚举当前位置出发的所有合法 3-step path；合法性只排除边界和 `static_grid == 1` 障碍。NPC 与玩家、NPC 之间可重叠，不作为阻挡。
 - 候选 path 应按 `(map_id/static_grid, start_pos)` 缓存；每个起点候选数很小，允许全枚举。
 - 对每条 path 计算 M4a score 后按 `softmax(score / temperature)` 采样，不做 argmax 硬选择。
-- 决策阶段使用同一个 NPC 决策快照同时为 7 个 NPC 生成 actions；该快照取先手玩家行动后、任何 NPC 执行前的状态。不要因为前序 NPC 已采样 path 就修改后序 NPC 的 score。
+- 当前证据不能区分 NPC 是否看到先手玩家执行后的状态；第一版按“玩家与 NPC 基于同一行动前局面同时 plan”建模。
+- 决策阶段使用同一个 NPC 决策快照同时为 7 个 NPC 生成 actions；该快照取本回合资源生成/炸弹刷新后的行动前状态，先手玩家尚未执行。不要因为前序玩家或 NPC 之后执行过动作就修改已生成的 NPC score。
 - 执行阶段按随机 permutation 依次执行已生成的 actions，并按真实规则逐步结算金币和炸弹。前序 NPC 的拾金/踩炸弹只影响后序 NPC 的执行结算，不影响同轮已生成的决策 score。
 - 第一版随机化采用 episode-level profile：每局开始时采样一套全局 M4a 权重、`temperature` 和 `bomb_blind_p`，整局内固定。
 - per-NPC jitter 作为可选项，默认可关闭；若开启，只在 episode reset 时对每个 NPC 采样固定小扰动，幅度约为全局扰动的 `20%`。不要每次 NPC 决策重抽权重。
@@ -351,8 +352,8 @@ EpisodeConfig
   -> GameState
   -> mechanisms generate gold/bomb before action-time observation
   -> make_observation(state, player_id)
+  -> NPC actions sampled from the same action-time state
   -> caller provides P1/P2 GameOutput and first_player_id
-  -> NPC actions sampled from post-fast-player decision snapshot
   -> rules.transition_started_round()
   -> next observations + trace + optional replay
 ```

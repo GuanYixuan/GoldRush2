@@ -144,12 +144,7 @@ class RoundStepEnv:
         assert self.pending_bomb_refresh_event is not None
         round_start_state = copy.deepcopy(self.state)
         npc_order = self.mechanisms.npc_policy.sample_order(self.state, self.rng)
-        npc_actions_holder: dict[int, tuple[Action, ...]] = {}
-
-        def decide_npc_actions(decision_state: GameState, order: tuple[int, ...]) -> dict[int, tuple[Action, ...]]:
-            actions = self.mechanisms.npc_policy.decide_all(decision_state, self.template, order, self.rng, self.npc_profile)
-            npc_actions_holder.update(actions)
-            return actions
+        npc_actions = self.mechanisms.npc_policy.decide_all(copy.deepcopy(self.state), self.template, npc_order, self.rng, self.npc_profile)
 
         transition_result = transition_started_round(
             self.state,
@@ -157,7 +152,7 @@ class RoundStepEnv:
             gold_generated=self.pending_gold_generated,
             first_player_id=first_player_id,
             npc_order=npc_order,
-            npc_action_decider=decide_npc_actions,
+            npc_actions=npc_actions,
             rules=self.config.episode.rules,
             snapshot_accumulator=self.snapshot_accumulator,
         )
@@ -167,7 +162,7 @@ class RoundStepEnv:
             first_player_id=first_player_id,
             player_outputs=outputs,
             npc_order=npc_order,
-            npc_actions=npc_actions_holder,
+            npc_actions=npc_actions,
             gold_generated=self.pending_gold_generated,
             bomb_refresh_event=self.pending_bomb_refresh_event,
             transition_result=transition_result,
@@ -179,7 +174,7 @@ class RoundStepEnv:
                 end_state=self.state,
                 player_outputs=outputs,
                 transition_result=transition_result,
-                npc_actions=npc_actions_holder,
+                npc_actions=npc_actions,
                 npc_order=npc_order,
                 bomb_refresh_event=self.pending_bomb_refresh_event,
             )

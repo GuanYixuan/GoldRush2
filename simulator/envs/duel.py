@@ -125,12 +125,7 @@ def run_duel(
             latencies[player_id].append(latency_ns)
         first_player_id = _first_player_id(config, policy_latency, rng)
         npc_order = mechanisms.npc_policy.sample_order(state, rng)
-        npc_actions_holder: dict[int, tuple[Action, ...]] = {}
-
-        def decide_npc_actions(decision_state: GameState, order: tuple[int, ...]) -> dict[int, tuple[Action, ...]]:
-            actions = mechanisms.npc_policy.decide_all(decision_state, template, order, rng, npc_profile)
-            npc_actions_holder.update(actions)
-            return actions
+        npc_actions = mechanisms.npc_policy.decide_all(copy.deepcopy(state), template, npc_order, rng, npc_profile)
 
         transition_result = transition_started_round(
             state,
@@ -138,7 +133,7 @@ def run_duel(
             gold_generated=gold_generated,
             first_player_id=first_player_id,
             npc_order=npc_order,
-            npc_action_decider=decide_npc_actions,
+            npc_actions=npc_actions,
             rules=config.episode.rules,
             snapshot_accumulator=snapshot_accumulator,
         )
@@ -150,7 +145,7 @@ def run_duel(
             player_outputs=player_outputs,
             policy_latency_ns=policy_latency,
             npc_order=npc_order,
-            npc_actions=npc_actions_holder,
+            npc_actions=npc_actions,
             gold_generated=gold_generated,
             bomb_refresh_event=bomb_event,
             transition_result=transition_result,
@@ -163,7 +158,7 @@ def run_duel(
                 end_state=state,
                 player_outputs=player_outputs,
                 transition_result=transition_result,
-                npc_actions=npc_actions_holder,
+                npc_actions=npc_actions,
                 npc_order=npc_order,
                 bomb_refresh_event=bomb_event,
             )
