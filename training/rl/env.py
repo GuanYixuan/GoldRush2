@@ -31,8 +31,6 @@ class SingleAgentEnvConfig:
     def __post_init__(self) -> None:
         if self.agent_player_id not in (1, 2):
             raise SimulatorRuleError(f"agent_player_id must be 1 or 2, got {self.agent_player_id}")
-        if self.opponent_spec is None and self.opponent_league is None:
-            raise SimulatorRuleError("SingleAgentEnvConfig requires opponent_spec or opponent_league")
 
 
 class SingleAgentGoldRushEnv:
@@ -144,7 +142,8 @@ class SingleAgentGoldRushEnv:
     def _sample_opponent_spec(self, seed: int | None) -> OpponentSpec:
         if self.config.opponent_league is not None:
             return self.config.opponent_league.sample_spec(random.Random(seed), self.config.league_split)
-        assert self.config.opponent_spec is not None
+        if self.config.opponent_spec is None:
+            raise SimulatorRuleError("reset requires opponent_spec when env config has no opponent_spec or opponent_league")
         return self.config.opponent_spec
 
     def _reset_info(self, seed: int | None) -> dict[str, Any]:
