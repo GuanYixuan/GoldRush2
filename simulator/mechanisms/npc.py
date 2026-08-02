@@ -28,13 +28,14 @@ class NpcPath:
 
 @dataclass(frozen=True)
 class M4aWeights:
-    gold: float = 2.106687
-    enter_bomb: float = -2.796592
-    stay: float = -3.126171
-    straight3: float = 1.212827
-    backtrack: float = -0.580930
-    bomb_trapped_stay: float = 10.882944
-    center: float = 0.180587
+    gold: float = 0.907331
+    static_pickup: float = 0.912740
+    enter_bomb: float = -2.716949
+    stay: float = -3.065158
+    straight3: float = 1.209899
+    backtrack: float = -0.709615
+    bomb_trapped_stay: float = 10.916492
+    center: float = 0.167728
 
 
 @dataclass(frozen=True)
@@ -84,14 +85,15 @@ class M4aNpcPolicy:
         if self.config.randomize_profile:
             weights = M4aWeights(
                 gold=weights.gold * _log_uniform(rng, 0.5, 2.0),
+                static_pickup=weights.static_pickup + rng.uniform(-0.35, 0.35),
                 enter_bomb=weights.enter_bomb * _log_uniform(rng, 0.5, 2.0),
                 stay=weights.stay + rng.uniform(-0.8, 0.8),
                 straight3=weights.straight3 + rng.uniform(-0.8, 0.8),
                 backtrack=weights.backtrack + rng.uniform(-0.5, 0.5),
                 bomb_trapped_stay=weights.bomb_trapped_stay + rng.uniform(-3.0, 3.0),
-                center=weights.center + rng.uniform(-0.14, 0.14),
+                center=weights.center + rng.uniform(-0.12, 0.12),
             )
-            temperature *= _log_uniform(rng, 0.7, 1.5)
+            temperature = rng.uniform(0.7, 2.5)
             bomb_blind_p = rng.uniform(0.0, 0.15)
 
         overrides: dict[int, tuple[M4aWeights, float]] = {}
@@ -187,6 +189,7 @@ def score_path(
     features = path_features(state, start, path, bombs_visible=bombs_visible)
     return (
         weights.gold * features["dynamic_reward_div10"]
+        + weights.static_pickup * features["static_pickup_count"]
         + weights.enter_bomb * features["enter_bomb_count"]
         + weights.stay * features["stay_count"]
         + weights.straight3 * features["straight3"]
@@ -200,13 +203,18 @@ def path_features(state: GameState, start: Position, path: NpcPath, *, bombs_vis
     local_gold = dict(state.gold)
     local_bombs = set(state.bombs) if bombs_visible else set()
     reward = 0
+    pickup_count = 0
+    static_pickup_count = 0
     enter_bomb_count = 0
 
     for action, position in zip(path.actions, path.positions):
         if action == Action.STAY:
             continue
+        if state.gold.get(position) is not None:
+            static_pickup_count += 1
         available = local_gold.get(position)
         if available is not None:
+            pickup_count += 1
             picked = _ceil_pickup(available)
             reward += picked
             remaining = available - picked
@@ -220,6 +228,8 @@ def path_features(state: GameState, start: Position, path: NpcPath, *, bombs_vis
 
     return {
         "dynamic_reward_div10": reward / 10.0,
+        "pickup_count": float(pickup_count),
+        "static_pickup_count": float(static_pickup_count),
         "enter_bomb_count": float(enter_bomb_count),
         "stay_count": float(sum(1 for action in path.actions if action == Action.STAY)),
         "straight3": float(_is_straight3(path.actions)),
@@ -296,6 +306,7 @@ def _jitter_profile(weights: M4aWeights, temperature: float, scale: float, rng: 
     return (
         M4aWeights(
             gold=weights.gold + rng.gauss(0.0, 0.1 * scale * abs(weights.gold)),
+            static_pickup=weights.static_pickup + rng.gauss(0.0, 0.1 * scale * abs(weights.static_pickup)),
             enter_bomb=weights.enter_bomb + rng.gauss(0.0, 0.1 * scale * abs(weights.enter_bomb)),
             stay=weights.stay + rng.gauss(0.0, 0.1 * scale * abs(weights.stay)),
             straight3=weights.straight3 + rng.gauss(0.0, 0.1 * scale * abs(weights.straight3)),

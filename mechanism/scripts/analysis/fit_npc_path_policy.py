@@ -47,6 +47,7 @@ ACTION_DELTAS = {
 }
 FEATURE_NAMES = [
     "dynamic_reward_div10",
+    "pickup_count",
     "enter_bomb_count",
     "adjacent_bomb_count",
     "stay_count",
@@ -56,20 +57,32 @@ FEATURE_NAMES = [
     "first_two_same_nonstay",
     "last_two_same_nonstay",
     "sandwich",
+    "center_delta_chebyshev",
 ]
+PICKUP_FEATURE_INDEX = 1
 MODEL_FEATURES = {
     "M1_dynamic_reward": [0],
-    "M2a_dynamic_reward_enter_bomb": [0, 1],
-    "M2_dynamic_reward_bomb": [0, 1, 2],
-    "M3a_dynamic_enter_bomb_stay": [0, 1, 3],
-    "M3b_dynamic_enter_bomb_stay_straight": [0, 1, 3, 4],
-    "M3c_dynamic_enter_bomb_shape": [0, 1, 3, 4, 5],
-    "M4a_dynamic_enter_bomb_shape_trapped_stay": [0, 1, 3, 4, 5, 6],
-    "M5a_m4a_first_two_same": [0, 1, 3, 4, 5, 6, 7],
-    "M5b_m5a_last_two_same": [0, 1, 3, 4, 5, 6, 7, 8],
-    "M5c_m5b_sandwich": [0, 1, 3, 4, 5, 6, 7, 8, 9],
+    "M1b_dynamic_reward_pickup_count": [0, 1],
+    "M2a_dynamic_reward_enter_bomb": [0, 2],
+    "M2b_dynamic_reward_pickup_enter_bomb": [0, 1, 2],
+    "M2_dynamic_reward_bomb": [0, 2, 3],
+    "M3a_dynamic_enter_bomb_stay": [0, 2, 4],
+    "M3a_pickup_dynamic_enter_bomb_stay": [0, 1, 2, 4],
+    "M3b_dynamic_enter_bomb_stay_straight": [0, 2, 4, 5],
+    "M3c_dynamic_enter_bomb_shape": [0, 2, 4, 5, 6],
+    "M4a_dynamic_enter_bomb_shape_trapped_stay": [0, 2, 4, 5, 6, 7],
+    "M4b_m4a_pickup_count": [0, 1, 2, 4, 5, 6, 7],
+    "M4c_m4a_center_chebyshev": [0, 2, 4, 5, 6, 7, 11],
+    "M4d_m4a_pickup_center": [0, 1, 2, 4, 5, 6, 7, 11],
+    "M5a_m4a_first_two_same": [0, 2, 4, 5, 6, 7, 8],
+    "M5b_m5a_last_two_same": [0, 2, 4, 5, 6, 7, 8, 9],
+    "M5c_m5b_sandwich": [0, 2, 4, 5, 6, 7, 8, 9, 10],
+    "M5d_m5c_pickup_count": [0, 1, 2, 4, 5, 6, 7, 8, 9, 10],
+    "M5e_m5c_center_chebyshev": [0, 2, 4, 5, 6, 7, 8, 9, 10, 11],
+    "M5f_m5c_pickup_center": [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11],
 }
 OPPOSITE_ACTIONS = {(0, 1), (1, 0), (2, 3), (3, 2)}
+GRID_CENTER = (8, 8)
 
 
 class FitError(RuntimeError):
@@ -176,18 +189,26 @@ def path_features(
     gold_remaining: dict[tuple[int, int], int],
     bombs_remaining: set[tuple[int, int]],
     bomb_trapped_start: bool,
-) -> tuple[float, float, float, float, float, float, float, float, float, float]:
+    pickup_mode: str = "count",
+) -> tuple[float, float, float, float, float, float, float, float, float, float, float, float]:
+    if pickup_mode not in {"count", "has", "static-count"}:
+        raise FitError(f"unknown pickup_mode: {pickup_mode}")
     local_gold = dict(gold_remaining)
     local_bombs = set(bombs_remaining)
     reward = 0
+    pickup_count = 0
+    static_pickup_count = 0
     enter_bomb = 0
     adjacent_bomb = 0
     prev = start_pos
     for action, pos in zip(candidate.actions, candidate.positions):
         moved = action != 4 and pos != prev
         if moved:
+            if gold_remaining.get(pos, 0) > 0:
+                static_pickup_count += 1
             value = local_gold.get(pos, 0)
             if value > 0:
+                pickup_count += 1
                 gain = math.ceil(0.65 * value)
                 reward += gain
                 remaining = value - gain
@@ -210,8 +231,16 @@ def path_features(
     first_two_same = int(actions[0] == actions[1] and actions[0] != 4)
     last_two_same = int(actions[1] == actions[2] and actions[1] != 4)
     sandwich = int(actions[0] == actions[2] and actions[0] != actions[1] and actions[0] != 4 and actions[1] != 4)
+    center_delta_chebyshev = _center_chebyshev(start_pos) - _center_chebyshev(candidate.positions[-1])
+    if pickup_mode == "count":
+        pickup_signal = pickup_count
+    elif pickup_mode == "has":
+        pickup_signal = int(pickup_count > 0)
+    else:
+        pickup_signal = static_pickup_count
     return (
         reward / 10.0,
+        float(pickup_signal),
         float(enter_bomb),
         float(adjacent_bomb),
         float(stay_count),
@@ -221,6 +250,7 @@ def path_features(
         float(first_two_same),
         float(last_two_same),
         float(sandwich),
+        float(center_delta_chebyshev),
     )
 
 
@@ -264,6 +294,10 @@ def visible_bombs(grid: list[list[int]]) -> set[tuple[int, int]]:
     }
 
 
+def _center_chebyshev(pos: tuple[int, int]) -> int:
+    return max(abs(pos[0] - GRID_CENTER[0]), abs(pos[1] - GRID_CENTER[1]))
+
+
 def collect_samples(
     run_ids: list[str],
     merged_root: Path,
@@ -271,13 +305,14 @@ def collect_samples(
     max_samples_per_run: int,
     valid_mod: int,
     valid_remainder: int,
+    pickup_mode: str,
 ) -> tuple[list[Sample], dict[str, Any]]:
     samples: list[Sample] = []
     path_cache: dict[tuple[tuple[tuple[int, ...], ...], tuple[int, int]], list[PathCandidate]] = {}
     counters = {
-        "eligible_ordered_samples": 0,
+        "eligible_samples": 0,
         "used_samples": 0,
-        "skipped_incomplete_ordered_rounds": 0,
+        "skipped_incomplete_rounds": 0,
         "by_run": {},
     }
 
@@ -349,7 +384,7 @@ def collect_samples(
                     for npc_id in npc_order:
                         start_pos, actual_candidate = round_paths[npc_id]
                         run_seen += 1
-                        counters["eligible_ordered_samples"] += 1
+                        counters["eligible_samples"] += 1
                         if (run_seen - 1) % sample_mod == 0 and (
                             not max_samples_per_run or run_used < max_samples_per_run
                         ):
@@ -371,6 +406,7 @@ def collect_samples(
                                         gold_remaining,
                                         bombs_remaining,
                                         bomb_trapped_start,
+                                        pickup_mode,
                                     )
                                 )
                             if actual_index is None:
@@ -384,17 +420,16 @@ def collect_samples(
                             )
                             run_used += 1
                             counters["used_samples"] += 1
-                        consume_actual_path(start_pos, actual_candidate, gold_remaining, bombs_remaining)
                     continue
 
                 run_incomplete_rounds += 1
 
         counters["by_run"][run_id] = {
-            "eligible_ordered_samples": run_seen,
+            "eligible_samples": run_seen,
             "used_samples": run_used,
-            "skipped_incomplete_ordered_rounds": run_incomplete_rounds,
+            "skipped_incomplete_rounds": run_incomplete_rounds,
         }
-        counters["skipped_incomplete_ordered_rounds"] += run_incomplete_rounds
+        counters["skipped_incomplete_rounds"] += run_incomplete_rounds
         print(f"loaded run={run_id} eligible={run_seen} used={run_used}")
 
     return samples, counters
@@ -436,7 +471,44 @@ def fit_model(samples: list[Sample], feature_indices: list[int], l2: float, maxi
     }
 
 
-def evaluate(samples: list[Sample], feature_indices: list[int], weights: np.ndarray) -> dict[str, Any]:
+def feature_names_for_mode(pickup_mode: str) -> list[str]:
+    if pickup_mode not in {"count", "has", "static-count"}:
+        raise FitError(f"unknown pickup_mode: {pickup_mode}")
+    feature_names = list(FEATURE_NAMES)
+    if pickup_mode == "has":
+        feature_names[PICKUP_FEATURE_INDEX] = "has_pickup"
+    elif pickup_mode == "static-count":
+        feature_names[PICKUP_FEATURE_INDEX] = "static_pickup_count"
+    return feature_names
+
+
+def model_features_for_mode(pickup_mode: str) -> dict[str, list[int]]:
+    if pickup_mode != "static-count":
+        return MODEL_FEATURES
+    return {
+        "M1_dynamic_reward": [0],
+        "M1b_dynamic_reward_static_pickup_count": [0, 1],
+        "M2a_dynamic_reward_enter_bomb": [0, 2],
+        "M2b_dynamic_reward_static_pickup_enter_bomb": [0, 1, 2],
+        "M2_dynamic_reward_bomb": [0, 2, 3],
+        "M3a_dynamic_enter_bomb_stay": [0, 2, 4],
+        "M3a_static_pickup_dynamic_enter_bomb_stay": [0, 1, 2, 4],
+        "M3b_dynamic_enter_bomb_stay_straight": [0, 2, 4, 5],
+        "M3c_dynamic_enter_bomb_shape": [0, 2, 4, 5, 6],
+        "M4a_dynamic_enter_bomb_shape_trapped_stay": [0, 2, 4, 5, 6, 7],
+        "M4b_m4a_static_pickup_count": [0, 1, 2, 4, 5, 6, 7],
+        "M4c_m4a_center_chebyshev": [0, 2, 4, 5, 6, 7, 11],
+        "M4e_m4a_static_pickup_center": [0, 1, 2, 4, 5, 6, 7, 11],
+        "M5a_m4a_first_two_same": [0, 2, 4, 5, 6, 7, 8],
+        "M5b_m5a_last_two_same": [0, 2, 4, 5, 6, 7, 8, 9],
+        "M5c_m5b_sandwich": [0, 2, 4, 5, 6, 7, 8, 9, 10],
+        "M5d_m5c_static_pickup_count": [0, 1, 2, 4, 5, 6, 7, 8, 9, 10],
+        "M5e_m5c_center_chebyshev": [0, 2, 4, 5, 6, 7, 8, 9, 10, 11],
+        "M5g_m5c_static_pickup_center": [0, 1, 2, 4, 5, 6, 7, 8, 9, 10, 11],
+    }
+
+
+def evaluate(samples: list[Sample], feature_indices: list[int], weights: np.ndarray, feature_names: list[str]) -> dict[str, Any]:
     if not samples:
         raise FitError("评估样本为空")
     total_nll = 0.0
@@ -476,9 +548,9 @@ def evaluate(samples: list[Sample], feature_indices: list[int], weights: np.ndar
         "top3": top3 / n,
         "mrr": mrr / n,
         "actual_path_probability": prob_sum / n,
-        "actual_feature_avg": dict(zip(FEATURE_NAMES, (actual_features / n).tolist())),
-        "model_expected_feature_avg": dict(zip(FEATURE_NAMES, (expected_features / n).tolist())),
-        "uniform_expected_feature_avg": dict(zip(FEATURE_NAMES, (uniform_features / n).tolist())),
+        "actual_feature_avg": dict(zip(feature_names, (actual_features / n).tolist())),
+        "model_expected_feature_avg": dict(zip(feature_names, (expected_features / n).tolist())),
+        "uniform_expected_feature_avg": dict(zip(feature_names, (uniform_features / n).tolist())),
     }
 
 
@@ -501,6 +573,7 @@ def main() -> None:
     parser.add_argument("--valid-remainder", type=int, default=0)
     parser.add_argument("--l2", type=float, default=1e-5)
     parser.add_argument("--maxiter", type=int, default=100)
+    parser.add_argument("--pickup-mode", choices=["count", "has", "static-count"], default="count")
     args = parser.parse_args()
 
     if args.sample_mod <= 0:
@@ -511,6 +584,8 @@ def main() -> None:
         raise FitError("--valid-remainder 必须在 [0, valid_mod) 内")
 
     run_ids = args.run_ids or DEFAULT_RUN_IDS
+    feature_names = feature_names_for_mode(args.pickup_mode)
+    model_features = model_features_for_mode(args.pickup_mode)
     fit_id = args.fit_id or datetime.now().strftime("npc_path_m1_m5_%Y%m%d_%H%M%S")
     output_dir = args.output_root / fit_id
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -522,6 +597,7 @@ def main() -> None:
         max_samples_per_run=args.max_samples_per_run,
         valid_mod=args.valid_mod,
         valid_remainder=args.valid_remainder,
+        pickup_mode=args.pickup_mode,
     )
     train_samples = [sample for sample in samples if sample.split == "train"]
     valid_samples = [sample for sample in samples if sample.split == "valid"]
@@ -535,11 +611,11 @@ def main() -> None:
             "fit": {"success": True, "message": "baseline", "iterations": 0, "loss": None},
         }
     }
-    for model_name, indices in MODEL_FEATURES.items():
+    for model_name, indices in model_features.items():
         fit = fit_model(train_samples, indices, args.l2, args.maxiter)
         models[model_name] = {
-            "feature_names": [FEATURE_NAMES[index] for index in indices],
-            "weights": dict(zip((FEATURE_NAMES[index] for index in indices), fit["weights"])),
+            "feature_names": [feature_names[index] for index in indices],
+            "weights": dict(zip((feature_names[index] for index in indices), fit["weights"])),
             "fit": {k: v for k, v in fit.items() if k != "weights"},
         }
         print(f"fit {model_name} success={fit['success']} loss={fit['loss']:.6f} weights={fit['weights']}")
@@ -547,10 +623,10 @@ def main() -> None:
     metrics_rows: list[dict[str, Any]] = []
     validation_summary_rows: list[dict[str, Any]] = []
     for model_name, info in models.items():
-        indices = [FEATURE_NAMES.index(name) for name in info["feature_names"]]
+        indices = [feature_names.index(name) for name in info["feature_names"]]
         weights = np.asarray([info["weights"][name] for name in info["feature_names"]], dtype=np.float64)
         for split_name, split_samples in [("train", train_samples), ("valid", valid_samples)]:
-            metric = evaluate(split_samples, indices, weights)
+            metric = evaluate(split_samples, indices, weights, feature_names)
             info.setdefault("metrics", {})[split_name] = metric
             metrics_rows.append(
                 {
@@ -564,7 +640,7 @@ def main() -> None:
                     "actual_path_probability": f"{metric['actual_path_probability']:.8f}",
                 }
             )
-            for feature_name in FEATURE_NAMES:
+            for feature_name in feature_names:
                 validation_summary_rows.append(
                     {
                         "model": model_name,
@@ -583,7 +659,8 @@ def main() -> None:
     metadata = {
         "fit_id": fit_id,
         "run_ids": run_ids,
-        "feature_names": FEATURE_NAMES,
+        "feature_names": feature_names,
+        "pickup_mode": args.pickup_mode,
         "sample_mod": args.sample_mod,
         "max_samples_per_run": args.max_samples_per_run,
         "valid_mod": args.valid_mod,

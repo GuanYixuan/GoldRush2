@@ -1,8 +1,19 @@
-# NPC Path Policy M1-M5c 拟合结果
+# NPC Path Policy Canonical 拟合结果
 
-本文记录 NPC path-level softmax 的逐项拟合实验结果。推荐建模与 simulator 实现口径见 `npc_behavior_modeling_overview.md`。
+本文记录 NPC path-level softmax 的 canonical 口径拟合结果。本文是正式 NPC 拟合结论来源。
 
-## 数据与口径
+## Canonical 口径
+
+本项目后续统一采用如下 NPC plan 口径：
+
+1. 回合开始时先刷新炸弹、生成金币，并把资源变化落到 round-start state。
+2. 玩家与 NPC 都基于该同一个 round-start state 规划动作。
+3. 7 个 NPC 的 actions 同时产出，不看先手玩家行动后的状态，也不看同轮前序 NPC 已执行后的状态。
+4. 之后按 `first_player -> NPC permutation -> second_player` 执行和结算。
+
+这与当前 simulator 实现一致。
+
+## 数据与命令
 
 输入数据：
 
@@ -14,27 +25,20 @@
 运行命令：
 
 ```bash
-conda run -n goldrush python mechanism/scripts/analysis/fit_npc_path_policy.py \
-  --fit-id maps123_ordered_m1_m5_path_shape_sample75k_allgames_l2_1e-5_20260730 \
+conda run --no-capture-output -n goldrush python mechanism/scripts/analysis/fit_npc_path_policy.py \
+  --fit-id maps123_canonical_simstart_m1_m5_static_pickup_center_allgames_l2_1e-5_20260802 \
   --sample-mod 10 \
   --max-samples-per-run 0 \
-  --maxiter 100 \
-  --l2 1e-5
+  --maxiter 200 \
+  --l2 1e-5 \
+  --pickup-mode static-count
 ```
 
 输出目录：
 
 ```text
-mechanism/data/processed/npc_policy_fit/maps123_ordered_m1_m5_path_shape_sample75k_allgames_l2_1e-5_20260730/
+mechanism/data/processed/npc_policy_fit/maps123_canonical_simstart_m1_m5_static_pickup_center_allgames_l2_1e-5_20260802/
 ```
-
-本次使用 ordered 口径：
-
-1. 只使用同一轮 7 个 NPC 都能按 `start -> actions -> end` 连续观察的样本。
-2. 按 `dispatch_order` 依次处理 NPC。
-3. 对当前 NPC 计算候选 path 特征前，先用更早 NPC 的真实 action 扣减可见金币和炸弹。
-4. 候选集为当前起点上所有合法 3-step path；合法性只排除边界和静态障碍。
-5. train / valid 按 `run_id:game_id` 的稳定 hash 切分。
 
 样本量：
 
@@ -44,244 +48,153 @@ mechanism/data/processed/npc_policy_fit/maps123_ordered_m1_m5_path_shape_sample7
 | valid | `18113` |
 | total | `86962` |
 
-各 run 可用 ordered 样本与抽样样本：
+各 run 样本：
 
-| run_id | eligible ordered samples | used samples |
+| run_id | eligible samples | used samples |
 | --- | ---: | ---: |
 | `symobs-a-map1-100-20260727-231446` | `301553` | `30156` |
 | `symobs-a-map2-100-20260727-231704` | `308840` | `30884` |
 | `symobs-m3a-map3-100-20260728-200953` | `126378` | `12638` |
 | `symobs-m3b-map3-100-20260728-202647` | `132832` | `13284` |
 
-## 模型序列
+## 特征
 
-```text
-M0:  uniform
-
-M1:
-    dynamic_reward_div10
-
-M2a:
-    dynamic_reward_div10
-    enter_bomb_count
-
-M2:
-    dynamic_reward_div10
-    enter_bomb_count
-    adjacent_bomb_count
-
-M3a:
-    dynamic_reward_div10
-    enter_bomb_count
-    stay_count
-
-M3b:
-    dynamic_reward_div10
-    enter_bomb_count
-    stay_count
-    straight3
-
-M3c:
-    dynamic_reward_div10
-    enter_bomb_count
-    stay_count
-    straight3
-    backtrack
-
-M4a:
-    dynamic_reward_div10
-    enter_bomb_count
-    stay_count
-    straight3
-    backtrack
-    bomb_trapped_stay
-
-M5a:
-    M4a
-    first_two_same_nonstay
-
-M5b:
-    M5a
-    last_two_same_nonstay
-
-M5c:
-    M5b
-    sandwich
-```
-
-特征含义：
-
-- `dynamic_reward_div10 = dynamic_pickup_reward / 10`。
-- `enter_bomb_count`：三步 path 中实际移动进入可见炸弹格的次数。
-- `adjacent_bomb_count`：三步位置中与当前可见炸弹 Manhattan 距离为 1 的次数。
+- `dynamic_reward_div10`：按 path 内动态 `ceil(65%)` 拾取结算得到的 pickup reward，再除以 `10`。
+- `pickup_count`：path 中发生金币 pickup 的步数；只计是否吃到金币，不按 amount 放大。
+- `static_pickup_count`：path 中每次移动进入 round-start 时有金币的格子计 `1`；该特征不模拟 path 内金币扣减，因此即使金额为 `1`，重复进出同一格也可计多次。金额收益仍由 `dynamic_reward_div10` 按真实动态扣减计算。
+- `enter_bomb_count`：path 中实际移动进入可见炸弹格的次数。
+- `adjacent_bomb_count`：path 三步位置中与可见炸弹 Manhattan 距离为 `1` 的次数。
 - `stay_count`：三步动作中 `action=4` 的次数。
 - `straight3`：三步同向且非停。
 - `backtrack`：存在相邻两步反向移动。
-- `bomb_trapped_stay`：起点所有合法相邻非停格都是当前可见炸弹，且候选 path 为 `[4,4,4]`。
+- `bomb_trapped_stay`：起点所有合法相邻非停格都是可见炸弹，且候选 path 为 `[4,4,4]`。
 - `first_two_same_nonstay`：前两步同向且非停。
 - `last_two_same_nonstay`：后两步同向且非停。
 - `sandwich`：`a0 == a2 != a1`，且 `a0/a1` 都非停。
-
-注意：`bomb_trapped_stay` 是稀有特征。默认正则 `l2=1e-3` 会明显压低该项权重，因此本次主结果使用 `l2=1e-5`。
-
-## 拟合权重
-
-| model | dynamic_reward_div10 | enter_bomb_count | adjacent_bomb_count | stay_count | straight3 | backtrack | bomb_trapped_stay | first_two_same_nonstay | last_two_same_nonstay | sandwich |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| M1 | `2.819947` |  |  |  |  |  |  |  |  |  |
-| M2a | `2.854113` | `-2.458719` |  |  |  |  |  |  |  |  |
-| M2 | `2.851996` | `-2.451756` | `0.058965` |  |  |  |  |  |  |  |
-| M3a | `2.243166` | `-2.729309` |  | `-3.093344` |  |  |  |  |  |  |
-| M3b | `2.135307` | `-2.778070` |  | `-2.912154` | `1.467275` |  |  |  |  |  |
-| M3c | `2.064451` | `-2.841216` |  | `-3.095453` | `1.188170` | `-0.568594` |  |  |  |  |
-| M4a | `2.064294` | `-2.800031` |  | `-3.131701` | `1.186625` | `-0.569309` | `10.777999` |  |  |  |
-| M5a | `2.042112` | `-2.801638` |  | `-3.034541` | `0.863517` | `-0.498504` | `10.720481` | `0.512085` |  |  |
-| M5b | `2.029310` | `-2.800418` |  | `-2.917844` | `0.320291` | `-0.419714` | `10.633031` | `0.708062` | `0.570831` |  |
-| M5c | `2.021454` | `-2.789653` |  | `-2.815642` | `0.196427` | `-0.384252` | `10.516389` | `0.847191` | `0.707631` | `0.322904` |
-
-解释：
-
-- 金币收益权重始终为正，动态 `65%` path reward 是稳定的一阶信号。
-- 直接进入炸弹格权重稳定为强负。
-- `adjacent_bomb_count` 在 M2 中只有很小正权重，且 M2 相比 M2a 的增益极小，不建议进入默认模拟器策略。
-- `stay_count` 权重强负，说明 NPC 几乎走满三步这一形状先验非常关键。
-- M5 系列显示 NPC 对 path 形状有更细的偏好：前两步同向、后两步同向、`a0 == a2 != a1` 都是正项。
-- 加入 M5 细形状项后，`straight3` 权重被明显分解，说明原 M3/M4 的 `straight3` 部分吸收了“两步连续同向”的偏好。
-- `bomb_trapped_stay` 权重很大，表示它是 `stay_count` 强负先验下的例外项。
+- `center_delta_chebyshev`：`start_chebyshev - end_chebyshev`，越大表示越靠近中心；`chebyshev(pos)=max(abs(row-8), abs(col-8))`。
 
 ## 验证指标
 
 | model | valid NLL | top1 | top3 | MRR | actual path prob |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | M0 uniform | `4.370542` | `7.70%` | `14.09%` | `15.21%` | `1.352%` |
-| M1 dynamic reward | `4.122165` | `17.06%` | `28.77%` | `26.91%` | `2.964%` |
-| M2a dynamic + enter bomb | `4.052143` | `18.51%` | `30.43%` | `28.54%` | `3.260%` |
-| M2 dynamic + bomb | `4.051946` | `15.98%` | `27.42%` | `25.90%` | `3.259%` |
-| M3a + stay | `3.443826` | `18.52%` | `31.78%` | `30.33%` | `5.304%` |
-| M3b + straight3 | `3.317798` | `16.89%` | `36.10%` | `31.53%` | `6.634%` |
-| M3c + backtrack | `3.287138` | `17.51%` | `36.75%` | `32.10%` | `6.838%` |
-| M4a + trapped stay | `3.285297` | `17.52%` | `36.76%` | `32.11%` | `6.852%` |
-| M5a + first two same | `3.269292` | `16.47%` | `34.57%` | `30.98%` | `6.973%` |
-| M5b + last two same | `3.252415` | `16.52%` | `35.02%` | `31.21%` | `7.124%` |
-| M5c + sandwich | `3.250092` | `16.63%` | `35.22%` | `31.37%` | `7.114%` |
+| M1 dynamic reward | `4.093327` | `17.94%` | `30.17%` | `27.96%` | `3.174%` |
+| M1b + pickup count | `3.995739` | `17.38%` | `29.76%` | `27.55%` | `3.553%` |
+| M2a dynamic + enter bomb | `4.023021` | `19.39%` | `31.87%` | `29.59%` | `3.484%` |
+| M2b + pickup count | `3.932054` | `18.69%` | `31.39%` | `29.10%` | `3.834%` |
+| M3a + stay | `3.423387` | `19.42%` | `33.15%` | `31.34%` | `5.547%` |
+| M3a + pickup count | `3.379153` | `18.82%` | `32.64%` | `30.89%` | `5.852%` |
+| M3b + straight3 | `3.298712` | `17.37%` | `37.05%` | `32.17%` | `6.881%` |
+| M3c + backtrack | `3.268881` | `18.06%` | `37.38%` | `32.67%` | `7.083%` |
+| M4a + trapped stay | `3.267048` | `18.08%` | `37.39%` | `32.68%` | `7.097%` |
+| M4b + pickup count | `3.210355` | `18.97%` | `38.43%` | `33.65%` | `7.619%` |
+| M4c + center chebyshev | `3.246296` | `17.87%` | `38.29%` | `32.95%` | `7.402%` |
+| M4d + pickup + center | `3.192912` | `19.35%` | `39.24%` | `34.28%` | `7.903%` |
+| M4e + static pickup + center | `3.177952` | `19.59%` | `40.47%` | `34.86%` | `8.043%` |
+| M5a + first two same | `3.251115` | `17.03%` | `35.44%` | `31.58%` | `7.221%` |
+| M5b + last two same | `3.234455` | `17.02%` | `35.80%` | `31.75%` | `7.375%` |
+| M5c + sandwich | `3.232150` | `17.15%` | `36.00%` | `31.93%` | `7.365%` |
+| M5d + pickup count | `3.174828` | `18.69%` | `37.42%` | `33.45%` | `7.921%` |
+| M5e + center chebyshev | `3.210594` | `17.27%` | `36.71%` | `32.39%` | `7.684%` |
+| M5f + pickup + center | `3.156817` | `18.53%` | `38.30%` | `33.66%` | `8.216%` |
+| M5g + static pickup + center | `3.142093` | `18.57%` | `38.84%` | `33.96%` | `8.354%` |
 
 关键增益：
 
-- M1 相比 M0：NLL 改善 `0.2484 nats / trajectory`。
-- M2a 相比 M1：NLL 改善 `0.0700`，主要来自直接踩炸弹惩罚。
-- M2 相比 M2a：NLL 只改善 `0.0002`，`adjacent_bomb_count` 暂不值得保留。
-- M3a 相比 M2a：NLL 改善 `0.6083`，`stay_count` 是极强 shape 特征。
-- M3b 相比 M3a：NLL 改善 `0.1260`，`straight3` 有明确增益。
-- M3c 相比 M3b：NLL 改善 `0.0307`，`backtrack` 有小但稳定的增益。
-- M4a 相比 M3c：整体 NLL 只改善 `0.0018`，但其目标是修正稀有 trapped 场景。
-- M5a/M5b/M5c 相比 M4a：NLL 合计改善 `0.0352`，主要来自两步连续同向，`sandwich` 额外改善较小。
+- `pickup_count` 是强特征：M4a -> M4b 改善 `0.0567` NLL；M5c -> M5d 改善 `0.0573`。
+- `center_delta_chebyshev` 仍有效：M4a -> M4c 改善 `0.0208`；M5c -> M5e 改善 `0.0216`。
+- `pickup_count` 与中心项可叠加：M4a -> M4d 改善 `0.0741`；M5c -> M5f 改善 `0.0753`。
+- `static_pickup_count` 进一步优于 `pickup_count`：M4d -> M4e 改善 `0.0150`；M5f -> M5g 改善 `0.0147`。
+- `adjacent_bomb_count` 增益极小，仍不建议进入默认策略。
 
-M5 系列的 top1 和 MRR 低于 M4a，但 NLL、actual path probability 和关键形状特征均值更好。若目标是复现 replay 统计分布，M5c 优于 M4a；若目标是更小的可解释策略，M4a 仍是可接受简化版。
+## 拟合权重
+
+重点模型权重：
+
+| feature | M4a | M4d pickup+center | M4e static+center | M5f pickup+center | M5g static+center |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `dynamic_reward_div10` | `2.073989` | `0.945710` | `0.907331` | `0.909601` | `0.875531` |
+| `pickup_count` |  | `0.876940` |  | `0.871307` |  |
+| `static_pickup_count` |  |  | `0.912740` |  | `0.905037` |
+| `enter_bomb_count` | `-2.795283` | `-2.720128` | `-2.716949` | `-2.711302` | `-2.710227` |
+| `stay_count` | `-3.120374` | `-3.073668` | `-3.065158` | `-2.760196` | `-2.758740` |
+| `straight3` | `1.183404` | `1.209525` | `1.209899` | `0.217320` | `0.219614` |
+| `backtrack` | `-0.562663` | `-0.647360` | `-0.709615` | `-0.462810` | `-0.526579` |
+| `bomb_trapped_stay` | `10.776788` | `10.936934` | `10.916492` | `10.659804` | `10.652026` |
+| `first_two_same_nonstay` |  |  |  | `0.848344` | `0.826686` |
+| `last_two_same_nonstay` |  |  |  | `0.707010` | `0.716532` |
+| `sandwich` |  |  |  | `0.302928` | `0.274567` |
+| `center_delta_chebyshev` |  | `0.167486` | `0.167728` | `0.167818` | `0.167938` |
+
+观察：
+
+- 加入 pickup 基础效用后，`dynamic_reward_div10` 从约 `2.07` 降到约 `0.88-0.95`，说明原动态收益项吸收了“进入金币目标格本身有固定效用”的一部分。
+- `static_pickup_count` 权重稳定在 `0.90-0.91`，略强于动态 `pickup_count` 口径。
+- 中心项在 pickup 后仍稳定为正，权重约 `0.167-0.168`；它不是 pickup 的替代项。
 
 ## 特征均值对照
 
 valid split 中，实际 path 与模型期望的关键特征：
 
-| model | dynamic_reward_div10 | enter_bomb_count | stay_count | straight3 | backtrack | bomb_trapped_stay | first_two_same_nonstay | last_two_same_nonstay | sandwich |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| actual | `0.257859` | `0.011594` | `0.030862` | `0.214376` | `0.312262` | `0.000166` | `0.450947` | `0.415503` | `0.142108` |
-| uniform expected | `0.085571` | `0.093556` | `0.697126` | `0.028699` | `0.314086` | `0.000004` | `0.150127` | `0.144712` | `0.088450` |
-| M2a expected | `0.255891` | `0.011808` | `0.643599` | `0.036065` | `0.318868` | `0.000022` | `0.169986` | `0.158921` | `0.096416` |
-| M3c expected | `0.254963` | `0.011850` | `0.039022` | `0.210994` | `0.313973` | `0.000000` | `0.382101` | `0.370373` | `0.165255` |
-| M4a expected | `0.255025` | `0.012210` | `0.037948` | `0.211077` | `0.314104` | `0.000099` | `0.382336` | `0.370595` | `0.165496` |
-| M5c expected | `0.254972` | `0.012209` | `0.037894` | `0.211441` | `0.313602` | `0.000102` | `0.452085` | `0.413331` | `0.143970` |
+| model | dynamic_reward_div10 | pickup feature | center_delta_chebyshev | stay_count | straight3 | first_two_same | last_two_same |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| actual | `0.285348` | count `0.683763` / static `0.720919` | `-0.012422` | `0.030862` | `0.214376` | `0.450947` | `0.415503` |
+| uniform expected | `0.094210` | count `0.277797` / static `0.285981` | `-0.118141` | `0.697126` | `0.028699` | `0.150127` | `0.144712` |
+| M4a expected | `0.281683` | count `0.552524` | `-0.243084` | `0.037959` | `0.210769` | `0.382313` | `0.370718` |
+| M4b expected | `0.282087` | count `0.683563` | `-0.221463` | `0.038105` | `0.210810` | `0.381174` | `0.370247` |
+| M4c expected | `0.281915` | count `0.556775` | `-0.008219` | `0.038030` | `0.210275` | `0.381521` | `0.369700` |
+| M4d expected | `0.282236` | count `0.684183` | `-0.007218` | `0.038155` | `0.210305` | `0.380557` | `0.369397` |
+| M4e expected | `0.282295` | static `0.720879` | `-0.007271` | `0.038149` | `0.210303` | `0.382382` | `0.366743` |
+| M5c expected | `0.281527` | count `0.550935` | `-0.251077` | `0.037888` | `0.211168` | `0.451499` | `0.413252` |
+| M5f expected | `0.282063` | count `0.683644` | `-0.007940` | `0.038079` | `0.210663` | `0.450428` | `0.412793` |
+| M5g expected | `0.282140` | static `0.720270` | `-0.007956` | `0.038099` | `0.210694` | `0.450421` | `0.412748` |
 
-观察：
+解释：
 
-- M2a 已能同时匹配动态收益和直接踩炸弹频率。
-- M2a 仍严重高估停留次数，低估三步直线和两步连续同向比例。
-- M3c/M4a 已能较好匹配停留、直线和折返，但仍低估两步连续同向。
-- M5c 明显修正 `first_two_same_nonstay`、`last_two_same_nonstay` 和 `sandwich` 的模型期望，同时没有破坏金币、踩炸弹、停留和直线比例。
+- M4a/M5c 已能匹配动态 pickup reward，但明显低估进入金币目标格的次数。`pickup_count` 和 `static_pickup_count` 都能修正该问题。
+- `static_pickup_count` 下，模型期望的入口次数几乎贴合实际：M4e actual `0.720919`，expected `0.720879`。
+- 加入中心项后，`center_delta_chebyshev` 也从明显偏负修正到接近实际。
+- M5 系列主要修正两步连续同向等 path shape 细节；M4 系列更简洁。
 
-## Trapped 条件专项
+## 推荐结论
 
-在本次 valid 抽样中，满足：
-
-```text
-all legal adjacent non-stay moves are visible bombs
-```
-
-的样本只有 `3` 条，且真实动作全部为 `[4,4,4]`。
-
-| model | P([4,4,4] \| trapped) | actual path prob | trapped NLL | top1 |
-| --- | ---: | ---: | ---: | ---: |
-| M3c | `0.007%` | `0.007%` | `10.189` | `0.00%` |
-| M4a | `59.47%` | `59.47%` | `0.716` | `66.67%` |
-
-这解释了为什么 M4a 的全局 NLL 改善很小：trapped 样本太稀有。但在目标条件下，M4a 修正非常明显。M5 系列继承 `bomb_trapped_stay`，不会改变该机制解释。
-
-## Prefix Argmax 指标
-
-在 valid split 上，取模型打分最高的 path 作为预测 path，并检查 action prefix 是否与真实 path 一致。输出文件：
-
-```text
-mechanism/data/processed/npc_policy_fit/maps123_ordered_m1_m5_path_shape_sample75k_allgames_l2_1e-5_20260730/prefix_accuracy.csv
-```
-
-| model | path top1 | 首动作正确 | 前两个动作正确 | 正确首动作概率质量 | 正确前两步概率质量 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| M4a | `17.52%` | `45.06%` | `27.91%` | `36.12%` | `15.14%` |
-| M5a | `16.47%` | `43.98%` | `26.71%` | `36.20%` | `15.85%` |
-| M5b | `16.52%` | `43.95%` | `26.86%` | `36.21%` | `15.91%` |
-| M5c | `16.63%` | `44.02%` | `26.92%` | `36.21%` | `15.88%` |
-
-观察：
-
-- M4a 在 path top1、首动作正确、前两个动作正确上均高于 M5 系列。
-- M5 系列给正确 prefix 的 softmax 概率质量略高，尤其前两步；这与 M5 更偏向统计分布校准的定位一致。
-
-## 决策时序对照
-
-为区分“按 `dispatch_order` 执行结算”和“NPC 决策是否也逐个看到前序 NPC 的状态变化”，补充比较两种特征口径：
-
-- `ordered`：按 `dispatch_order` 用前序 NPC 的真实 action 先扣减可见金币和炸弹，再为当前 NPC 候选 path 计算特征。
-- `simultaneous_start`：同一轮 7 个 NPC 都基于同一个 round-start NPC 决策快照计算候选 path 特征，不扣减前序 NPC；执行结算仍可按随机 `dispatch_order` 发生。
-
-输出文件：
-
-```text
-temp/npc_decision_timing_comparison.csv
-```
-
-两种口径使用相同 run、相同抽样和相同 train/valid split：
-
-| timing | model | valid NLL | top1 | actual path prob |
-| --- | --- | ---: | ---: | ---: |
-| ordered | M1 | `4.122165` | `17.06%` | `2.964%` |
-| simultaneous_start | M1 | `4.093327` | `17.94%` | `3.174%` |
-| ordered | M2a | `4.052143` | `18.51%` | `3.260%` |
-| simultaneous_start | M2a | `4.023021` | `19.39%` | `3.484%` |
-| ordered | M3c | `3.287138` | `17.51%` | `6.838%` |
-| simultaneous_start | M3c | `3.268881` | `18.06%` | `7.083%` |
-| ordered | M4a | `3.285297` | `17.52%` | `6.852%` |
-| simultaneous_start | M4a | `3.267048` | `18.08%` | `7.097%` |
-
-`simultaneous_start` 在上述所有模型上均优于 `ordered`。这说明当前数据更支持“同轮 NPC 同时基于同一决策快照产出 actions，随后按随机顺序执行结算”，而不是“后序 NPC 决策时看到前序 NPC 已经执行后的状态”。
-
-simultaneous-start M4a 拟合权重为：
+第一版 simulator 默认 NPC 建议从 M4e 开始：
 
 ```text
 score(path) =
-    2.073989 * dynamic_reward_div10(path)
-  - 2.795283 * enter_bomb_count(path)
-  - 3.120374 * stay_count(path)
-  + 1.183404 * straight3(path)
-  - 0.562663 * backtrack(path)
-  + 10.776788 * bomb_trapped_stay(path)
+    0.907331 * dynamic_reward_div10(path)
+  + 0.912740 * static_pickup_count(path)
+  - 2.716949 * enter_bomb_count(path)
+  - 3.065158 * stay_count(path)
+  + 1.209899 * straight3(path)
+  - 0.709615 * backtrack(path)
+  + 10.916492 * bomb_trapped_stay(path)
+  + 0.167728 * center_delta_chebyshev(path)
 ```
 
-## 实验结论
+M4e 的理由：
 
-- 动态 `65%` path reward 是稳定的一阶信号，M1 相比 uniform 显著改善 NLL。
-- `enter_bomb_count` 足以校正直接踩炸弹频率；`adjacent_bomb_count` 增益极小且权重为小正值，暂不值得进入默认策略。
-- path shape 是最强的后续增益来源：`stay_count`、`straight3`、`backtrack` 分别修正停留、直线和折返统计。
-- `bomb_trapped_stay` 的全局 NLL 增益很小，但在炸弹封路条件下能把 `[4,4,4]` 概率从近似 `0` 提升到约 `59%`。
-- M5c 的 held-out NLL 最低，形状特征均值最接近 replay；M4a 的 prefix argmax 指标更好且参数更少。
-- 决策时序对照中，`simultaneous_start` 明确优于 `ordered`，因此第一版 simulator 默认应同时生成 7 个 NPC actions，再按随机 `dispatch_order` 执行。
+- 参数量仍较小，保留 M4a 的可解释结构。
+- 相比 M4c center-only，valid NLL 从 `3.246296` 降到 `3.177952`。
+- 相比 M4d 动态 `pickup_count`，valid NLL 继续改善 `0.0150`。
+- 同时修正 pickup 次数和中心吸引两个已在 rollout/观测中暴露的问题。
+- top1、top3、MRR 均高于 M4c。
 
-推荐建模结论不在本文冻结，统一见 `npc_behavior_modeling_overview.md`。
+若目标是更强的统计分布复现，可使用 M5g：
+
+```text
+score(path) =
+    0.875531 * dynamic_reward_div10(path)
+  + 0.905037 * static_pickup_count(path)
+  - 2.710227 * enter_bomb_count(path)
+  - 2.758740 * stay_count(path)
+  + 0.219614 * straight3(path)
+  - 0.526579 * backtrack(path)
+  + 10.652026 * bomb_trapped_stay(path)
+  + 0.826686 * first_two_same_nonstay(path)
+  + 0.716532 * last_two_same_nonstay(path)
+  + 0.274567 * sandwich(path)
+  + 0.167938 * center_delta_chebyshev(path)
+```
+
+M5g 的 valid NLL 最低，但参数更多，且相比 M4e 的增益只有 `0.0359`。面向第一版 simulator/RL 训练，M4e 更适合作为默认；M5g 可作为统计复现 profile 或后续 ablation 对照。

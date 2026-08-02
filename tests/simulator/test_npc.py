@@ -46,11 +46,26 @@ class NpcPolicyTests(unittest.TestCase):
         features = path_features(state, Position(1, 1), path)
 
         self.assertEqual(features["dynamic_reward_div10"], 0.9)
+        self.assertEqual(features["pickup_count"], 2.0)
+        self.assertEqual(features["static_pickup_count"], 2.0)
         self.assertEqual(features["enter_bomb_count"], 1.0)
         self.assertEqual(features["backtrack"], 1.0)
         self.assertEqual(features["center_delta_chebyshev"], 0.0)
         self.assertEqual(state.gold[Position(1, 2)], 10)
         self.assertEqual(state.bombs, {Position(1, 2)})
+
+    def test_static_pickup_count_does_not_simulate_gold_depletion(self) -> None:
+        state = _state(npcs={-1: Position(1, 1)}, gold={Position(1, 2): 1})
+        path = NpcPath(
+            actions=(Action.RIGHT, Action.LEFT, Action.RIGHT),
+            positions=(Position(1, 2), Position(1, 1), Position(1, 2)),
+        )
+
+        features = path_features(state, Position(1, 1), path)
+
+        self.assertEqual(features["dynamic_reward_div10"], 0.1)
+        self.assertEqual(features["pickup_count"], 1.0)
+        self.assertEqual(features["static_pickup_count"], 2.0)
 
     def test_path_features_include_center_delta_chebyshev(self) -> None:
         state = _state(npcs={-1: Position(8, 5)})
@@ -74,6 +89,7 @@ class NpcPolicyTests(unittest.TestCase):
         )
         weights = M4aWeights(
             gold=0.0,
+            static_pickup=0.0,
             enter_bomb=0.0,
             stay=0.0,
             straight3=0.0,
@@ -84,16 +100,17 @@ class NpcPolicyTests(unittest.TestCase):
 
         self.assertEqual(score_path(state, Position(8, 5), path, weights), 6.0)
 
-    def test_default_weights_match_m4a_center_profile(self) -> None:
+    def test_default_weights_match_m4e_static_pickup_center_profile(self) -> None:
         weights = M4aWeights()
 
-        self.assertAlmostEqual(weights.gold, 2.106687)
-        self.assertAlmostEqual(weights.enter_bomb, -2.796592)
-        self.assertAlmostEqual(weights.stay, -3.126171)
-        self.assertAlmostEqual(weights.straight3, 1.212827)
-        self.assertAlmostEqual(weights.backtrack, -0.580930)
-        self.assertAlmostEqual(weights.bomb_trapped_stay, 10.882944)
-        self.assertAlmostEqual(weights.center, 0.180587)
+        self.assertAlmostEqual(weights.gold, 0.907331)
+        self.assertAlmostEqual(weights.static_pickup, 0.912740)
+        self.assertAlmostEqual(weights.enter_bomb, -2.716949)
+        self.assertAlmostEqual(weights.stay, -3.065158)
+        self.assertAlmostEqual(weights.straight3, 1.209899)
+        self.assertAlmostEqual(weights.backtrack, -0.709615)
+        self.assertAlmostEqual(weights.bomb_trapped_stay, 10.916492)
+        self.assertAlmostEqual(weights.center, 0.167728)
 
     def test_stay_does_not_pick_up_gold_underfoot(self) -> None:
         state = _state(npcs={-1: Position(1, 1)}, gold={Position(1, 1): 10})
@@ -105,6 +122,8 @@ class NpcPolicyTests(unittest.TestCase):
         features = path_features(state, Position(1, 1), path)
 
         self.assertEqual(features["dynamic_reward_div10"], 0.0)
+        self.assertEqual(features["pickup_count"], 0.0)
+        self.assertEqual(features["static_pickup_count"], 0.0)
         self.assertEqual(features["stay_count"], 3.0)
 
     def test_bomb_blindness_removes_bomb_risk_features_only(self) -> None:
@@ -144,7 +163,16 @@ class NpcPolicyTests(unittest.TestCase):
             gold={Position(1, 2): 10},
         )
         profile = NpcEpisodeProfile(
-            weights=M4aWeights(gold=1000.0, enter_bomb=0.0, stay=0.0, straight3=0.0, backtrack=0.0, bomb_trapped_stay=0.0),
+            weights=M4aWeights(
+                gold=1000.0,
+                static_pickup=0.0,
+                enter_bomb=0.0,
+                stay=0.0,
+                straight3=0.0,
+                backtrack=0.0,
+                bomb_trapped_stay=0.0,
+                center=0.0,
+            ),
             temperature=1.0,
             bomb_blind_p=0.0,
         )
