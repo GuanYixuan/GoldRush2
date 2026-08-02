@@ -1,5 +1,7 @@
 # NPC 重复消耗 ablation
 
+本文是历史 rollout ablation，解释为何需要给 NPC path score 增加进入金币目标格的基础效用。当前 NPC 默认实现已更新为 `npc_behavior_modeling_overview.md` 中的 M4e static-pickup+center；本文不冻结当前默认参数。
+
 ## 实验目的
 
 上一轮 map1 layout A 对齐实验发现：当前 simulator 默认机制会留下过多小金币堆，并且平均地面金币堆数明显高于真实 replay。由于金币生成模型已有较强独立证据，本实验固定金币/炸弹/玩家策略，只替换 NPC path score，验证“NPC 对残堆重复消耗不足”是否能解释该偏差。
@@ -8,7 +10,7 @@
 
 - 真实目标：`symobs-a-map1-100-20260727-231446` 的 `real_visible` 统计。
 - 仿真口径：map1 + layout A 双方策略，每个变体 rollout `100` 局，每局 `500` 回合。
-- baseline：实验当时的默认 NPC，即 M4a + center chebyshev；该 baseline 已被后续 canonical M4d pickup+center 拟合替换。
+- baseline：实验当时的默认 NPC，即 M4a + center chebyshev；该 baseline 已被后续 canonical M4e static-pickup+center 拟合替换。
 - 临时脚本：`temp/simulator_alignment/map1_a_default/run_npc_ablation_experiment.py`
 - 详细表：`temp/simulator_alignment/map1_a_default/npc_ablation/`
 
@@ -41,7 +43,7 @@ score += repeat_bonus * count(path 中重复进入同一金币格)
 score += clear_bonus  * count(path 中把金币堆清空的 pickup)
 ```
 
-这些项在本实验时只用于 ablation。后续正式 path-level 拟合确认 `pickup_count` 是稳定强特征，并已纳入 simulator 默认 M4d pickup+center profile。
+这些项在本实验时只用于 ablation。后续正式 path-level 拟合确认进入金币目标格的基础效用是稳定强特征，并已纳入 simulator 默认 M4e static-pickup+center profile。
 
 ## 总体结果
 
@@ -162,13 +164,7 @@ end frame 各区域 `amount<=3`：
 3. 低金额 cleanup bonus 仍有价值，尤其能修正 amount 分布；但单独使用时不能解释地面总金币偏高。
 4. 当前还不急着优先加入高价值区域驻留项；应先把基础 pickup 项纳入候选 NPC 模型，并在 map2/map3 上交叉验证。
 
-后续 canonical 拟合已确认推荐项：
-
-```text
-score += 0.876940 * count(path 中发生金币 pickup 的步数)
-```
-
-该权重不是手工固定值，而是在 map1/map2/map3 的 canonical simultaneous-start 口径下重拟合得到；完整结果见 `mechanism/results/npc/npc_path_policy_fit.md`。
+后续 canonical 拟合已确认更强方向为 `static_pickup_count`：每次移动进入 round-start 时有金币的格子计 `1`，不模拟 path 内金币扣减。该方向已进入当前 NPC 默认实现；具体公式和权重见 `mechanism/results/npc/npc_behavior_modeling_overview.md`。
 
 若还希望 amount 分布更贴近真实，可测试弱组合：
 

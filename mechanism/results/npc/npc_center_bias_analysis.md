@@ -2,7 +2,7 @@
 
 本文检验 NPC path policy 是否需要加入“向中心靠拢”的几何项。动机是 simulator rollout 中偶尔出现中心区域没有 NPC，而 replay 中 NPC 更常聚集在中心附近。
 
-本文是中心项的隔离实验记录。最终 simulator 默认权重以 `mechanism/results/npc/npc_path_policy_fit.md` 的 canonical M4e static-pickup+center combined fit 为准。
+本文是中心项的隔离实验记录，不冻结当前默认实现。最终 simulator 默认权重以 `mechanism/results/npc/npc_behavior_modeling_overview.md` 为准。
 
 ## 口径
 

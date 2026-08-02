@@ -172,7 +172,7 @@ static_map, spawn_points = map_provider.sample(rng)
 - `mechanisms.gold.OuterGoldState`：记录下一次 `static2` high batch 的计划回合；外围生成是 stateful renewal process，不是逐回合 Bernoulli。
 - `mechanisms.gold.OuterGoldConfig`：冻结第一版经验分布参数，包括首次触发 offset、gap、region、`static2` batch total、伴随普通格事件数和金额分布；首次 offset 暂定为 `UniformInteger(8, 14)`。
 - `mechanisms.npc.M4aNpcPolicy`：默认 NPC 策略 profile；使用 simultaneous-start 口径一次性为 7 个 NPC 采样 actions，再由 transition/env 按随机 permutation 执行结算。
-- `mechanisms.npc.NpcPolicyConfig` / `NpcEpisodeProfile`：冻结 M4e 默认权重、`temperature`、`bomb_blind_p` 和 episode-level randomization 配置。
+- `mechanisms.npc.NpcPolicyConfig` / `NpcEpisodeProfile`：承载默认 NPC 权重、`temperature`、`bomb_blind_p` 和 episode-level randomization 配置；当前推荐参数见 `mechanism/results/npc/npc_behavior_modeling_overview.md`。
 - `mechanisms.bombs.BernoulliBombRefresher`：每 `20` 回合按候选格独立 Bernoulli 采样刷新炸弹；刷新周期是已确认规则常量，不向机制配置暴露。
 - `mechanisms.bombs.BombConfig`：第一版只暴露 `spawn_probability`，默认 `0.0795`，来自 `mechanism/results/bomb/bomb_generation_observation.md` 的地图1/2候选格采样率。
 
@@ -225,51 +225,7 @@ NPC 策略默认口径：
 - 第一版随机化采用 episode-level profile：每局开始时采样一套全局 M4e 权重、`temperature` 和 `bomb_blind_p`，整局内固定。
 - per-NPC jitter 作为可选项，默认可关闭；若开启，只在 episode reset 时对每个 NPC 采样固定小扰动，幅度约为全局扰动的 `20%`。不要每次 NPC 决策重抽权重。
 
-默认 M4e static-pickup+center score：
-
-```text
-score(path) =
-    0.907331 * dynamic_reward_div10(path)
-  + 0.912740 * static_pickup_count(path)
-  - 2.716949 * enter_bomb_count(path)
-  - 3.065158 * stay_count(path)
-  + 1.209899 * straight3(path)
-  - 0.709615 * backtrack(path)
-  + 10.916492 * bomb_trapped_stay(path)
-  + 0.167728 * center_delta_chebyshev(path)
-```
-
-特征定义：
-
-- `dynamic_reward_div10 = dynamic_pickup_reward / 10`；`dynamic_pickup_reward` 按 path 内每次移动进入金币格时的 `ceil(0.65 * remaining_gold)` 累加，并同步扣减该 path 的局部剩余金币。该局部扣减只用于评估当前候选 path，不影响同轮其它 NPC 的决策 score。
-- `pickup_count`：path 内移动进入有金币格并发生 pickup 的步数；按 path 内局部金币扣减模拟，只作为诊断特征保留。
-- `static_pickup_count`：path 内每次移动进入当前决策快照中有金币的格子计 `1`；该策略打分特征不模拟金币扣减，即使 amount 为 `1` 的金币格重复进出也可多次计数。
-- `enter_bomb_count`：path 中移动进入当前仍存在炸弹格的次数；候选 path 内进入炸弹后，该局部炸弹从后续步移除。
-- `stay_count`：三步动作中 `action=4` 的次数。
-- `straight3`：三步同向且非停。
-- `backtrack`：存在相邻两步反向移动，即 `(上,下)`、`(下,上)`、`(左,右)`、`(右,左)`。
-- `bomb_trapped_stay`：起点所有合法相邻非停格都是当前炸弹，且候选 path 为 `[停,停,停]`。
-- `center_delta_chebyshev = start_chebyshev - end_chebyshev`，其中 `chebyshev(pos) = max(abs(row - 8), abs(col - 8))`。该项修正 baseline 对中心区域 NPC 聚集的低估。
-
-M5g 暂不作为默认实现。它的 held-out NLL 更低、形状统计更贴近 replay，但参数更多。后续若需要统计复现 profile，可在 M4e 基础上增加 `first_two_same_nonstay`、`last_two_same_nonstay` 和 `sandwich` 三项；不要把它们混入默认模型。
-
-M4e randomization 配置建议：
-
-```text
-episode reset:
-    w_dynamic_reward *= LogUniform(0.5, 2.0)
-    w_static_pickup += Uniform(-0.35, 0.35)
-    w_enter_bomb *= LogUniform(0.5, 2.0)
-    w_stay += Uniform(-0.8, 0.8)
-    w_straight += Uniform(-0.8, 0.8)
-    w_backtrack += Uniform(-0.5, 0.5)
-    w_bomb_trapped_stay += Uniform(-3.0, 3.0)
-    w_center += Uniform(-0.12, 0.12)
-    temperature ~ Uniform(0.7, 2.5)
-    bomb_blind_p ~ Uniform(0.0, 0.15)
-```
-
-`bomb_blind_p` 只影响决策阶段是否屏蔽炸弹风险，执行阶段仍按真实状态触发炸弹。
+当前默认模型的完整公式、特征定义、M5g 统计复现 profile 和 randomization 范围只在 `mechanism/results/npc/npc_behavior_modeling_overview.md` 中冻结。`simulator/README.md` 只记录实现接口和执行口径，避免与机制结论文档重复维护。
 
 ### `observation/`
 

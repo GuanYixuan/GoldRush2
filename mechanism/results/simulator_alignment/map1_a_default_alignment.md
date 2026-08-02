@@ -1,15 +1,17 @@
 # map1 layout A simulator 对齐实验
 
+本文是历史 rollout 对齐实验，记录当时 simulator default 下发现的金币堆残留偏差。当前 NPC 默认实现已更新为 `npc_behavior_modeling_overview.md` 中的 M4e；本文结果不代表当前 M4e default 的最终对齐表现。
+
 ## 实验目的
 
-验证当前 simulator 默认机制在 `map1 + symmetry observer layout A` 场景下，是否会复现真实 replay 中的地面金币堆分布。重点检查此前肉眼观察到的现象：simulator rollout 是否留下更多小金币堆，尤其是 `amount=1/2/3`。
+验证实验当时的 simulator 默认机制在 `map1 + symmetry observer layout A` 场景下，是否会复现真实 replay 中的地面金币堆分布。重点检查此前肉眼观察到的现象：simulator rollout 是否留下更多小金币堆，尤其是 `amount=1/2/3`。
 
 本实验不预设偏差来源来自金币生成、NPC policy 或炸弹机制，只先做分布对齐和初步诊断。
 
 ## 数据与脚本
 
 - 真实数据：`mechanism/data/processed/merged_replays/symobs-a-map1-100-20260727-231446/`，共 `100` 局。
-- 仿真数据：固定 map1，双方接入 `mechanism/scripts/probes/symmetry_observer/layout_a.py`，使用 simulator 当前默认机制 rollout `100` 局，每局 `500` 回合。
+- 仿真数据：固定 map1，双方接入 `mechanism/scripts/probes/symmetry_observer/layout_a.py`，使用实验当时的 simulator 默认机制 rollout `100` 局，每局 `500` 回合。
 - 临时实验目录：`temp/simulator_alignment/map1_a_default/`
 - 实验脚本：`temp/simulator_alignment/map1_a_default/run_alignment_experiment.py`
 - 运行命令：
@@ -123,4 +125,4 @@ end frame 各区域 `amount<=3` 占比：
 - 对 static2 high batch 单独做生成量/消耗量平衡表，确认 simulator 是生成过多、NPC 消耗不足，还是两者都有。
 - 在同一脚本下加入 map2/map3 交叉验证，避免为 map1 layout A 过拟合。
 
-后续已完成 NPC 重复消耗与基础 pickup ablation，见 `mechanism/results/simulator_alignment/npc_repeat_consumption_ablation.md`。最新结论是：基础 pickup bonus 比硬阈值残堆 cleanup 更能解释偏差；单轮 path 内 repeat bonus 基本无效。
+后续已完成 NPC 重复消耗与基础 pickup ablation，见 `mechanism/results/simulator_alignment/npc_repeat_consumption_ablation.md`。再后续的 path-level 拟合已把该方向吸收到当前推荐 M4e 中；当前默认实现以 `mechanism/results/npc/npc_behavior_modeling_overview.md` 为准。
