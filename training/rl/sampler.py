@@ -13,6 +13,7 @@ from training.opponents import OpponentSpec
 from .env import SingleAgentEnvConfig, SingleAgentGoldRushEnv
 from .rewards import RewardFn
 from .rollout import EpisodeBatch, PairRole, Trajectory, Transition
+from .runtime_policy import RuntimeAwarePolicy
 
 
 AgentPolicy = Callable[[GameInput], GameOutput | Sequence[int]]
@@ -90,6 +91,8 @@ class BatchRolloutSampler:
             reward_fn=self.reward_fn,
         )
         reset = env.reset(seed=seed, map_id=map_id, agent_player_id=agent_player_id, opponent_spec=opponent_spec)
+        if isinstance(agent_policy, RuntimeAwarePolicy):
+            agent_policy.start_episode(player_id=agent_player_id)
         transitions: list[Transition] = []
         observation: GameInput | None = reset.observation
         while observation is not None:

@@ -14,6 +14,7 @@
 
 - `SingleAgentGoldRushEnv`：单局环境。
 - `BatchRolloutSampler`：直接驱动 `SingleAgentGoldRushEnv` 批量采样 paired episodes，并输出 `EpisodeBatch`。
+- `RuntimePolicyWrapper`：把 `policy_runtime.FeatureExtractor` 接入现有 policy callable 时序；每局由 sampler 调用 `start_episode(player_id=...)` 重置 runtime。
 - `EvaluationCase` / `EvaluationConfig` / `evaluate_policy`：显式评估 case 集与评估汇总。正式评估应冻结 case 列表；`anchor_grid()` 用于公共 seed 对照，`matrix_by_slice()` 用于每个 `(map, opponent)` 切片独立 seed 集。
 - `Transition` / `Trajectory` / `EpisodeBatch`：rollout 数据结构。episode 步数从 `len(trajectory.transitions)` 派生，不作为单独字段冻结。
 
