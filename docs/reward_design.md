@@ -10,7 +10,10 @@
 - agent 胜为 `+1`。
 - agent 负为 `-1`。
 
-这是为了先跑通 environment、rollout、evaluation 和 paired sampling。后续训练算法接入后，再引入 dense margin、potential shaping 和 auxiliary value heads。
+这是为了先跑通 environment、rollout、evaluation 和 paired sampling。PPO 第一版使用单一 reward 类：
+
+- 默认配置直接使用 `terminal_win_plus_margin_potential_v1`，作为第一版实际学习 reward。
+- smoke/debug 时将 `beta=0`，同一个 reward 类退化为纯终局胜负 reward，用于验证 PPO 代码链路、GAE、logprob、KL、checkpoint 和 evaluation。
 
 ## 核心原则
 
@@ -54,29 +57,36 @@ DeltaM_t = M_{t+1} - M_t
 - 己方购买视野：即时负成本。
 - 对手购买视野：相对正收益。
 
-## Dense Margin Reward
+## PPO v1 Reward: Margin Potential Shaping
 
-不建议直接使用 `DeltaM_t`，应做尺度压缩。首选：
-
-```text
-r_margin_t = asinh(DeltaM_t / s)
-```
-
-其中 `s` 应从初期 rollout、官方 replay 或 fast policy 对局估计，例如取 `|DeltaM_t|` 的 P90/P95，并在一次训练 run 内固定。
-
-`asinh` 的优点：
-
-- 小变化区域近似线性。
-- 大额金币事件仍保持大小顺序。
-- 极端样本不会支配梯度。
-
-可选的更保守形式：
+第一版 PPO 采用终局胜负加净金币差 potential shaping：
 
 ```text
-r_margin_t = clip(DeltaM_t / s, -c, c)
+reward_schema = "terminal_win_plus_margin_potential_v1"
+
+Phi_t = tanh(M_t / 500)
+shaping_t = gamma * Phi_{t+1} - Phi_t
+r_t = r_win_t + beta * shaping_t
 ```
 
-但 hard clipping 会更早丢失大金币事件之间的差异。
+其中：
+
+- `M_t = W_agent(t) - W_opponent(t)`。
+- `W_i(t) = G_i(t) - C_i^vp(t)`，即毛金币减累计视野花费。
+- `gamma` 使用 PPO 配置中的 `0.9999`。
+- 默认 `beta=0.2`；smoke/debug 可设 `beta=0`，退化为纯终局胜负 reward。
+- 终止状态的 potential 置为 `0`，避免终局 margin 被重复计入。
+- `500` 是人工固定尺度：`M=500` 时 `tanh(1)≈0.76`，`M=1000` 时 `tanh(2)≈0.96`，表示 500 金币已是很大差距，1000 金币基本饱和。
+
+设计理由：
+
+- 最终优化目标仍是胜负，终局 `+1/-1` 保持主目标地位。
+- potential shaping 给 500 回合长时任务提供更稳定的中间学习信号。
+- 只基于双方净资产，不为拾取、炸弹、踩踏、视野购买等事件重复写 reward。
+- `tanh` 有界，避免大额金币事件造成 reward 尺度失控。
+- 固定 `s_M=500` 能保持不同训练 run 的 reward 语义一致，避免每次用 rollout 分位数估计导致尺度漂移。
+
+`beta=0` smoke 的验收目标不是胜率提升，而是 loss 有限、无 NaN、GAE/terminal 处理正确、KL/clip fraction/value 输出可解释。
 
 ## 终局胜负 Reward
 
@@ -90,41 +100,24 @@ r_win_T =
 
 在当前训练假设下，agent 慢、opponent 快；若金币完全相同，tie-break 应判 opponent 胜。若后续做不含真实耗时假设的反事实实验，可以单独改为同分 `0`。
 
-## Curriculum
+## 后续 Reward 备选
 
-建议分阶段调整 dense margin 与终局胜负的权重：
+若 `terminal_win_plus_margin_potential_v1` 过弱或过强，优先做小范围 ablation：
 
-```text
-阶段一：r_t = r_margin_t
-阶段二：r_t = alpha * r_margin_t + r_win_t
-阶段三：r_t = r_win_t + beta * shaping_t
-```
+- `s_M = 300 / 500 / 800`。
+- `beta = 0.1 / 0.2 / 0.3`。
+- 关闭 shaping，回到纯终局胜负。
 
-其中 `alpha` 逐步退火：
+不建议第一版直接使用 `DeltaM_t` dense reward。若后续需要，可考虑：
 
 ```text
-1.0 -> 0.3 -> 0.1 -> 0.05 或 0
+r_margin_t = asinh(DeltaM_t / s_delta)
+r_t = r_win_t + alpha * r_margin_t
 ```
 
-阶段目标：
+其中 `s_delta` 应从 rollout 或 replay 的 `|DeltaM_t|` 分布中固定估计。该方案更直接，但噪声更大，也更容易让策略过度追逐短期金币流，因此不作为第一版主线。
 
-- 阶段一：快速学会基本经济行为、路径收益、避险和视野成本。
-- 阶段二：从最大化经济 margin 转向最大化实际胜率。
-- 阶段三：以终局胜负为主，只保留小幅 shaping 或完全关闭 dense reward。
-
-## Potential-Based Shaping
-
-后期可将 dense margin 改成 potential-based shaping：
-
-```text
-Phi(s_t) = clip(M_t / s, -K, K)
-shaping_t = gamma * Phi(s_{t+1}) - Phi(s_t)
-r_t = r_win_t + beta * shaping_t
-```
-
-终止状态的 potential 应置为 `0`。这种形式比长期直接叠加事件 reward 更干净，主要用于告诉模型哪些动作改善了相对经济局面。
-
-注意：GoldRush 是部分可观测问题；如果 `Phi` 使用完整 simulator state，严格的最优策略不变性结论不能直接照搬，应把它视为训练启发式。
+注意：GoldRush 是部分可观测问题；如果 shaping 使用完整 simulator state，严格的 potential-based 最优策略不变性结论不能直接照搬，应把它视为训练启发式。
 
 ## Critic 多头
 
@@ -167,6 +160,8 @@ dense reward 只能用于优化，不应替代官方评估。
 ## BC Warm Start 与行为先验
 
 训练框架应支持可配置的行为克隆辅助损失，用于新网络结构初始化、策略迁移和早期训练稳定。
+
+第一版 PPO 不使用 BC warm start，先跑通 `feature -> network -> PPO -> eval` 主链路。BC 作为后续扩展加入。
 
 BC 不作为环境 reward，不进入 `env.step()` 返回的 reward。它是训练算法侧的 auxiliary loss：
 
