@@ -2,6 +2,8 @@
 
 from .env import SingleAgentEnvConfig, SingleAgentGoldRushEnv
 from .eval import EvaluationCase, EvaluationConfig, EvaluationResult, EvaluationSuite, evaluate_policy
+from .ppo import PpoConfig, PpoEvaluation, PpoUpdateStats, collect_ppo_rollouts, evaluate_actions, ppo_update
+from .ppo_buffer import PpoBatch, PpoMiniBatch, PpoTransition
 from .rewards import TerminalWinPlusMarginPotentialReward, WinLossReward
 from .rollout import EpisodeBatch, Trajectory, Transition
 from .runtime_policy import RuntimeAwarePolicy, RuntimePolicyWrapper
@@ -15,6 +17,12 @@ __all__ = [
     "EvaluationConfig",
     "EvaluationResult",
     "EvaluationSuite",
+    "PpoBatch",
+    "PpoConfig",
+    "PpoEvaluation",
+    "PpoMiniBatch",
+    "PpoTransition",
+    "PpoUpdateStats",
     "ResetResult",
     "RuntimeAwarePolicy",
     "RuntimePolicyWrapper",
@@ -25,5 +33,8 @@ __all__ = [
     "Trajectory",
     "Transition",
     "WinLossReward",
+    "collect_ppo_rollouts",
+    "evaluate_actions",
     "evaluate_policy",
+    "ppo_update",
 ]
