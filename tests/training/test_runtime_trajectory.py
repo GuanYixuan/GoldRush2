@@ -13,7 +13,7 @@ from training.rl import BatchRolloutSampler, RuntimePolicyWrapper, SingleAgentEn
 
 
 class RuntimeTrajectoryTests(unittest.TestCase):
-    def test_last_action_features_follow_previous_rollout_action(self) -> None:
+    def test_temporal_features_follow_previous_observation(self) -> None:
         policy = _RecordingRuntimePolicy((_right_output(), _down_output(), _stay_output()))
         sampler = _sampler(round_count=3)
 
@@ -21,9 +21,9 @@ class RuntimeTrajectoryTests(unittest.TestCase):
         first_episode = policy.episodes[0]
 
         self.assertEqual(len(batch.trajectories[0].transitions), 3)
-        self.assertEqual([summary["has_last_action"] for summary in first_episode.features], [0.0, 1.0, 1.0])
-        self.assertEqual(first_episode.features[1]["last_action_scaled"], (0.75, 1.0, 1.0, 1.0, 1.0, 1.0))
-        self.assertEqual(first_episode.features[2]["last_action_scaled"], (0.25, 1.0, 1.0, 1.0, 1.0, 1.0))
+        self.assertEqual(first_episode.features[0]["visible_t1_count"], 0)
+        self.assertEqual(first_episode.features[1]["visible_t1_count"], first_episode.features[0]["visible_t0_count"])
+        self.assertEqual(first_episode.features[2]["visible_t1_count"], first_episode.features[1]["visible_t0_count"])
 
     def test_paired_episodes_reset_runtime_state(self) -> None:
         policy = _RecordingRuntimePolicy((_right_output(), _stay_output()))
@@ -32,20 +32,21 @@ class RuntimeTrajectoryTests(unittest.TestCase):
         sampler.collect(policy, pair_count=1, seed=102, map_ids=(1,))
 
         self.assertEqual([episode.player_id for episode in policy.episodes], [1, 2])
-        self.assertEqual(policy.episodes[0].features[0]["has_last_action"], 0.0)
-        self.assertEqual(policy.episodes[1].features[0]["has_last_action"], 0.0)
-        self.assertLess(policy.episodes[0].features[0]["explored_count"], 80)
-        self.assertLess(policy.episodes[1].features[0]["explored_count"], 80)
+        self.assertEqual(policy.episodes[0].features[0]["visible_t1_count"], 0)
+        self.assertEqual(policy.episodes[1].features[0]["visible_t1_count"], 0)
+        self.assertEqual(policy.episodes[0].features[0]["schema"], "goldrush2_feature_v1")
+        self.assertEqual(policy.episodes[1].features[0]["schema"], "goldrush2_feature_v1")
 
-    def test_explored_mask_is_monotonic_within_episode(self) -> None:
+    def test_feature_schema_is_stable_within_episode(self) -> None:
         policy = _RecordingRuntimePolicy((_stay_output(),) * 5)
         sampler = _sampler(round_count=5)
 
         sampler.collect(policy, pair_count=1, seed=103, map_ids=(1,))
 
         for episode in policy.episodes:
-            explored_counts = [summary["explored_count"] for summary in episode.features]
-            self.assertEqual(explored_counts, sorted(explored_counts))
+            self.assertTrue(all(summary["schema"] == "goldrush2_feature_v1" for summary in episode.features))
+            self.assertTrue(all(summary["plane_shape"] == (38, 17, 17) for summary in episode.features))
+            self.assertTrue(all(summary["scalar_shape"] == (10,) for summary in episode.features))
 
     def test_runtime_rollout_runs_multi_round_without_round_regression(self) -> None:
         policy = _RecordingRuntimePolicy((_stay_output(),) * 20)
@@ -55,7 +56,7 @@ class RuntimeTrajectoryTests(unittest.TestCase):
 
         self.assertEqual([len(trajectory.transitions) for trajectory in batch.trajectories], [20, 20])
         self.assertEqual([len(episode.features) for episode in policy.episodes], [20, 20])
-        self.assertTrue(all(episode.features[0]["has_last_action"] == 0.0 for episode in policy.episodes))
+        self.assertTrue(all(episode.features[0]["visible_t1_count"] == 0 for episode in policy.episodes))
 
 
 class _EpisodeRecord:
@@ -92,14 +93,15 @@ class _RecordingRuntimePolicy:
 
 
 def _feature_summary(features) -> dict[str, object]:
-    scalars = features["scalars"]
+    channel_lookup = {name: idx for idx, name in enumerate(features["channel_names"])}
+    visible_t0 = channel_lookup["visible_mask_t0"]
+    visible_t1 = channel_lookup["visible_mask_t1"]
     return {
-        "has_last_action": float(scalars[4]),
-        "last_k_scaled": float(scalars[5]),
-        "last_order": float(scalars[6]),
-        "last_vp_scaled": float(scalars[7]),
-        "last_action_scaled": tuple(float(value) for value in scalars[8:14]),
-        "explored_count": int(features["planes"][1].sum()),
+        "schema": features["feature_schema"],
+        "plane_shape": tuple(features["planes"].shape),
+        "scalar_shape": tuple(features["scalars"].shape),
+        "visible_t0_count": int(features["planes"][visible_t0].sum()),
+        "visible_t1_count": int(features["planes"][visible_t1].sum()),
     }
 
 

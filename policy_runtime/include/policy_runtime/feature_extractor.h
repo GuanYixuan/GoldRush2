@@ -8,8 +8,11 @@
 
 namespace policy_runtime {
 
-constexpr int FEATURE_CHANNELS = 11;
-constexpr int FEATURE_SCALARS = 14;
+constexpr const char* FEATURE_SCHEMA = "goldrush2_feature_v1";
+constexpr int FEATURE_CHANNELS = 38;
+constexpr int FEATURE_SCALARS = 10;
+constexpr int TEMPORAL_KEYS = 4;
+constexpr int TEMPORAL_WINDOW = 5;
 
 struct FeatureOutput {
     std::vector<float> planes;
@@ -31,13 +34,17 @@ private:
     int player_id_ = 1;
     bool initialized_ = false;
     int last_round_ = -1;
-    bool has_last_action_ = false;
     GameOutput last_action_{};
-    std::array<int, GRID_SIZE * GRID_SIZE> explored_{};
-    std::array<int, GRID_SIZE * GRID_SIZE> last_seen_round_{};
-    std::array<int, GRID_SIZE * GRID_SIZE> last_visible_grid_{};
+    std::array<std::array<float, GRID_SIZE * GRID_SIZE>, TEMPORAL_KEYS * TEMPORAL_WINDOW> temporal_{};
+    std::array<int, GRID_SIZE * GRID_SIZE> direct_obstacle_status_{};
+    std::array<int, GRID_SIZE * GRID_SIZE> inferred_obstacle_status_{};
+    std::array<float, REGION_COUNT> last_snapshot_gold_remaining_{};
+    std::array<float, REGION_COUNT> prev_snapshot_gold_remaining_{};
+    std::array<float, REGION_COUNT> last_snapshot_occupants_{};
+    bool last_snapshot_valid_ = false;
 };
 
+std::string feature_schema();
 std::array<std::string, FEATURE_CHANNELS> channel_names();
 std::array<std::string, FEATURE_SCALARS> scalar_names();
 

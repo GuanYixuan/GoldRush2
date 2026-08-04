@@ -26,8 +26,10 @@ class RuntimePolicyTests(unittest.TestCase):
 
         self.assertEqual(action0, _stay_output())
         self.assertEqual(action1, _stay_output())
-        self.assertEqual(seen[0]["scalars"][4], 0.0)
-        self.assertEqual(seen[1]["scalars"][4], 1.0)
+        self.assertEqual(seen[0]["feature_schema"], "goldrush2_feature_v1")
+        self.assertEqual(seen[0]["planes"].shape, (38, 17, 17))
+        self.assertEqual(seen[0]["scalars"].shape, (10,))
+        self.assertEqual(seen[1]["feature_schema"], "goldrush2_feature_v1")
 
     def test_sampler_resets_runtime_policy_for_each_swapped_episode(self) -> None:
         call_counts = []
@@ -43,7 +45,7 @@ class RuntimePolicyTests(unittest.TestCase):
 
         self.assertEqual(batch.episode_count, 2)
         self.assertEqual(call_counts, [1, 2])
-        self.assertEqual(policy.first_scalar_values, [0.0, 0.0])
+        self.assertEqual(policy.first_t1_visible_counts, [0, 0])
 
     def test_runtime_policy_can_run_through_evaluation(self) -> None:
         config = _eval_config()
@@ -64,7 +66,7 @@ class _RecordingRuntimePolicy:
     def __init__(self) -> None:
         self.wrapper = RuntimePolicyWrapper(self._act_from_features)
         self.start_episode_calls: list[int] = []
-        self.first_scalar_values: list[float] = []
+        self.first_t1_visible_counts: list[int] = []
 
     def start_episode(self, *, player_id: int) -> None:
         self.start_episode_calls.append(player_id)
@@ -74,7 +76,8 @@ class _RecordingRuntimePolicy:
         return self.wrapper(game_input)
 
     def _act_from_features(self, features) -> GameOutput:
-        self.first_scalar_values.append(float(features["scalars"][4]))
+        visible_t1 = list(features["channel_names"]).index("visible_mask_t1")
+        self.first_t1_visible_counts.append(int(features["planes"][visible_t1].sum()))
         return _stay_output()
 
 

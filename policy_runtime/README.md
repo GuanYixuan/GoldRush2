@@ -1,13 +1,13 @@
 # Policy Runtime
 
-`policy_runtime/` 承载训练和最终 C++ 提交策略共享的确定性运行时逻辑。第一阶段只实现最小 C++ feature extractor 状态机，后续再扩展 belief、snapshot、batch extraction 和 fast option。
+`policy_runtime/` 承载训练和最终 C++ 提交策略共享的确定性运行时逻辑。当前实现冻结为 `goldrush2_feature_v1`，具体 feature 语义见 `docs/feature_extractor_design.md`。
 
 ## 边界
 
 - C++ core 直接使用官方 `official_sdk/code/game_api.h` 的 `GameInput` / `GameOutput`。
 - Python binding 只负责把 simulator 的 Python `GameInput` / `GameOutput` dataclass 转成官方 C++ struct。
 - `observe()` 只能写入 observation 中可见事实。
-- `commit_action()` 只能记录策略上一回合输出，不能推演移动结果或写入未观测事实。
+- `commit_action()` 预留给后续策略状态使用，当前 v1 feature 不输出上一动作相关特征。
 
 ## 构建
 
@@ -27,9 +27,10 @@ extractor.commit_action(game_output)
 
 `features` 是 dict：
 
-- `planes`: numpy array, shape `(11, 17, 17)`
-- `scalars`: numpy array, shape `(14,)`
+- `feature_schema`: `"goldrush2_feature_v1"`
+- `planes`: numpy array, shape `(38, 17, 17)`
+- `scalars`: numpy array, shape `(10,)`
 - `channel_names`
 - `scalar_names`
 
-当前 feature 是最小 baseline，不代表最终网络输入结构。
+训练 checkpoint、ONNX 导出和部署策略应记录并校验 `feature_schema`。

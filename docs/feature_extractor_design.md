@@ -301,28 +301,23 @@ feature_schema = "goldrush2_feature_v1"
 
 ## 测试要求
 
-已完成的最小测试覆盖：
+当前 v1 测试覆盖：
 
-- C++ binding 可接收 simulator Python `GameInput` / `GameOutput`。
-- `observe()` 输出基础 shape。
-- 可见格更新当前基础 planes。
-- `commit_action()` 只记录上一动作。
-- reset 清空 memory。
-- round regression fail-fast。
-- runtime 可接入真实 rollout/evaluation。
+- `feature_schema`、`channel_names`、`scalar_names` 与本文顺序一致。
+- `spatial_planes.shape == (38, 17, 17)`、`scalars.shape == (10,)`。
+- temporal ring buffer 的 `t0..t4` 顺序与缺失历史填 0。
+- obstacle 直接观测、中心对称推断、直接观测覆盖推断。
+- NPC 当前计数、拥挤 mask、己方单位 one-hot、曼哈顿距离、已知障碍 BFS 距离。
+- 区域 one-hot、snapshot last/prev 轮转、snapshot broadcast map。
+- scalar 定点样例。
+- reset 清空 memory、round regression fail-fast。
+- runtime 可接入真实 rollout/evaluation，paired episode 首轮历史不串局。
 
-v1 设计落地后还应增加：
+后续可补充：
 
-- `feature_schema`、`channel_names`、`scalar_names` 与本文顺序完全一致的测试。
-- `spatial_planes.shape == (38, 17, 17)`、`scalars.shape == (10,)` 的测试。
-- 每个 channel/scalar 的定点样例测试。
-- temporal ring buffer 的 `t0..t4` 顺序、缺失历史填 0 测试。
-- obstacle 直接观测、中心对称推断、直接观测覆盖推断的测试。
-- known-obstacle BFS 距离图的阻挡、未知格可通行、不可达 clip 测试。
 - 跨 P1/P2 出生侧的 feature 对齐测试。
-- snapshot 更新、last/prev 轮转、无历史 snapshot 填 0 测试。
-- schema version 测试。
-- 真实 rollout 中 memory 单调性和 reset 不串局测试。
+- 基于真实 replay 的 snapshot/temporal 长轨迹回归测试。
+- C++ 侧 standalone smoke，避免只依赖 Python binding 路径。
 
 ## 后续可选扩展
 

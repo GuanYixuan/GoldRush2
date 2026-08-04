@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 try:
-    from ._runtime import FeatureExtractor, channel_names, scalar_names
+    from ._runtime import FeatureExtractor, channel_names, feature_schema, scalar_names
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "policy_runtime C++ extension is not built. Run: "
@@ -9,4 +9,4 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 
-__all__ = ["FeatureExtractor", "channel_names", "scalar_names"]
+__all__ = ["FeatureExtractor", "channel_names", "feature_schema", "scalar_names"]

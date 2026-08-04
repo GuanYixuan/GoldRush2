@@ -179,6 +179,7 @@ py::dict feature_output_to_python(const policy_runtime::FeatureOutput& output) {
     }
 
     py::dict result;
+    result["feature_schema"] = policy_runtime::feature_schema();
     result["planes"] = planes;
     result["scalars"] = scalars;
     result["channel_names"] = policy_runtime::channel_names();
@@ -190,6 +191,7 @@ py::dict feature_output_to_python(const policy_runtime::FeatureOutput& output) {
 
 PYBIND11_MODULE(_runtime, module) {
     module.doc() = "GoldRush2 policy runtime C++ bindings";
+    module.def("feature_schema", &policy_runtime::feature_schema);
     module.def("channel_names", &policy_runtime::channel_names);
     module.def("scalar_names", &policy_runtime::scalar_names);
 
