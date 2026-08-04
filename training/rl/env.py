@@ -103,6 +103,10 @@ class SingleAgentGoldRushEnv:
             p90_latency_ns=_agent_slow_p90(self.agent_player_id),
         )
         self.observations = self.round_env.reset(seed=episode_seed, map_id=episode_map_id)
+        reset_reward = getattr(self.reward_fn, "reset", None)
+        if callable(reset_reward):
+            assert self.round_env.state is not None
+            reset_reward(self.round_env.state, agent_player_id=self.agent_player_id)
         self.terminated = False
         return ResetResult(observation=self.observations[self.agent_player_id], info=self._reset_info(episode_seed))
 

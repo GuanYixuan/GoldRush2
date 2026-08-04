@@ -4,16 +4,14 @@
 
 ## 当前实现
 
-当前 `training/rl` 只实现最小 `WinLossReward`：
+当前 `training/rl` 已实现两个 reward：
 
-- 非终局 reward 为 `0`。
-- agent 胜为 `+1`。
-- agent 负为 `-1`。
+- `WinLossReward`：env smoke/default 使用，非终局 reward 为 `0`，agent 胜为 `+1`，agent 负为 `-1`。
+- `TerminalWinPlusMarginPotentialReward`：PPO v1 主线 reward，schema 为 `terminal_win_plus_margin_potential_v1`。
 
-这是为了先跑通 environment、rollout、evaluation 和 paired sampling。PPO 第一版使用单一 reward 类：
+`SingleAgentGoldRushEnv` 默认仍使用 `WinLossReward`，用于保持基础环境、rollout、evaluation 和 paired sampling 的测试语义稳定。PPO 训练入口应显式传入 `TerminalWinPlusMarginPotentialReward`。
 
-- 默认配置直接使用 `terminal_win_plus_margin_potential_v1`，作为第一版实际学习 reward。
-- smoke/debug 时将 `beta=0`，同一个 reward 类退化为纯终局胜负 reward，用于验证 PPO 代码链路、GAE、logprob、KL、checkpoint 和 evaluation。
+PPO smoke/debug 时将 `TerminalWinPlusMarginPotentialReward(beta=0)`，同一个 reward 类会退化为纯终局胜负 reward，用于验证 PPO 代码链路、GAE、logprob、KL、checkpoint 和 evaluation。
 
 ## 核心原则
 
@@ -77,6 +75,7 @@ r_t = r_win_t + beta * shaping_t
 - 默认 `beta=0.2`；smoke/debug 可设 `beta=0`，退化为纯终局胜负 reward。
 - 终止状态的 potential 置为 `0`，避免终局 margin 被重复计入。
 - `500` 是人工固定尺度：`M=500` 时 `tanh(1)≈0.76`，`M=1000` 时 `tanh(2)≈0.96`，表示 500 金币已是很大差距，1000 金币基本饱和。
+- 实现上该 reward 在 `env.reset()` 后用初始 `GameState` 初始化 `Phi_t`；如果未 reset 就调用，会 fail-fast。
 
 设计理由：
 

@@ -2,7 +2,7 @@
 
 from .env import SingleAgentEnvConfig, SingleAgentGoldRushEnv
 from .eval import EvaluationCase, EvaluationConfig, EvaluationResult, EvaluationSuite, evaluate_policy
-from .rewards import WinLossReward
+from .rewards import TerminalWinPlusMarginPotentialReward, WinLossReward
 from .rollout import EpisodeBatch, Trajectory, Transition
 from .runtime_policy import RuntimeAwarePolicy, RuntimePolicyWrapper
 from .sampler import BatchRolloutSampler
@@ -21,6 +21,7 @@ __all__ = [
     "SingleAgentEnvConfig",
     "SingleAgentGoldRushEnv",
     "StepResult",
+    "TerminalWinPlusMarginPotentialReward",
     "Trajectory",
     "Transition",
     "WinLossReward",
