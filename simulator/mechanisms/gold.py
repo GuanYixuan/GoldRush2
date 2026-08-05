@@ -208,6 +208,8 @@ class OuterGoldGenerator:
         template: MapTemplate,
         outer_state: OuterGoldState,
         rng: random.Random,
+        *,
+        reserved_positions: tuple[Position, ...] = (),
     ) -> tuple[GoldGenerationEvent, ...]:
         if state.round_index < outer_state.next_static2_round:
             return ()
@@ -216,7 +218,7 @@ class OuterGoldGenerator:
                 f"outer gold state missed scheduled static2 round {outer_state.next_static2_round}; current round is {state.round_index}"
             )
 
-        events = self._generate_static2_batch(state, template, rng)
+        events = self._generate_static2_batch(state, template, rng, reserved_positions=reserved_positions)
         outer_state.next_static2_round = state.round_index + _sample_weighted(self.config.gap_weights, rng)
         return events
 
@@ -225,9 +227,11 @@ class OuterGoldGenerator:
         state: GameState,
         template: MapTemplate,
         rng: random.Random,
+        *,
+        reserved_positions: tuple[Position, ...] = (),
     ) -> tuple[GoldGenerationEvent, ...]:
         high_region = _sample_weighted(self.config.region_weights, rng)
-        static2_cells = _legal_cells(outer_static2_candidate_cells(template, high_region), state)
+        static2_cells = _legal_cells(outer_static2_candidate_cells(template, high_region), state, reserved_positions=reserved_positions)
         if not static2_cells:
             # TODO: 全部 static2 候选格均不可用时官方行为未观测；第一版跳过本次 static2 分配并推进 gap。
             return ()
@@ -235,7 +239,11 @@ class OuterGoldGenerator:
         total = _sample_weighted(self.config.static2_total_weights, rng)
         events = _split_batch_total(static2_cells, total, rng)
 
-        static0_cells = _legal_cells(outer_static0_candidate_cells(template, exclude_region=high_region), state)
+        static0_cells = _legal_cells(
+            outer_static0_candidate_cells(template, exclude_region=high_region),
+            state,
+            reserved_positions=reserved_positions,
+        )
         static0_count = _sample_weighted(self.config.outer_static0_count_weights, rng)
         static0_count = min(static0_count, len(static0_cells))
         selected_static0 = tuple(rng.sample(static0_cells, static0_count))
@@ -293,9 +301,10 @@ def center_rate(position: Position, config: CenterGoldConfig = CenterGoldConfig(
     return config.center_a * math.exp(-config.center_b * sq_distance)
 
 
-def _legal_cells(cells: tuple[Position, ...], state: GameState) -> tuple[Position, ...]:
+def _legal_cells(cells: tuple[Position, ...], state: GameState, *, reserved_positions: tuple[Position, ...] = ()) -> tuple[Position, ...]:
     occupied = _occupied_positions(state)
-    return tuple(pos for pos in cells if pos not in state.gold and pos not in state.bombs and pos not in occupied)
+    reserved = set(reserved_positions)
+    return tuple(pos for pos in cells if pos not in state.gold and pos not in state.bombs and pos not in occupied and pos not in reserved)
 
 
 def _occupied_positions(state: GameState) -> frozenset[Position]:

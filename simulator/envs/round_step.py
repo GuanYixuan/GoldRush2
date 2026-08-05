@@ -12,7 +12,7 @@ from ..mechanisms.bombs import BernoulliBombRefresher, BombRefreshEvent
 from ..mechanisms.gold import CenterGoldGenerator, OuterGoldGenerator, OuterGoldState
 from ..mechanisms.maps import MapPool, MapTemplate, SpawnConfig, build_initial_state, built_in_public_map_pool
 from ..mechanisms.npc import M4aNpcPolicy, NpcEpisodeProfile
-from ..observation.sdk import GameInput, make_game_input
+from ..observation.sdk import GameInput, make_game_inputs
 from ..replay import SimulatorReplayRecorder
 from ..rules.scoring import GameResult, determine_winner
 from ..rules.snapshot import SnapshotAccumulator
@@ -142,9 +142,11 @@ class RoundStepEnv:
         assert self.snapshot_accumulator is not None
         assert self.npc_profile is not None
         assert self.pending_bomb_refresh_event is not None
-        round_start_state = copy.deepcopy(self.state)
+        round_index = self.state.round_index
+        round_start_state = copy.deepcopy(self.state) if self.recorder is not None else None
         npc_order = self.mechanisms.npc_policy.sample_order(self.state, self.rng)
-        npc_actions = self.mechanisms.npc_policy.decide_all(copy.deepcopy(self.state), self.template, npc_order, self.rng, self.npc_profile)
+        decision_state = self.state if isinstance(self.mechanisms.npc_policy, M4aNpcPolicy) else copy.deepcopy(self.state)
+        npc_actions = self.mechanisms.npc_policy.decide_all(decision_state, self.template, npc_order, self.rng, self.npc_profile)
 
         transition_result = transition_started_round(
             self.state,
@@ -158,7 +160,7 @@ class RoundStepEnv:
         )
         self.visible_snapshot = transition_result.snapshot
         trace = RoundStepTrace(
-            round_index=round_start_state.round_index,
+            round_index=round_index,
             first_player_id=first_player_id,
             player_outputs=outputs,
             npc_order=npc_order,
@@ -169,6 +171,7 @@ class RoundStepEnv:
         )
 
         if self.recorder is not None:
+            assert round_start_state is not None
             self.recorder.record_round(
                 start_state=round_start_state,
                 end_state=self.state,
@@ -205,10 +208,7 @@ class RoundStepEnv:
 
     def _observations(self) -> dict[int, GameInput]:
         assert self.state is not None
-        return {
-            1: make_game_input(self.state, 1, self.visible_snapshot),
-            2: make_game_input(self.state, 2, self.visible_snapshot),
-        }
+        return make_game_inputs(self.state, self.visible_snapshot)
 
     def _require_ready(self) -> None:
         if self.state is None:
@@ -229,10 +229,27 @@ def _generate_gold(
     rng: random.Random,
 ) -> tuple[GoldGenerationEvent, ...]:
     center_events = mechanisms.center_gold.generate(state, template, rng)
-    temp_state = copy.deepcopy(state)
-    apply_gold_generation(temp_state, center_events)
-    outer_events = mechanisms.outer_gold.generate(temp_state, template, outer_state, rng)
+    _validate_gold_generation_events(state, center_events)
+    outer_events = mechanisms.outer_gold.generate(
+        state,
+        template,
+        outer_state,
+        rng,
+        reserved_positions=tuple(event.position for event in center_events),
+    )
     return center_events + outer_events
+
+
+def _validate_gold_generation_events(state: GameState, events: tuple[GoldGenerationEvent, ...]) -> None:
+    for event in events:
+        if event.amount <= 0:
+            raise SimulatorRuleError(f"gold generation amount must be positive: {event}")
+        if not event.position.in_bounds():
+            raise SimulatorRuleError(f"gold generation position out of bounds: {event.position}")
+        if event.position in state.obstacles:
+            raise SimulatorRuleError(f"gold generation overlaps obstacle at {event.position}")
+        if event.position in state.bombs:
+            raise SimulatorRuleError(f"gold generation overlaps bomb at {event.position}")
 
 
 def _coerce_player_outputs(player_outputs: dict[int, GameOutput | Sequence[int]]) -> dict[int, GameOutput]:

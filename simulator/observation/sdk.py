@@ -14,6 +14,8 @@ from ..errors import SimulatorRuleError
 from ..state import GameState
 from ..types import Position, RegionStat, Snapshot
 
+_POSITION_GRID = tuple(tuple(Position(row, col) for col in range(GRID_SIZE)) for row in range(GRID_SIZE))
+
 
 @dataclass
 class NpcInfo:
@@ -41,6 +43,19 @@ def make_game_input(state: GameState, player_id: int, snapshot: Snapshot | None 
         raise ValueError(f"unknown player id: {player_id}")
 
     _validate_observable_layers(state)
+    return _make_game_input_unchecked(state, player_id, snapshot)
+
+
+def make_game_inputs(state: GameState, snapshot: Snapshot | None = None) -> dict[int, GameInput]:
+    """Build both player observations while sharing invariant validation."""
+    _validate_observable_layers(state)
+    return {
+        1: _make_game_input_unchecked(state, 1, snapshot),
+        2: _make_game_input_unchecked(state, 2, snapshot),
+    }
+
+
+def _make_game_input_unchecked(state: GameState, player_id: int, snapshot: Snapshot | None = None) -> GameInput:
     visible = _visible_cells(state, player_id)
     opponent_id = _opponent_id(player_id)
     player = state.players[player_id]
@@ -72,7 +87,7 @@ def _make_grid(state: GameState, visible: set[Position]) -> list[list[int]]:
     grid = [[GRID_FOG for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
     for row in range(GRID_SIZE):
         for col in range(GRID_SIZE):
-            pos = Position(row, col)
+            pos = _POSITION_GRID[row][col]
             if pos not in visible:
                 continue
             if pos in state.obstacles:
@@ -90,9 +105,8 @@ def _visible_cells(state: GameState, player_id: int) -> set[Position]:
     for unit in state.players[player_id].units:
         for row in range(unit.position.row - radius, unit.position.row + radius + 1):
             for col in range(unit.position.col - radius, unit.position.col + radius + 1):
-                pos = Position(row, col)
-                if pos.in_bounds():
-                    visible.add(pos)
+                if 0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE:
+                    visible.add(_POSITION_GRID[row][col])
     return visible
 
 
@@ -122,4 +136,4 @@ def _position_tuple(position: Position) -> tuple[int, int]:
     return (position.row, position.col)
 
 
-__all__ = ["GameInput", "NpcInfo", "RegionStat", "Snapshot", "make_game_input"]
+__all__ = ["GameInput", "NpcInfo", "RegionStat", "Snapshot", "make_game_input", "make_game_inputs"]

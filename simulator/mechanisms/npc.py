@@ -4,7 +4,7 @@ import math
 import random
 from dataclasses import dataclass, field
 
-from ..constants import STATIC_OBSTACLE
+from ..constants import GRID_SIZE, STATIC_OBSTACLE
 from ..errors import SimulatorRuleError
 from ..state import GameState
 from ..types import Action, Position
@@ -24,6 +24,30 @@ OPPOSITE_ACTIONS = {
 class NpcPath:
     actions: tuple[Action, Action, Action]
     positions: tuple[Position, Position, Position]
+
+
+@dataclass(frozen=True)
+class _CompiledNpcPath:
+    path: NpcPath
+    moving_positions: tuple[Position, ...]
+    moving_indices: tuple[int, ...]
+    stay_count: float
+    straight3: float
+    backtrack: float
+    bomb_trapped_neighbors: tuple[Position, ...]
+    bomb_trapped_neighbor_indices: tuple[int, ...]
+    center_delta_chebyshev: float
+
+
+@dataclass(frozen=True)
+class _NpcScoreContext:
+    gold: dict[int, int]
+    bombs: set[int]
+    obstacles: frozenset[int]
+
+
+_GLOBAL_PATH_CACHE: dict[tuple[int, StaticGrid, Position], tuple[NpcPath, ...]] = {}
+_GLOBAL_COMPILED_PATH_CACHE: dict[tuple[int, StaticGrid, Position], tuple[_CompiledNpcPath, ...]] = {}
 
 
 @dataclass(frozen=True)
@@ -76,6 +100,7 @@ class NpcDecisionBatch:
 class M4aNpcPolicy:
     config: NpcPolicyConfig = field(default_factory=NpcPolicyConfig)
     _path_cache: dict[tuple[int, StaticGrid, Position], tuple[NpcPath, ...]] = field(default_factory=dict, init=False)
+    _compiled_path_cache: dict[tuple[int, StaticGrid, Position], tuple[_CompiledNpcPath, ...]] = field(default_factory=dict, init=False)
 
     def sample_profile(self, state: GameState, rng: random.Random) -> NpcEpisodeProfile:
         weights = self.config.weights
@@ -131,23 +156,40 @@ class M4aNpcPolicy:
             raise SimulatorRuleError(f"npc_order must contain exactly current NPC ids, got {npc_order}")
 
         decisions: dict[int, tuple[Action, Action, Action]] = {}
+        score_context = _score_context(decision_state)
         for npc_id in npc_order:
             start = decision_state.npcs[npc_id].position
-            paths = self.paths_from(template, start)
+            paths = self.compiled_paths_from(template, start)
             weights, temperature = profile.profile_for_npc(npc_id)
             bombs_visible = profile.bomb_blind_p <= 0.0 or rng.random() >= profile.bomb_blind_p
-            chosen = sample_path(decision_state, start, paths, weights, temperature, bombs_visible, rng)
-            decisions[npc_id] = chosen.actions
+            chosen = _sample_compiled_path(score_context, paths, weights, temperature, bombs_visible, rng)
+            decisions[npc_id] = chosen.path.actions
         return decisions
 
     def paths_from(self, template: MapTemplate, start: Position) -> tuple[NpcPath, ...]:
         cache_key = (template.map_id, template.static_grid, start)
-        cached = self._path_cache.get(cache_key)
+        cached = _GLOBAL_PATH_CACHE.get(cache_key)
+        if cached is None:
+            cached = self._path_cache.get(cache_key)
         if cached is not None:
             return cached
         paths = enumerate_legal_paths(template, start)
         self._path_cache[cache_key] = paths
+        _GLOBAL_PATH_CACHE[cache_key] = paths
         return paths
+
+    def compiled_paths_from(self, template: MapTemplate, start: Position) -> tuple[_CompiledNpcPath, ...]:
+        cache_key = (template.map_id, template.static_grid, start)
+        cached = _GLOBAL_COMPILED_PATH_CACHE.get(cache_key)
+        if cached is None:
+            cached = self._compiled_path_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        paths = self.paths_from(template, start)
+        compiled = _compile_paths(start, paths, template)
+        self._compiled_path_cache[cache_key] = compiled
+        _GLOBAL_COMPILED_PATH_CACHE[cache_key] = compiled
+        return compiled
 
 
 def enumerate_legal_paths(template: MapTemplate, start: Position) -> tuple[NpcPath, ...]:
@@ -186,17 +228,7 @@ def score_path(
     *,
     bombs_visible: bool = True,
 ) -> float:
-    features = path_features(state, start, path, bombs_visible=bombs_visible)
-    return (
-        weights.gold * features["dynamic_reward_div10"]
-        + weights.static_pickup * features["static_pickup_count"]
-        + weights.enter_bomb * features["enter_bomb_count"]
-        + weights.stay * features["stay_count"]
-        + weights.straight3 * features["straight3"]
-        + weights.backtrack * features["backtrack"]
-        + weights.bomb_trapped_stay * features["bomb_trapped_stay"]
-        + weights.center * features["center_delta_chebyshev"]
-    )
+    return _score_compiled_path(_score_context(state), _compile_path(start, path), weights, bombs_visible=bombs_visible)
 
 
 def path_features(state: GameState, start: Position, path: NpcPath, *, bombs_visible: bool = True) -> dict[str, float]:
@@ -248,9 +280,20 @@ def sample_path(
     bombs_visible: bool,
     rng: random.Random,
 ) -> NpcPath:
+    return _sample_compiled_path(_score_context(state), _compile_paths(start, paths), weights, temperature, bombs_visible, rng).path
+
+
+def _sample_compiled_path(
+    score_context: _NpcScoreContext,
+    paths: tuple[_CompiledNpcPath, ...],
+    weights: M4aWeights,
+    temperature: float,
+    bombs_visible: bool,
+    rng: random.Random,
+) -> _CompiledNpcPath:
     if temperature <= 0.0:
         raise SimulatorRuleError(f"NPC temperature must be positive, got {temperature}")
-    scaled_scores = [score_path(state, start, path, weights, bombs_visible=bombs_visible) / temperature for path in paths]
+    scaled_scores = [_score_compiled_path(score_context, path, weights, bombs_visible=bombs_visible) / temperature for path in paths]
     max_score = max(scaled_scores)
     exp_scores = [math.exp(score - max_score) for score in scaled_scores]
     total = sum(exp_scores)
@@ -261,6 +304,107 @@ def sample_path(
         if ticket <= running:
             return path
     return paths[-1]
+
+
+def _compile_paths(
+    start: Position,
+    paths: tuple[NpcPath, ...],
+    template: MapTemplate | None = None,
+) -> tuple[_CompiledNpcPath, ...]:
+    return tuple(_compile_path(start, path, template) for path in paths)
+
+
+def _compile_path(start: Position, path: NpcPath, template: MapTemplate | None = None) -> _CompiledNpcPath:
+    moving_positions = tuple(position for action, position in zip(path.actions, path.positions) if action != Action.STAY)
+    moving_indices = tuple(_position_index(position) for position in moving_positions)
+    bomb_trapped_neighbors: tuple[Position, ...] = ()
+    if path.actions == (Action.STAY, Action.STAY, Action.STAY):
+        if template is None:
+            bomb_trapped_neighbors = tuple(
+                start.moved(action)
+                for action in (Action.UP, Action.DOWN, Action.LEFT, Action.RIGHT)
+                if start.moved(action).in_bounds()
+            )
+        else:
+            bomb_trapped_neighbors = tuple(
+                neighbor
+                for action in (Action.UP, Action.DOWN, Action.LEFT, Action.RIGHT)
+                for neighbor in (start.moved(action),)
+                if _is_legal_npc_position(template, neighbor)
+            )
+    return _CompiledNpcPath(
+        path=path,
+        moving_positions=moving_positions,
+        moving_indices=moving_indices,
+        stay_count=float(sum(1 for action in path.actions if action == Action.STAY)),
+        straight3=float(_is_straight3(path.actions)),
+        backtrack=float(_has_backtrack(path.actions)),
+        bomb_trapped_neighbors=bomb_trapped_neighbors,
+        bomb_trapped_neighbor_indices=tuple(_position_index(position) for position in bomb_trapped_neighbors),
+        center_delta_chebyshev=float(_center_chebyshev(start) - _center_chebyshev(path.positions[-1])),
+    )
+
+
+def _score_compiled_path(
+    score_context: _NpcScoreContext,
+    path: _CompiledNpcPath,
+    weights: M4aWeights,
+    *,
+    bombs_visible: bool,
+) -> float:
+    reward = 0
+    pickup_count = 0
+    static_pickup_count = 0
+    touched_gold: dict[int, int | None] = {}
+
+    for position in path.moving_indices:
+        if score_context.gold.get(position) is not None:
+            static_pickup_count += 1
+        available = touched_gold[position] if position in touched_gold else score_context.gold.get(position)
+        if available is not None:
+            pickup_count += 1
+            picked = _ceil_pickup(available)
+            reward += picked
+            remaining = available - picked
+            touched_gold[position] = remaining if remaining > 0 else None
+
+    enter_bomb_count = 0
+    if bombs_visible:
+        touched_bombs: set[int] = set()
+        for position in path.moving_indices:
+            if position in score_context.bombs and position not in touched_bombs:
+                enter_bomb_count += 1
+                touched_bombs.add(position)
+
+    bomb_trapped_neighbors = tuple(position for position in path.bomb_trapped_neighbor_indices if position not in score_context.obstacles)
+    bomb_trapped_stay = float(
+        bombs_visible
+        and bool(bomb_trapped_neighbors)
+        and all(position in score_context.bombs for position in bomb_trapped_neighbors)
+    )
+
+    return (
+        weights.gold * (reward / 10.0)
+        + weights.static_pickup * float(static_pickup_count)
+        + weights.enter_bomb * float(enter_bomb_count)
+        + weights.stay * path.stay_count
+        + weights.straight3 * path.straight3
+        + weights.backtrack * path.backtrack
+        + weights.bomb_trapped_stay * bomb_trapped_stay
+        + weights.center * path.center_delta_chebyshev
+    )
+
+
+def _score_context(state: GameState) -> _NpcScoreContext:
+    return _NpcScoreContext(
+        gold={_position_index(position): amount for position, amount in state.gold.items()},
+        bombs={_position_index(position) for position in state.bombs},
+        obstacles=frozenset(_position_index(position) for position in state.obstacles),
+    )
+
+
+def _position_index(position: Position) -> int:
+    return position.row * GRID_SIZE + position.col
 
 
 def _is_legal_npc_position(template: MapTemplate, position: Position) -> bool:

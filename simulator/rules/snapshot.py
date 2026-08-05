@@ -8,6 +8,9 @@ from ..errors import SimulatorRuleError
 from ..state import GameState
 from ..types import GoldGenerationEvent, InteractionEvents, Position, RegionStat, Snapshot
 
+OccupantPositionKey = tuple[str, int, int | None]
+OccupantPositions = dict[OccupantPositionKey, Position]
+
 
 @dataclass
 class _MutableRegionStat:
@@ -32,13 +35,29 @@ class SnapshotAccumulator:
         gold_generated: tuple[GoldGenerationEvent, ...] = (),
         interactions: tuple[InteractionEvents, ...] = (),
     ) -> Snapshot | None:
+        return self.record_round_from_positions(
+            round_index,
+            capture_occupant_positions(start_state),
+            end_state,
+            gold_generated=gold_generated,
+            interactions=interactions,
+        )
+
+    def record_round_from_positions(
+        self,
+        round_index: int,
+        start_positions: OccupantPositions,
+        end_state: GameState,
+        gold_generated: tuple[GoldGenerationEvent, ...] = (),
+        interactions: tuple[InteractionEvents, ...] = (),
+    ) -> Snapshot | None:
         if self.window_begin is None:
             self.window_begin = round_index
         expected_round = self.window_begin + self._recorded_rounds
         if round_index != expected_round:
             raise SimulatorRuleError(f"snapshot window expected round {expected_round}, got {round_index}")
 
-        self._record_occupant_transitions(start_state, end_state)
+        self._record_occupant_transitions(start_positions, end_state)
         self._record_gold_generated(gold_generated)
         self._record_gold_collected(interactions)
         self._recorded_rounds += 1
@@ -54,9 +73,8 @@ class SnapshotAccumulator:
         self._recorded_rounds = 0
         return snapshot
 
-    def _record_occupant_transitions(self, start_state: GameState, end_state: GameState) -> None:
-        start_positions = _occupant_positions(start_state)
-        end_positions = _occupant_positions(end_state)
+    def _record_occupant_transitions(self, start_positions: OccupantPositions, end_state: GameState) -> None:
+        end_positions = capture_occupant_positions(end_state)
         if set(start_positions) != set(end_positions):
             missing = sorted(set(start_positions) ^ set(end_positions))
             raise SimulatorRuleError(f"occupant set changed during snapshot window: {missing}")
@@ -129,8 +147,8 @@ def record_snapshot_round(
     return accumulator.record_round(round_index, start_state, end_state, gold_generated, interactions)
 
 
-def _occupant_positions(state: GameState) -> dict[tuple[str, int, int | None], Position]:
-    positions: dict[tuple[str, int, int | None], Position] = {}
+def capture_occupant_positions(state: GameState) -> OccupantPositions:
+    positions: OccupantPositions = {}
     for player_id, player in state.players.items():
         for unit in player.units:
             positions[("player", player_id, unit.id)] = unit.position
@@ -144,7 +162,7 @@ def _gold_remaining(state: GameState, id_: int) -> int:
 
 
 def _occupants(state: GameState, id_: int) -> int:
-    return sum(1 for position in _occupant_positions(state).values() if region_id(position) == id_)
+    return sum(1 for position in capture_occupant_positions(state).values() if region_id(position) == id_)
 
 
-__all__ = ["SnapshotAccumulator", "record_snapshot_round", "region_id"]
+__all__ = ["SnapshotAccumulator", "capture_occupant_positions", "record_snapshot_round", "region_id"]

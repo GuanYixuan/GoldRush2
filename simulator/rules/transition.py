@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
 
 from ..config import RulesConfig
@@ -11,7 +10,7 @@ from ..types import Action, GameOutput, GoldGenerationEvent, InteractionEvents, 
 from .interaction import apply_step_interactions
 from .movement import apply_npc_step, apply_player_step, iter_player_steps
 from .scoring import activate_pending_vision, apply_vision_purchase
-from .snapshot import SnapshotAccumulator
+from .snapshot import SnapshotAccumulator, capture_occupant_positions
 
 
 @dataclass(frozen=True)
@@ -40,7 +39,7 @@ def transition_one_round(
         raise ValueError(f"first_player_id must be 1 or 2, got {first_player_id}")
 
     round_index = state.round_index
-    start_state = copy.deepcopy(state)
+    start_positions = capture_occupant_positions(state) if snapshot_accumulator is not None else None
     second_player_id = 1 if first_player_id == 2 else 2
 
     gold_generated = mechanisms.gold_generated(round_index)
@@ -69,9 +68,10 @@ def transition_one_round(
 
     snapshot = None
     if snapshot_accumulator is not None:
-        snapshot = snapshot_accumulator.record_round(
+        assert start_positions is not None
+        snapshot = snapshot_accumulator.record_round_from_positions(
             round_index,
-            start_state,
+            start_positions,
             state,
             gold_generated=gold_generated,
             interactions=tuple(interaction_events),
@@ -117,7 +117,7 @@ def transition_started_round(
         raise SimulatorRuleError(f"npc_actions must contain actions for NPC ids {npc_order}, got {sorted(npc_actions)}")
 
     round_index = state.round_index
-    start_state = copy.deepcopy(state)
+    start_positions = capture_occupant_positions(state) if snapshot_accumulator is not None else None
     second_player_id = 1 if first_player_id == 2 else 2
 
     movement_events: list[MovementEvent] = []
@@ -143,9 +143,10 @@ def transition_started_round(
 
     snapshot = None
     if snapshot_accumulator is not None:
-        snapshot = snapshot_accumulator.record_round(
+        assert start_positions is not None
+        snapshot = snapshot_accumulator.record_round_from_positions(
             round_index,
-            start_state,
+            start_positions,
             state,
             gold_generated=gold_generated,
             interactions=tuple(interaction_events),

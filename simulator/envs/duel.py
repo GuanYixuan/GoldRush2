@@ -119,13 +119,15 @@ def run_duel(
         gold_generated = _generate_gold(state, template, outer_state, mechanisms, rng)
         apply_gold_generation(state, gold_generated)
 
-        round_start_state = copy.deepcopy(state)
+        round_index = state.round_index
+        round_start_state = copy.deepcopy(state) if recorder is not None else None
         player_outputs, policy_latency = _collect_player_outputs(policies, state, visible_snapshot)
         for player_id, latency_ns in policy_latency.items():
             latencies[player_id].append(latency_ns)
         first_player_id = _first_player_id(config, policy_latency, rng)
         npc_order = mechanisms.npc_policy.sample_order(state, rng)
-        npc_actions = mechanisms.npc_policy.decide_all(copy.deepcopy(state), template, npc_order, rng, npc_profile)
+        decision_state = state if isinstance(mechanisms.npc_policy, M4aNpcPolicy) else copy.deepcopy(state)
+        npc_actions = mechanisms.npc_policy.decide_all(decision_state, template, npc_order, rng, npc_profile)
 
         transition_result = transition_started_round(
             state,
@@ -140,7 +142,7 @@ def run_duel(
         visible_snapshot = transition_result.snapshot
 
         trace = RoundTrace(
-            round_index=round_start_state.round_index,
+            round_index=round_index,
             first_player_id=first_player_id,
             player_outputs=player_outputs,
             policy_latency_ns=policy_latency,
@@ -153,6 +155,7 @@ def run_duel(
         traces.append(trace)
 
         if recorder is not None:
+            assert round_start_state is not None
             recorder.record_round(
                 start_state=round_start_state,
                 end_state=state,
@@ -189,10 +192,27 @@ def _generate_gold(
     rng: random.Random,
 ) -> tuple[GoldGenerationEvent, ...]:
     center_events = mechanisms.center_gold.generate(state, template, rng)
-    temp_state = copy.deepcopy(state)
-    apply_gold_generation(temp_state, center_events)
-    outer_events = mechanisms.outer_gold.generate(temp_state, template, outer_state, rng)
+    _validate_gold_generation_events(state, center_events)
+    outer_events = mechanisms.outer_gold.generate(
+        state,
+        template,
+        outer_state,
+        rng,
+        reserved_positions=tuple(event.position for event in center_events),
+    )
     return center_events + outer_events
+
+
+def _validate_gold_generation_events(state: GameState, events: tuple[GoldGenerationEvent, ...]) -> None:
+    for event in events:
+        if event.amount <= 0:
+            raise SimulatorRuleError(f"gold generation amount must be positive: {event}")
+        if not event.position.in_bounds():
+            raise SimulatorRuleError(f"gold generation position out of bounds: {event.position}")
+        if event.position in state.obstacles:
+            raise SimulatorRuleError(f"gold generation overlaps obstacle at {event.position}")
+        if event.position in state.bombs:
+            raise SimulatorRuleError(f"gold generation overlaps bomb at {event.position}")
 
 
 def _collect_player_outputs(

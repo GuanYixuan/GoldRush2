@@ -41,7 +41,8 @@ def apply_step_interactions(
     rules = RulesConfig() if rules is None else rules
     actor, player_unit = _resolve_actor(state, movement)
     position = movement.to_pos
-    _validate_landing_cell_invariants(state, position, rules)
+    npc_count = _npc_count_at(state, position) if position in state.bombs or actor.kind == ActorKind.PLAYER_UNIT else 0
+    _validate_landing_cell_invariants(state, position, rules, npc_count)
 
     pickups: list[PickupEvent] = []
     bomb_triggers: list[BombTriggerEvent] = []
@@ -55,7 +56,7 @@ def apply_step_interactions(
     if bomb_trigger is not None:
         bomb_triggers.append(bomb_trigger)
 
-    trample = _apply_player_trample(state, player_unit, actor, position, rules)
+    trample = _apply_player_trample(state, player_unit, actor, position, rules, npc_count)
     if trample is not None:
         tramples.append(trample)
 
@@ -96,8 +97,7 @@ def _apply_gold_pickup(
     )
 
 
-def _validate_landing_cell_invariants(state: GameState, position: Position, rules: RulesConfig) -> None:
-    npc_count = _npc_count_at(state, position)
+def _validate_landing_cell_invariants(state: GameState, position: Position, rules: RulesConfig, npc_count: int) -> None:
     if position in state.bombs and npc_count >= rules.trample_npc_threshold:
         raise SimulatorRuleError(
             f"forbidden bomb/NPC overlap at {position}: bomb with {npc_count} NPCs "
@@ -132,13 +132,13 @@ def _apply_player_trample(
     actor: ActorRef,
     position: Position,
     rules: RulesConfig,
+    npc_count: int,
 ) -> TrampleEvent | None:
     if actor.kind != ActorKind.PLAYER_UNIT:
         return None
     if player_unit is None:
         raise ValueError(f"player trample has no player unit: {actor}")
 
-    npc_count = _npc_count_at(state, position)
     if npc_count < rules.trample_npc_threshold:
         return None
 
