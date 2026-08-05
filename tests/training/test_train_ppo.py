@@ -11,6 +11,7 @@ from pathlib import Path
 from simulator.config import EpisodeConfig, RulesConfig
 from training.models import PolicyNetworkConfig
 from training.rl import EvaluationCase, PpoConfig
+from training.rl import MultiprocessRolloutConfig
 from training.scripts.train_ppo import (
     TrainPpoConfig,
     load_checkpoint,
@@ -79,6 +80,26 @@ class TrainPpoTests(unittest.TestCase):
             records = _read_jsonl(Path(tmpdir) / "metrics.jsonl")
             self.assertEqual([record["kind"] for record in records], ["train", "eval"])
 
+    def test_multiprocess_rollout_training_smoke(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                rollout_mode="multiprocess",
+                multiprocess_rollout=MultiprocessRolloutConfig(
+                    num_workers=2,
+                    max_inference_batch_size=4,
+                    inference_timeout_ms=1.0,
+                ),
+            )
+
+            result = run_training(config)
+
+            self.assertEqual(result.final_update, 1)
+            self.assertEqual(result.train_metrics[0]["rollout_mode"], "multiprocess")
+            self.assertEqual(result.train_metrics[0]["first_episodes"], 1)
+            self.assertEqual(result.train_metrics[0]["second_episodes"], 1)
+            self.assertTrue(result.latest_checkpoint.exists())
+
     def test_cli_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cmd = [
@@ -119,7 +140,8 @@ class TrainPpoTests(unittest.TestCase):
                 "-1",
             ]
 
-            completed = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            completed = subprocess.run(cmd, capture_output=True, text=True)
+            self.assertEqual(completed.returncode, 0, msg=f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}")
 
             payload = json.loads(completed.stdout)
             self.assertEqual(payload["final_update"], 1)
@@ -133,6 +155,8 @@ def _smoke_config(
     resume_checkpoint: Path | None = None,
     eval_interval: int | None = None,
     eval_cases: tuple[EvaluationCase, ...] = (),
+    rollout_mode: str = "serial",
+    multiprocess_rollout: MultiprocessRolloutConfig | None = None,
 ) -> TrainPpoConfig:
     return TrainPpoConfig(
         seed=77,
@@ -144,6 +168,8 @@ def _smoke_config(
         save_interval=1,
         eval_interval=eval_interval,
         eval_cases=eval_cases,
+        rollout_mode=rollout_mode,
+        multiprocess_rollout=multiprocess_rollout or MultiprocessRolloutConfig(),
         reward_beta=0.0,
         model=_small_model_config(),
         ppo=PpoConfig(update_epochs=1, minibatch_size=2, target_joint_kl=None),

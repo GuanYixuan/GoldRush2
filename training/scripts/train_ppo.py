@@ -18,10 +18,12 @@ from training.rl import (
     BatchRolloutSampler,
     EvaluationCase,
     EvaluationConfig,
+    MultiprocessRolloutConfig,
     PpoConfig,
     RuntimePolicyWrapper,
     SingleAgentEnvConfig,
     TerminalWinPlusMarginPotentialReward,
+    collect_multiprocess_ppo_rollouts,
     collect_ppo_rollouts,
     evaluate_policy,
     ppo_update,
@@ -44,6 +46,8 @@ class TrainPpoConfig:
     reward_margin_scale: float = 500.0
     learning_rate: float = 2.0e-4
     adam_eps: float = 1.0e-5
+    rollout_mode: str = "serial"
+    multiprocess_rollout: MultiprocessRolloutConfig = field(default_factory=MultiprocessRolloutConfig)
     ppo: PpoConfig = field(default_factory=PpoConfig)
     model: PolicyNetworkConfig = field(default_factory=PolicyNetworkConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
@@ -85,13 +89,11 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
     sampler = _sampler(config)
 
     for update_index in range(start_update + 1, config.total_updates + 1):
-        batch = collect_ppo_rollouts(
+        batch, rollout_stats = _collect_training_rollouts(
             model,
             sampler,
-            pair_count=config.pair_count,
-            seed=config.seed + (update_index - 1) * config.pair_count,
-            map_ids=config.map_ids,
-            opponent_specs=config.opponent_specs,
+            config=config,
+            update_index=update_index,
             device=device,
         )
         batch = batch.to(device).compute_gae(
@@ -116,6 +118,7 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
             "grad_norm": stats.grad_norm,
             "ppo_update_count": stats.update_count,
             "early_stopped": stats.early_stopped,
+            **rollout_stats,
             **_training_diagnostics(batch),
         }
         _append_jsonl(metrics_path, train_record)
@@ -208,6 +211,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=2.0e-4)
     parser.add_argument("--adam-eps", type=float, default=1.0e-5)
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
+    parser.add_argument("--rollout-mode", choices=["serial", "multiprocess"], default="serial")
+    parser.add_argument("--rollout-workers", type=int, default=8)
+    parser.add_argument("--rollout-max-inference-batch-size", type=int, default=64)
+    parser.add_argument("--rollout-inference-timeout-ms", type=float, default=2.0)
     parser.add_argument("--model-width", type=int, default=96)
     parser.add_argument("--model-blocks", type=int, default=8)
     parser.add_argument("--scalar-hidden", type=int, nargs=2, default=[96, 96])
@@ -233,6 +240,11 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         update_epochs=int(args.ppo_update_epochs),
         target_joint_kl=None if args.ppo_target_kl < 0 else float(args.ppo_target_kl),
     )
+    multiprocess_rollout = MultiprocessRolloutConfig(
+        num_workers=int(args.rollout_workers),
+        max_inference_batch_size=int(args.rollout_max_inference_batch_size),
+        inference_timeout_ms=float(args.rollout_inference_timeout_ms),
+    )
     opponent_specs = tuple(opponent_spec_from_name(name) for name in args.opponents)
     eval_cases: tuple[EvaluationCase, ...] = ()
     if args.eval_interval is not None:
@@ -252,6 +264,8 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         reward_margin_scale=float(args.reward_margin_scale),
         learning_rate=float(args.learning_rate),
         adam_eps=float(args.adam_eps),
+        rollout_mode=str(args.rollout_mode),
+        multiprocess_rollout=multiprocess_rollout,
         ppo=ppo,
         model=model,
         episode=episode,
@@ -277,6 +291,40 @@ def _sampler(config: TrainPpoConfig) -> BatchRolloutSampler:
             gamma=config.ppo.gamma,
         ),
     )
+
+
+def _collect_training_rollouts(
+    model: GoldRushPolicyNetwork,
+    sampler: BatchRolloutSampler,
+    *,
+    config: TrainPpoConfig,
+    update_index: int,
+    device: torch.device,
+):
+    seed = config.seed + (update_index - 1) * config.pair_count
+    if config.rollout_mode == "serial":
+        batch = collect_ppo_rollouts(
+            model,
+            sampler,
+            pair_count=config.pair_count,
+            seed=seed,
+            map_ids=config.map_ids,
+            opponent_specs=config.opponent_specs,
+            device=device,
+        )
+        return batch, {"rollout_mode": "serial"}
+    if config.rollout_mode == "multiprocess":
+        return collect_multiprocess_ppo_rollouts(
+            model,
+            sampler,
+            pair_count=config.pair_count,
+            seed=seed,
+            map_ids=config.map_ids,
+            opponent_specs=config.opponent_specs,
+            device=device,
+            config=config.multiprocess_rollout,
+        )
+    raise ValueError(f"unknown rollout_mode: {config.rollout_mode!r}")
 
 
 def _run_eval(
@@ -370,6 +418,8 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError(f"save_interval must be non-negative, got {config.save_interval}")
     if config.eval_interval is not None and config.eval_interval <= 0:
         raise ValueError(f"eval_interval must be positive when set, got {config.eval_interval}")
+    if config.rollout_mode not in ("serial", "multiprocess"):
+        raise ValueError(f"rollout_mode must be serial or multiprocess, got {config.rollout_mode!r}")
 
 
 def _training_diagnostics(batch) -> dict[str, float]:

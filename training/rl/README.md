@@ -9,7 +9,7 @@
 - 双方 observation 都来自同一个行动前状态，不把 opponent 行动后的状态泄漏给 agent。
 - env 默认 reward 是终局 `WinLossReward`：非终局 `0`，agent 胜 `+1`，agent 负 `-1`。PPO v1 主线应显式使用 `TerminalWinPlusMarginPotentialReward`，默认 `beta=0.2`；smoke/debug 可设 `beta=0` 退化为纯终局胜负 reward。
 - 同分判定按“agent 慢、opponent 快”的 P90 假设处理，避免交换 P1/P2 时引入固定玩家 ID 偏置。
-- PPO v1 只支持完整 episode rollout，GAE terminal bootstrap 固定为 `0`；暂不支持 rollout chunk bootstrap 或并行环境。
+- PPO v1 只支持完整 episode rollout，GAE terminal bootstrap 固定为 `0`；暂不支持 rollout chunk bootstrap。rollout 支持默认 serial collector 和可选 multiprocess collector。
 
 ## 主要入口
 
@@ -18,6 +18,7 @@
 - `RuntimePolicyWrapper`：把 `policy_runtime.FeatureExtractor` 接入现有 policy callable 时序；每局由 sampler 调用 `start_episode(player_id=...)` 重置 runtime。
 - `PpoBatch` / `PpoTransition`：PPO 训练 batch 与 transition 数据结构，支持 GAE 和 minibatch iterator。
 - `collect_ppo_rollouts()`：用 `GoldRushPolicyNetwork` 和 `BatchRolloutSampler` 配置采集 PPO batch。
+- `collect_multiprocess_ppo_rollouts()`：v1 多进程 rollout collector。main process 独占 model/GPU 并批量推理，worker process 只运行 simulator、opponent 和 feature extractor；每个 worker 同时只跑一个 episode。该入口默认不启用，适合 `pair_count >= 8`，更适合 `pair_count >= 32` 的训练配置。
 - `ppo_update()`：对已计算 GAE 的 `PpoBatch` 执行一次 PPO update。
 - `EvaluationCase` / `EvaluationConfig` / `evaluate_policy`：显式评估 case 集与评估汇总。正式评估应冻结 case 列表；`anchor_grid()` 用于公共 seed 对照，`matrix_by_slice()` 用于每个 `(map, opponent)` 切片独立 seed 集。
 - `training.scripts.train_ppo.run_training()`：最小 PPO 训练入口，负责 rollout、GAE、PPO update、checkpoint、metrics 和可选 eval。
@@ -28,6 +29,17 @@
 第一版神经 PPO 的模型放在 `training/models/policy_network.py`，PPO 算法与 buffer 放在 `training/rl/ppo.py`、`training/rl/ppo_buffer.py`，训练入口放在 `training/scripts/train_ppo.py`。具体网络输出、forward 返回对象、rollout buffer 字段和 reward schema 以 `docs/policy_network_design.md` 与 `docs/reward_design.md` 为准。
 
 训练时仍应把两条 episode trajectory 作为独立样本；pair 只用于采样组织、评估聚合和降噪统计。
+
+训练入口 `training.scripts.train_ppo` 默认使用 `--rollout-mode serial`。需要启用 v1 多进程 rollout 时显式传入：
+
+```bash
+--rollout-mode multiprocess \
+--rollout-workers 32 \
+--rollout-max-inference-batch-size 64 \
+--rollout-inference-timeout-ms 2
+```
+
+多进程 collector 保持 PPO on-policy 语义：每个 update 的 rollout batch 都来自当前冻结模型。它也保留 paired episode 语义，并在 first episode `reset()` 后立即提交对应 second episode，以避免不必要等待。
 
 第一版固定 anchor eval 配置见 `training.configs.eval.anchor_eval_config()`：
 
