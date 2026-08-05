@@ -22,7 +22,7 @@ from training.models import (
 from training.opponents import OpponentSpec
 
 from .env import SingleAgentGoldRushEnv
-from .ppo_buffer import PpoBatch, PpoTransition
+from .ppo_buffer import PpoBatch
 from .sampler import BatchRolloutSampler
 
 
@@ -120,8 +120,7 @@ def collect_multiprocess_ppo_rollouts(
                 process.join(timeout=1.0)
 
     batch_assembly_start = time.perf_counter_ns()
-    transitions = [_payload_to_transition(payload) for payload in payloads]
-    batch = PpoBatch.from_transitions(transitions)
+    batch = _episode_payloads_to_batch(payloads)
     batch_assembly_ns = time.perf_counter_ns() - batch_assembly_start
     stats = {
         **stats,
@@ -234,7 +233,7 @@ def _scheduler_loop(
                 idle_workers.append(worker_id)
                 task = active_tasks.pop(msg["task_id"])
                 payload_extend_start = time.perf_counter_ns()
-                payloads.extend(msg["transitions"])
+                payloads.append(msg)
                 payload_extend_ns += time.perf_counter_ns() - payload_extend_start
                 if task.pair_role == "first":
                     first_done += 1
@@ -274,7 +273,7 @@ def _scheduler_loop(
         feature_batch_sizes.append(batch_size)
 
     payload_sort_start = time.perf_counter_ns()
-    payloads.sort(key=lambda item: (item["pair_id"], 0 if item["pair_role"] == "first" else 1, item["round_index"]))
+    payloads.sort(key=lambda item: (item["pair_id"], 0 if item["pair_role"] == "first" else 1))
     payload_sort_ns = time.perf_counter_ns() - payload_sort_start
     all_ready_elapsed_ns = None if all_workers_ready_ns is None else all_workers_ready_ns - worker_startup_start_ns
     first_ready_elapsed_ns = None if first_worker_ready_ns is None else first_worker_ready_ns - worker_startup_start_ns
@@ -385,6 +384,41 @@ def _transition_info(step_info: dict[str, Any], *, done: bool, mode: str) -> dic
     raise SimulatorRuleError(f"unknown transition_info_mode: {mode!r}")
 
 
+def _stack_episode_transitions(
+    *,
+    spatial_planes: list[Any],
+    scalars: list[Any],
+    actions: list[tuple[int, ...]],
+    k: list[int],
+    order: list[int],
+    vp: list[int],
+    old_logprob: list[float],
+    values: list[float],
+    rewards: list[float],
+    dones: list[bool],
+    round_indices: list[int],
+    infos: list[dict[str, Any]],
+) -> dict[str, Any]:
+    import numpy as np
+
+    if not dones:
+        raise SimulatorRuleError("episode transition arrays cannot be empty")
+    return {
+        "spatial_planes": np.stack(spatial_planes).astype(np.float32, copy=False),
+        "scalars": np.stack(scalars).astype(np.float32, copy=False),
+        "actions": np.asarray(actions, dtype=np.int64),
+        "k": np.asarray(k, dtype=np.int64),
+        "order": np.asarray(order, dtype=np.int64),
+        "vp": np.asarray(vp, dtype=np.int64),
+        "old_logprob": np.asarray(old_logprob, dtype=np.float32),
+        "value": np.asarray(values, dtype=np.float32),
+        "reward": np.asarray(rewards, dtype=np.float32),
+        "done": np.asarray(dones, dtype=np.bool_),
+        "round_index": np.asarray(round_indices, dtype=np.int64),
+        "infos": tuple(infos),
+    }
+
+
 def _worker_loop(worker_id: int, command_queue: Any, result_queue: Any, static_config: dict[str, Any]) -> None:
     try:
         result_queue.put({"type": "worker_ready", "worker_id": worker_id})
@@ -434,7 +468,18 @@ def _run_worker_episode(worker_id: int, task: EpisodeTask, command_queue: Any, r
     )
     extractor = FeatureExtractor(player_id=task.agent_player_id)
     observation = reset.observation
-    transitions: list[dict[str, Any]] = []
+    spatial_planes_items: list[Any] = []
+    scalars_items: list[Any] = []
+    actions_items: list[tuple[int, ...]] = []
+    k_items: list[int] = []
+    order_items: list[int] = []
+    vp_items: list[int] = []
+    old_logprob_items: list[float] = []
+    value_items: list[float] = []
+    reward_items: list[float] = []
+    done_items: list[bool] = []
+    round_index_items: list[int] = []
+    info_items: list[dict[str, Any]] = []
     request_index = 0
 
     while observation is not None:
@@ -473,27 +518,18 @@ def _run_worker_episode(worker_id: int, task: EpisodeTask, command_queue: Any, r
         extractor.commit_action(game_output)
         step = env.step(game_output)
         done = bool(step.terminated)
-        transitions.append(
-            {
-                "spatial_planes": spatial_planes,
-                "scalars": scalars,
-                "actions": tuple(int(value) for value in game_output.actions),
-                "k": int(game_output.k),
-                "order": int(game_output.order),
-                "vp": int(game_output.vp),
-                "old_logprob": float(action_msg["old_logprob"]),
-                "value": float(action_msg["value"]),
-                "reward": float(step.reward),
-                "done": done,
-                "episode_id": f"{task.pair_id}-{task.pair_role}",
-                "pair_id": task.pair_id,
-                "pair_role": task.pair_role,
-                "round_index": int(observation.round),
-                "map_id": int(reset.info["map_id"]),
-                "agent_player_id": int(task.agent_player_id),
-                "info": _transition_info(step.info, done=done, mode=str(static_config["transition_info_mode"])),
-            }
-        )
+        spatial_planes_items.append(spatial_planes)
+        scalars_items.append(scalars)
+        actions_items.append(tuple(int(value) for value in game_output.actions))
+        k_items.append(int(game_output.k))
+        order_items.append(int(game_output.order))
+        vp_items.append(int(game_output.vp))
+        old_logprob_items.append(float(action_msg["old_logprob"]))
+        value_items.append(float(action_msg["value"]))
+        reward_items.append(float(step.reward))
+        done_items.append(done)
+        round_index_items.append(int(observation.round))
+        info_items.append(_transition_info(step.info, done=done, mode=str(static_config["transition_info_mode"])))
         observation = step.observation
         request_index += 1
 
@@ -508,7 +544,20 @@ def _run_worker_episode(worker_id: int, task: EpisodeTask, command_queue: Any, r
             "map_id": int(reset.info["map_id"]),
             "agent_player_id": int(task.agent_player_id),
             "opponent_spec": reset.info["opponent_spec"],
-            "transitions": transitions,
+            "transitions": _stack_episode_transitions(
+                spatial_planes=spatial_planes_items,
+                scalars=scalars_items,
+                actions=actions_items,
+                k=k_items,
+                order=order_items,
+                vp=vp_items,
+                old_logprob=old_logprob_items,
+                values=value_items,
+                rewards=reward_items,
+                dones=done_items,
+                round_indices=round_index_items,
+                infos=info_items,
+            ),
         }
     )
 
@@ -538,23 +587,70 @@ def _initial_tasks(
     return tasks
 
 
-def _payload_to_transition(payload: dict[str, Any]) -> PpoTransition:
-    return PpoTransition(
-        spatial_planes=torch.as_tensor(payload["spatial_planes"], dtype=torch.float32),
-        scalars=torch.as_tensor(payload["scalars"], dtype=torch.float32),
-        actions=torch.as_tensor(payload["actions"], dtype=torch.long),
-        k=torch.as_tensor(payload["k"], dtype=torch.long),
-        order=torch.as_tensor(payload["order"], dtype=torch.long),
-        vp=torch.as_tensor(payload["vp"], dtype=torch.long),
-        old_logprob=torch.as_tensor(payload["old_logprob"], dtype=torch.float32),
-        value=torch.as_tensor(payload["value"], dtype=torch.float32),
-        reward=float(payload["reward"]),
-        done=bool(payload["done"]),
-        episode_id=str(payload["episode_id"]),
-        round_index=int(payload["round_index"]),
-        map_id=int(payload["map_id"]),
-        agent_player_id=int(payload["agent_player_id"]),
-        info=payload["info"],
+def _episode_payloads_to_batch(payloads: list[dict[str, Any]]) -> PpoBatch:
+    import numpy as np
+
+    if not payloads:
+        raise SimulatorRuleError("multiprocess rollout produced no episode payloads")
+
+    spatial_planes: list[Any] = []
+    scalars: list[Any] = []
+    actions: list[Any] = []
+    k: list[Any] = []
+    order: list[Any] = []
+    vp: list[Any] = []
+    old_logprob: list[Any] = []
+    values: list[Any] = []
+    rewards: list[Any] = []
+    dones: list[Any] = []
+    round_indices: list[Any] = []
+    episode_ids: list[str] = []
+    map_ids: list[int] = []
+    agent_player_ids: list[int] = []
+    infos: list[dict[str, Any]] = []
+
+    for payload in payloads:
+        transitions = payload["transitions"]
+        episode_length = int(transitions["done"].shape[0])
+        if episode_length <= 0:
+            raise SimulatorRuleError(f"episode payload {payload['task_id']!r} has no transitions")
+        spatial_planes.append(transitions["spatial_planes"])
+        scalars.append(transitions["scalars"])
+        actions.append(transitions["actions"])
+        k.append(transitions["k"])
+        order.append(transitions["order"])
+        vp.append(transitions["vp"])
+        old_logprob.append(transitions["old_logprob"])
+        values.append(transitions["value"])
+        rewards.append(transitions["reward"])
+        dones.append(transitions["done"])
+        round_indices.append(transitions["round_index"])
+        episode_ids.extend((f"{payload['pair_id']}-{payload['pair_role']}",) * episode_length)
+        map_ids.extend((int(payload["map_id"]),) * episode_length)
+        agent_player_ids.extend((int(payload["agent_player_id"]),) * episode_length)
+        episode_infos = tuple(transitions["infos"])
+        if len(episode_infos) != episode_length:
+            raise SimulatorRuleError(
+                f"episode payload {payload['task_id']!r} infos length {len(episode_infos)} != {episode_length}"
+            )
+        infos.extend(episode_infos)
+
+    return PpoBatch.from_arrays(
+        spatial_planes=np.concatenate(spatial_planes, axis=0),
+        scalars=np.concatenate(scalars, axis=0),
+        actions=np.concatenate(actions, axis=0),
+        k=np.concatenate(k, axis=0),
+        order=np.concatenate(order, axis=0),
+        vp=np.concatenate(vp, axis=0),
+        old_logprob=np.concatenate(old_logprob, axis=0),
+        values=np.concatenate(values, axis=0),
+        rewards=np.concatenate(rewards, axis=0),
+        dones=np.concatenate(dones, axis=0),
+        episode_ids=tuple(episode_ids),
+        round_indices=np.concatenate(round_indices, axis=0),
+        map_ids=tuple(map_ids),
+        agent_player_ids=np.asarray(agent_player_ids, dtype=np.int64),
+        infos=tuple(infos),
     )
 
 

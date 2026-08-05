@@ -153,23 +153,6 @@ EvaluationCase(seed, map_id, opponent_spec)
 
 同分判定按主训练假设处理：agent 慢、opponent 快，因此同分时 opponent 胜，避免 P1/P2 交换后引入固定玩家 ID 偏置。
 
-## 下一阶段
-
-下一步进入 `policy_runtime/`：
-
-1. 建立最小 C++ feature extractor 状态机。
-2. 固定 `reset -> observe -> commit_action` 时序。
-3. 先输出基础可测 feature，不急于做复杂 belief。
-4. 提供 Python 训练侧调用方式。
-5. 用 rollout 中的 observation/action 序列验证重置、状态更新和训练/部署一致性。
-
-暂不推进：
-
-- 完整网络结构。
-- PPO 或其它 RL 算法。
-- ONNX 导出链路。
-- fast option。
-
 ## 相关文档
 
 - `simulator/README.md`：模拟器规则层、机制层、环境接口和 replay 导出。
@@ -178,3 +161,4 @@ EvaluationCase(seed, map_id, opponent_spec)
 - `docs/reward_design.md`：reward、critic auxiliary target 和 BC warm start 设计。
 - `docs/fast_option_design.md`：conditional fast option 未来扩展设计。
 - `docs/neural_inference.md`：模型推理、ONNX Runtime、量化和提交体积/速度实验结论。
+- `docs/ppo_v1_roadmap.md`：第一版神经 PPO 训练闭环的实施顺序。

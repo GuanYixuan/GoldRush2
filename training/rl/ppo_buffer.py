@@ -91,6 +91,45 @@ class PpoBatch:
             infos=tuple(transition.info for transition in transitions),
         )
 
+    @staticmethod
+    def from_arrays(
+        *,
+        spatial_planes: Any,
+        scalars: Any,
+        actions: Any,
+        k: Any,
+        order: Any,
+        vp: Any,
+        old_logprob: Any,
+        values: Any,
+        rewards: Any,
+        dones: Any,
+        episode_ids: tuple[str, ...],
+        round_indices: Any,
+        map_ids: tuple[int | None, ...],
+        agent_player_ids: Any,
+        infos: tuple[dict[str, Any], ...],
+    ) -> PpoBatch:
+        batch = PpoBatch(
+            spatial_planes=torch.as_tensor(spatial_planes, dtype=torch.float32),
+            scalars=torch.as_tensor(scalars, dtype=torch.float32),
+            actions=torch.as_tensor(actions, dtype=torch.long),
+            k=torch.as_tensor(k, dtype=torch.long),
+            order=torch.as_tensor(order, dtype=torch.long),
+            vp=torch.as_tensor(vp, dtype=torch.long),
+            old_logprob=torch.as_tensor(old_logprob, dtype=torch.float32),
+            old_values=torch.as_tensor(values, dtype=torch.float32),
+            rewards=torch.as_tensor(rewards, dtype=torch.float32),
+            dones=torch.as_tensor(dones, dtype=torch.bool),
+            episode_ids=tuple(episode_ids),
+            round_indices=torch.as_tensor(round_indices, dtype=torch.long),
+            map_ids=tuple(map_ids),
+            agent_player_ids=torch.as_tensor(agent_player_ids, dtype=torch.long),
+            infos=tuple(infos),
+        )
+        _validate_batch_arrays(batch)
+        return batch
+
     @property
     def transition_count(self) -> int:
         return int(self.rewards.shape[0])
@@ -197,3 +236,37 @@ def _validate_transitions(transitions: list[PpoTransition] | tuple[PpoTransition
             raise ValueError(f"transition {idx} actions must have shape 6")
         if transition.agent_player_id not in (1, 2):
             raise ValueError(f"transition {idx} agent_player_id must be 1 or 2")
+
+
+def _validate_batch_arrays(batch: PpoBatch) -> None:
+    transition_count = int(batch.rewards.shape[0])
+    if transition_count <= 0:
+        raise SimulatorRuleError("PpoBatch requires at least one transition")
+    if tuple(batch.spatial_planes.shape) != (transition_count, 38, 17, 17):
+        raise ValueError(f"spatial_planes must have shape Nx38x17x17, got {tuple(batch.spatial_planes.shape)}")
+    if tuple(batch.scalars.shape) != (transition_count, 10):
+        raise ValueError(f"scalars must have shape Nx10, got {tuple(batch.scalars.shape)}")
+    if tuple(batch.actions.shape) != (transition_count, 6):
+        raise ValueError(f"actions must have shape Nx6, got {tuple(batch.actions.shape)}")
+    for name, tensor in (
+        ("k", batch.k),
+        ("order", batch.order),
+        ("vp", batch.vp),
+        ("old_logprob", batch.old_logprob),
+        ("old_values", batch.old_values),
+        ("rewards", batch.rewards),
+        ("dones", batch.dones),
+        ("round_indices", batch.round_indices),
+        ("agent_player_ids", batch.agent_player_ids),
+    ):
+        if tuple(tensor.shape) != (transition_count,):
+            raise ValueError(f"{name} must have shape N, got {tuple(tensor.shape)}")
+    if len(batch.episode_ids) != transition_count:
+        raise ValueError(f"episode_ids length must be {transition_count}, got {len(batch.episode_ids)}")
+    if len(batch.map_ids) != transition_count:
+        raise ValueError(f"map_ids length must be {transition_count}, got {len(batch.map_ids)}")
+    if len(batch.infos) != transition_count:
+        raise ValueError(f"infos length must be {transition_count}, got {len(batch.infos)}")
+    invalid_player_ids = [int(value) for value in batch.agent_player_ids.tolist() if int(value) not in (1, 2)]
+    if invalid_player_ids:
+        raise ValueError(f"agent_player_ids must be 1 or 2, got {invalid_player_ids[0]}")

@@ -18,6 +18,55 @@ class PpoBufferTests(unittest.TestCase):
         self.assertEqual(batch.episode_ids, ("ep-0",))
         self.assertEqual(batch.map_ids, (1,))
 
+    def test_batch_from_arrays_builds_tensors_and_metadata(self) -> None:
+        batch = PpoBatch.from_arrays(
+            spatial_planes=torch.zeros(2, 38, 17, 17),
+            scalars=torch.zeros(2, 10),
+            actions=torch.tensor([[4, 4, 4, 4, 4, 4], [0, 1, 2, 3, 4, 0]]),
+            k=torch.tensor([3, 2]),
+            order=torch.tensor([0, 1]),
+            vp=torch.tensor([0, 2]),
+            old_logprob=torch.tensor([-1.0, -2.0]),
+            values=torch.tensor([0.0, 0.5]),
+            rewards=torch.tensor([0.0, 1.0]),
+            dones=torch.tensor([False, True]),
+            episode_ids=("ep", "ep"),
+            round_indices=torch.tensor([0, 1]),
+            map_ids=(1, 1),
+            agent_player_ids=torch.tensor([1, 1]),
+            infos=({}, {"terminal": True}),
+        )
+
+        self.assertEqual(batch.transition_count, 2)
+        self.assertEqual(batch.actions.dtype, torch.long)
+        self.assertEqual(batch.rewards.dtype, torch.float32)
+        self.assertEqual(batch.dones.dtype, torch.bool)
+        self.assertEqual(batch.episode_ids, ("ep", "ep"))
+        self.assertEqual(batch.infos[1], {"terminal": True})
+
+    def test_batch_from_arrays_supports_gae_boundaries(self) -> None:
+        batch = PpoBatch.from_arrays(
+            spatial_planes=torch.zeros(3, 38, 17, 17),
+            scalars=torch.zeros(3, 10),
+            actions=torch.zeros(3, 6),
+            k=torch.zeros(3),
+            order=torch.zeros(3),
+            vp=torch.zeros(3),
+            old_logprob=torch.zeros(3),
+            values=torch.zeros(3),
+            rewards=torch.tensor([1.0, 0.0, 2.0]),
+            dones=torch.tensor([True, False, True]),
+            episode_ids=("a", "b", "b"),
+            round_indices=torch.tensor([0, 0, 1]),
+            map_ids=(1, 1, 1),
+            agent_player_ids=torch.tensor([1, 2, 2]),
+            infos=({}, {}, {}),
+        )
+
+        batch = batch.compute_gae(gamma=1.0, gae_lambda=1.0, normalize_advantage=False)
+
+        self.assertTrue(torch.allclose(batch.returns, torch.tensor([1.0, 2.0, 2.0])))
+
     def test_gae_for_terminal_reward_is_hand_computable(self) -> None:
         batch = PpoBatch.from_transitions(
             [
