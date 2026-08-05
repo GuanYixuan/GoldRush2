@@ -7,6 +7,7 @@ import time
 import traceback
 from collections.abc import Sequence
 from dataclasses import dataclass
+from multiprocessing import shared_memory
 from typing import Any, Literal
 
 import torch
@@ -47,6 +48,7 @@ class EpisodeTask:
     map_id: int | None
     agent_player_id: int
     opponent_spec: OpponentSpec | None
+    transition_slot: int
 
 
 @dataclass(frozen=True)
@@ -55,8 +57,101 @@ class FeatureRequest:
     task_id: str
     request_id: str
     round_index: int
-    spatial_planes: Any
+    feature_slot: int
+
+
+@dataclass
+class FeatureSharedMemory:
+    planes_shm: shared_memory.SharedMemory
+    scalars_shm: shared_memory.SharedMemory
+    planes: Any
     scalars: Any
+
+    def config(self) -> dict[str, Any]:
+        return {
+            "planes": {
+                "name": self.planes_shm.name,
+                "shape": tuple(int(value) for value in self.planes.shape),
+                "dtype": str(self.planes.dtype),
+            },
+            "scalars": {
+                "name": self.scalars_shm.name,
+                "shape": tuple(int(value) for value in self.scalars.shape),
+                "dtype": str(self.scalars.dtype),
+            },
+        }
+
+    def close(self) -> None:
+        self.planes_shm.close()
+        self.scalars_shm.close()
+
+    def unlink(self) -> None:
+        self.planes_shm.unlink()
+        self.scalars_shm.unlink()
+
+
+@dataclass
+class TransitionSharedMemory:
+    planes_shm: shared_memory.SharedMemory
+    scalars_shm: shared_memory.SharedMemory
+    actions_shm: shared_memory.SharedMemory
+    k_shm: shared_memory.SharedMemory
+    order_shm: shared_memory.SharedMemory
+    vp_shm: shared_memory.SharedMemory
+    old_logprob_shm: shared_memory.SharedMemory
+    value_shm: shared_memory.SharedMemory
+    reward_shm: shared_memory.SharedMemory
+    done_shm: shared_memory.SharedMemory
+    round_index_shm: shared_memory.SharedMemory
+    planes: Any
+    scalars: Any
+    actions: Any
+    k: Any
+    order: Any
+    vp: Any
+    old_logprob: Any
+    value: Any
+    reward: Any
+    done: Any
+    round_index: Any
+
+    def config(self) -> dict[str, Any]:
+        return {
+            "planes": _shared_array_config(self.planes_shm, self.planes),
+            "scalars": _shared_array_config(self.scalars_shm, self.scalars),
+            "actions": _shared_array_config(self.actions_shm, self.actions),
+            "k": _shared_array_config(self.k_shm, self.k),
+            "order": _shared_array_config(self.order_shm, self.order),
+            "vp": _shared_array_config(self.vp_shm, self.vp),
+            "old_logprob": _shared_array_config(self.old_logprob_shm, self.old_logprob),
+            "value": _shared_array_config(self.value_shm, self.value),
+            "reward": _shared_array_config(self.reward_shm, self.reward),
+            "done": _shared_array_config(self.done_shm, self.done),
+            "round_index": _shared_array_config(self.round_index_shm, self.round_index),
+        }
+
+    def close(self) -> None:
+        for shm in self._shms():
+            shm.close()
+
+    def unlink(self) -> None:
+        for shm in self._shms():
+            shm.unlink()
+
+    def _shms(self) -> tuple[shared_memory.SharedMemory, ...]:
+        return (
+            self.planes_shm,
+            self.scalars_shm,
+            self.actions_shm,
+            self.k_shm,
+            self.order_shm,
+            self.vp_shm,
+            self.old_logprob_shm,
+            self.value_shm,
+            self.reward_shm,
+            self.done_shm,
+            self.round_index_shm,
+        )
 
 
 def collect_multiprocess_ppo_rollouts(
@@ -79,21 +174,31 @@ def collect_multiprocess_ppo_rollouts(
     ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()
     command_queues = [ctx.Queue() for _ in range(config.num_workers)]
-    worker_config = _worker_static_config(sampler, config)
-    processes = [
-        ctx.Process(
-            target=_worker_loop,
-            args=(worker_id, command_queues[worker_id], result_queue, worker_config),
-            daemon=True,
-        )
-        for worker_id in range(config.num_workers)
-    ]
     worker_startup_start = time.perf_counter_ns()
-    for process in processes:
-        process.start()
-    worker_startup_ns = time.perf_counter_ns() - worker_startup_start
+    started_processes: list[mp.Process] = []
+    worker_startup_ns = 0
+    feature_shared: FeatureSharedMemory | None = None
+    transition_shared: TransitionSharedMemory | None = None
 
     try:
+        feature_shared = _create_feature_shared_memory(config.num_workers)
+        transition_shared = _create_transition_shared_memory(
+            episode_count=pair_count * 2,
+            round_count=sampler.env_config.episode.rules.round_count,
+        )
+        worker_config = _worker_static_config(sampler, config, feature_shared, transition_shared)
+        processes = [
+            ctx.Process(
+                target=_worker_loop,
+                args=(worker_id, command_queues[worker_id], result_queue, worker_config),
+                daemon=True,
+            )
+            for worker_id in range(config.num_workers)
+        ]
+        for process in processes:
+            process.start()
+            started_processes.append(process)
+        worker_startup_ns = time.perf_counter_ns() - worker_startup_start
         scheduler_start = time.perf_counter_ns()
         payloads, stats = _scheduler_loop(
             model,
@@ -106,22 +211,28 @@ def collect_multiprocess_ppo_rollouts(
             device=rollout_device,
             config=config,
             worker_startup_start_ns=worker_startup_start,
+            feature_shared=feature_shared,
         )
         scheduler_ns = time.perf_counter_ns() - scheduler_start
+        batch_assembly_start = time.perf_counter_ns()
+        batch = _episode_payloads_to_batch(payloads, transition_shared)
+        batch_assembly_ns = time.perf_counter_ns() - batch_assembly_start
     finally:
         if was_training:
             model.train()
         for command_queue in command_queues:
             command_queue.put({"type": "stop"})
-        for process in processes:
+        for process in started_processes:
             process.join(timeout=config.worker_join_timeout_s)
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=1.0)
-
-    batch_assembly_start = time.perf_counter_ns()
-    batch = _episode_payloads_to_batch(payloads)
-    batch_assembly_ns = time.perf_counter_ns() - batch_assembly_start
+        if feature_shared is not None:
+            feature_shared.close()
+            feature_shared.unlink()
+        if transition_shared is not None:
+            transition_shared.close()
+            transition_shared.unlink()
     stats = {
         **stats,
         "worker_startup_ms": worker_startup_ns / 1_000_000,
@@ -143,6 +254,7 @@ def _scheduler_loop(
     device: torch.device,
     config: MultiprocessRolloutConfig,
     worker_startup_start_ns: int,
+    feature_shared: FeatureSharedMemory,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     pending_tasks = _initial_tasks(seed=seed, pair_count=pair_count, map_ids=map_ids, opponent_specs=opponent_specs)
     idle_workers = list(range(len(command_queues)))
@@ -223,6 +335,7 @@ def _scheduler_loop(
                                 map_id=int(msg["map_id"]),
                                 agent_player_id=2,
                                 opponent_spec=msg["opponent_spec"],
+                                transition_slot=task.transition_slot + 1,
                             )
                         )
                 else:
@@ -248,7 +361,7 @@ def _scheduler_loop(
             message_handle_by_type_ns[msg_type] = message_handle_by_type_ns.get(msg_type, 0) + handle_elapsed
 
         if pending_requests and (len(pending_requests) >= config.max_inference_batch_size or msg is None):
-            inference_stats = _run_inference_batch(model, pending_requests, command_queues, device)
+            inference_stats = _run_inference_batch(model, pending_requests, command_queues, device, feature_shared)
             elapsed_ns = inference_stats["elapsed_ns"]
             batch_size = inference_stats["batch_size"]
             inference_ns += elapsed_ns
@@ -261,7 +374,7 @@ def _scheduler_loop(
             pending_requests.clear()
 
     if pending_requests:
-        inference_stats = _run_inference_batch(model, pending_requests, command_queues, device)
+        inference_stats = _run_inference_batch(model, pending_requests, command_queues, device, feature_shared)
         elapsed_ns = inference_stats["elapsed_ns"]
         batch_size = inference_stats["batch_size"]
         inference_ns += elapsed_ns
@@ -318,14 +431,16 @@ def _run_inference_batch(
     requests: list[FeatureRequest],
     command_queues: list[Any],
     device: torch.device,
+    feature_shared: FeatureSharedMemory,
 ) -> dict[str, int]:
     import numpy as np
 
     _sync(device)
     start = time.perf_counter_ns()
     stack_start = time.perf_counter_ns()
-    spatial = torch.as_tensor(np.stack([request.spatial_planes for request in requests]), dtype=torch.float32, device=device)
-    scalars = torch.as_tensor(np.stack([request.scalars for request in requests]), dtype=torch.float32, device=device)
+    feature_slots = [request.feature_slot for request in requests]
+    spatial = torch.as_tensor(np.asarray(feature_shared.planes[feature_slots]), dtype=torch.float32, device=device)
+    scalars = torch.as_tensor(np.asarray(feature_shared.scalars[feature_slots]), dtype=torch.float32, device=device)
     stack_ns = time.perf_counter_ns() - stack_start
     model_sample_start = time.perf_counter_ns()
     with torch.no_grad():
@@ -384,43 +499,174 @@ def _transition_info(step_info: dict[str, Any], *, done: bool, mode: str) -> dic
     raise SimulatorRuleError(f"unknown transition_info_mode: {mode!r}")
 
 
-def _stack_episode_transitions(
-    *,
-    spatial_planes: list[Any],
-    scalars: list[Any],
-    actions: list[tuple[int, ...]],
-    k: list[int],
-    order: list[int],
-    vp: list[int],
-    old_logprob: list[float],
-    values: list[float],
-    rewards: list[float],
-    dones: list[bool],
-    round_indices: list[int],
-    infos: list[dict[str, Any]],
-) -> dict[str, Any]:
+def _create_feature_shared_memory(num_workers: int) -> FeatureSharedMemory:
     import numpy as np
 
-    if not dones:
-        raise SimulatorRuleError("episode transition arrays cannot be empty")
+    planes_shape = (num_workers, 38, 17, 17)
+    scalars_shape = (num_workers, 10)
+    planes_nbytes = int(np.prod(planes_shape)) * np.dtype(np.float32).itemsize
+    scalars_nbytes = int(np.prod(scalars_shape)) * np.dtype(np.float32).itemsize
+    planes_shm = shared_memory.SharedMemory(create=True, size=planes_nbytes)
+    try:
+        scalars_shm = shared_memory.SharedMemory(create=True, size=scalars_nbytes)
+    except Exception:
+        planes_shm.close()
+        planes_shm.unlink()
+        raise
+    return FeatureSharedMemory(
+        planes_shm=planes_shm,
+        scalars_shm=scalars_shm,
+        planes=np.ndarray(planes_shape, dtype=np.float32, buffer=planes_shm.buf),
+        scalars=np.ndarray(scalars_shape, dtype=np.float32, buffer=scalars_shm.buf),
+    )
+
+
+def _attach_feature_shared_memory(config: dict[str, Any]) -> FeatureSharedMemory:
+    import numpy as np
+
+    planes = config["planes"]
+    scalars = config["scalars"]
+    planes_shm = shared_memory.SharedMemory(name=str(planes["name"]))
+    try:
+        scalars_shm = shared_memory.SharedMemory(name=str(scalars["name"]))
+    except Exception:
+        planes_shm.close()
+        raise
+    planes_shape = tuple(int(value) for value in planes["shape"])
+    scalars_shape = tuple(int(value) for value in scalars["shape"])
+    return FeatureSharedMemory(
+        planes_shm=planes_shm,
+        scalars_shm=scalars_shm,
+        planes=np.ndarray(planes_shape, dtype=np.dtype(str(planes["dtype"])), buffer=planes_shm.buf),
+        scalars=np.ndarray(scalars_shape, dtype=np.dtype(str(scalars["dtype"])), buffer=scalars_shm.buf),
+    )
+
+
+def _create_transition_shared_memory(*, episode_count: int, round_count: int) -> TransitionSharedMemory:
+    import numpy as np
+
+    created: list[shared_memory.SharedMemory] = []
+
+    def create_array(shape: tuple[int, ...], dtype: Any) -> tuple[shared_memory.SharedMemory, Any]:
+        np_dtype = np.dtype(dtype)
+        shm = shared_memory.SharedMemory(create=True, size=int(np.prod(shape)) * np_dtype.itemsize)
+        created.append(shm)
+        return shm, np.ndarray(shape, dtype=np_dtype, buffer=shm.buf)
+
+    try:
+        planes_shm, planes = create_array((episode_count, round_count, 38, 17, 17), np.float32)
+        scalars_shm, scalars = create_array((episode_count, round_count, 10), np.float32)
+        actions_shm, actions = create_array((episode_count, round_count, 6), np.int64)
+        k_shm, k = create_array((episode_count, round_count), np.int64)
+        order_shm, order = create_array((episode_count, round_count), np.int64)
+        vp_shm, vp = create_array((episode_count, round_count), np.int64)
+        old_logprob_shm, old_logprob = create_array((episode_count, round_count), np.float32)
+        value_shm, value = create_array((episode_count, round_count), np.float32)
+        reward_shm, reward = create_array((episode_count, round_count), np.float32)
+        done_shm, done = create_array((episode_count, round_count), np.bool_)
+        round_index_shm, round_index = create_array((episode_count, round_count), np.int64)
+    except Exception:
+        for shm in created:
+            shm.close()
+            shm.unlink()
+        raise
+
+    return TransitionSharedMemory(
+        planes_shm=planes_shm,
+        scalars_shm=scalars_shm,
+        actions_shm=actions_shm,
+        k_shm=k_shm,
+        order_shm=order_shm,
+        vp_shm=vp_shm,
+        old_logprob_shm=old_logprob_shm,
+        value_shm=value_shm,
+        reward_shm=reward_shm,
+        done_shm=done_shm,
+        round_index_shm=round_index_shm,
+        planes=planes,
+        scalars=scalars,
+        actions=actions,
+        k=k,
+        order=order,
+        vp=vp,
+        old_logprob=old_logprob,
+        value=value,
+        reward=reward,
+        done=done,
+        round_index=round_index,
+    )
+
+
+def _attach_transition_shared_memory(config: dict[str, Any]) -> TransitionSharedMemory:
+    attached: list[shared_memory.SharedMemory] = []
+
+    def attach_array(key: str) -> tuple[shared_memory.SharedMemory, Any]:
+        import numpy as np
+
+        spec = config[key]
+        shm = shared_memory.SharedMemory(name=str(spec["name"]))
+        attached.append(shm)
+        shape = tuple(int(value) for value in spec["shape"])
+        array = np.ndarray(shape, dtype=np.dtype(str(spec["dtype"])), buffer=shm.buf)
+        return shm, array
+
+    try:
+        planes_shm, planes = attach_array("planes")
+        scalars_shm, scalars = attach_array("scalars")
+        actions_shm, actions = attach_array("actions")
+        k_shm, k = attach_array("k")
+        order_shm, order = attach_array("order")
+        vp_shm, vp = attach_array("vp")
+        old_logprob_shm, old_logprob = attach_array("old_logprob")
+        value_shm, value = attach_array("value")
+        reward_shm, reward = attach_array("reward")
+        done_shm, done = attach_array("done")
+        round_index_shm, round_index = attach_array("round_index")
+    except Exception:
+        for shm in attached:
+            shm.close()
+        raise
+
+    return TransitionSharedMemory(
+        planes_shm=planes_shm,
+        scalars_shm=scalars_shm,
+        actions_shm=actions_shm,
+        k_shm=k_shm,
+        order_shm=order_shm,
+        vp_shm=vp_shm,
+        old_logprob_shm=old_logprob_shm,
+        value_shm=value_shm,
+        reward_shm=reward_shm,
+        done_shm=done_shm,
+        round_index_shm=round_index_shm,
+        planes=planes,
+        scalars=scalars,
+        actions=actions,
+        k=k,
+        order=order,
+        vp=vp,
+        old_logprob=old_logprob,
+        value=value,
+        reward=reward,
+        done=done,
+        round_index=round_index,
+    )
+
+
+def _shared_array_config(shm: shared_memory.SharedMemory, array: Any) -> dict[str, Any]:
     return {
-        "spatial_planes": np.stack(spatial_planes).astype(np.float32, copy=False),
-        "scalars": np.stack(scalars).astype(np.float32, copy=False),
-        "actions": np.asarray(actions, dtype=np.int64),
-        "k": np.asarray(k, dtype=np.int64),
-        "order": np.asarray(order, dtype=np.int64),
-        "vp": np.asarray(vp, dtype=np.int64),
-        "old_logprob": np.asarray(old_logprob, dtype=np.float32),
-        "value": np.asarray(values, dtype=np.float32),
-        "reward": np.asarray(rewards, dtype=np.float32),
-        "done": np.asarray(dones, dtype=np.bool_),
-        "round_index": np.asarray(round_indices, dtype=np.int64),
-        "infos": tuple(infos),
+        "name": shm.name,
+        "shape": tuple(int(value) for value in array.shape),
+        "dtype": str(array.dtype),
     }
 
 
 def _worker_loop(worker_id: int, command_queue: Any, result_queue: Any, static_config: dict[str, Any]) -> None:
+    feature_shared: FeatureSharedMemory | None = None
+    transition_shared: TransitionSharedMemory | None = None
     try:
+        feature_shared = _attach_feature_shared_memory(static_config["feature_shared_memory"])
+        transition_shared = _attach_transition_shared_memory(static_config["transition_shared_memory"])
         result_queue.put({"type": "worker_ready", "worker_id": worker_id})
         while True:
             msg = command_queue.get()
@@ -429,7 +675,15 @@ def _worker_loop(worker_id: int, command_queue: Any, result_queue: Any, static_c
                 return
             if msg_type != "start_episode":
                 raise RuntimeError(f"worker expected start_episode, got {msg_type!r}")
-            _run_worker_episode(worker_id, msg["task"], command_queue, result_queue, static_config)
+            _run_worker_episode(
+                worker_id,
+                msg["task"],
+                command_queue,
+                result_queue,
+                static_config,
+                feature_shared,
+                transition_shared,
+            )
     except Exception as exc:
         result_queue.put(
             {
@@ -440,9 +694,22 @@ def _worker_loop(worker_id: int, command_queue: Any, result_queue: Any, static_c
                 "traceback": traceback.format_exc(),
             }
         )
+    finally:
+        if feature_shared is not None:
+            feature_shared.close()
+        if transition_shared is not None:
+            transition_shared.close()
 
 
-def _run_worker_episode(worker_id: int, task: EpisodeTask, command_queue: Any, result_queue: Any, static_config: dict[str, Any]) -> None:
+def _run_worker_episode(
+    worker_id: int,
+    task: EpisodeTask,
+    command_queue: Any,
+    result_queue: Any,
+    static_config: dict[str, Any],
+    feature_shared: FeatureSharedMemory,
+    transition_shared: TransitionSharedMemory,
+) -> None:
     import numpy as np
 
     env = SingleAgentGoldRushEnv(
@@ -468,27 +735,24 @@ def _run_worker_episode(worker_id: int, task: EpisodeTask, command_queue: Any, r
     )
     extractor = FeatureExtractor(player_id=task.agent_player_id)
     observation = reset.observation
-    spatial_planes_items: list[Any] = []
-    scalars_items: list[Any] = []
-    actions_items: list[tuple[int, ...]] = []
-    k_items: list[int] = []
-    order_items: list[int] = []
-    vp_items: list[int] = []
-    old_logprob_items: list[float] = []
-    value_items: list[float] = []
-    reward_items: list[float] = []
-    done_items: list[bool] = []
-    round_index_items: list[int] = []
     info_items: list[dict[str, Any]] = []
     request_index = 0
+    transition_slot = int(task.transition_slot)
+    max_episode_length = int(transition_shared.done.shape[1])
 
     while observation is not None:
+        if request_index >= max_episode_length:
+            raise SimulatorRuleError(
+                f"episode {task.task_id!r} exceeded transition shared memory length {max_episode_length}"
+            )
         features = extractor.observe(observation)
         if features["feature_schema"] != "goldrush2_feature_v1":
             raise SimulatorRuleError(f"unexpected feature schema: {features['feature_schema']!r}")
         request_id = f"{task.task_id}-round-{request_index:04d}"
         spatial_planes = np.asarray(features["planes"], dtype=np.float32)
         scalars = np.asarray(features["scalars"], dtype=np.float32)
+        feature_shared.planes[worker_id, ...] = spatial_planes
+        feature_shared.scalars[worker_id, ...] = scalars
         result_queue.put(
             {
                 "type": "feature_request",
@@ -497,8 +761,7 @@ def _run_worker_episode(worker_id: int, task: EpisodeTask, command_queue: Any, r
                     task_id=task.task_id,
                     request_id=request_id,
                     round_index=int(observation.round),
-                    spatial_planes=spatial_planes,
-                    scalars=scalars,
+                    feature_slot=worker_id,
                 ),
             }
         )
@@ -518,21 +781,23 @@ def _run_worker_episode(worker_id: int, task: EpisodeTask, command_queue: Any, r
         extractor.commit_action(game_output)
         step = env.step(game_output)
         done = bool(step.terminated)
-        spatial_planes_items.append(spatial_planes)
-        scalars_items.append(scalars)
-        actions_items.append(tuple(int(value) for value in game_output.actions))
-        k_items.append(int(game_output.k))
-        order_items.append(int(game_output.order))
-        vp_items.append(int(game_output.vp))
-        old_logprob_items.append(float(action_msg["old_logprob"]))
-        value_items.append(float(action_msg["value"]))
-        reward_items.append(float(step.reward))
-        done_items.append(done)
-        round_index_items.append(int(observation.round))
+        transition_shared.planes[transition_slot, request_index, ...] = spatial_planes
+        transition_shared.scalars[transition_slot, request_index, ...] = scalars
+        transition_shared.actions[transition_slot, request_index, :] = tuple(int(value) for value in game_output.actions)
+        transition_shared.k[transition_slot, request_index] = int(game_output.k)
+        transition_shared.order[transition_slot, request_index] = int(game_output.order)
+        transition_shared.vp[transition_slot, request_index] = int(game_output.vp)
+        transition_shared.old_logprob[transition_slot, request_index] = float(action_msg["old_logprob"])
+        transition_shared.value[transition_slot, request_index] = float(action_msg["value"])
+        transition_shared.reward[transition_slot, request_index] = float(step.reward)
+        transition_shared.done[transition_slot, request_index] = done
+        transition_shared.round_index[transition_slot, request_index] = int(observation.round)
         info_items.append(_transition_info(step.info, done=done, mode=str(static_config["transition_info_mode"])))
         observation = step.observation
         request_index += 1
 
+    if request_index <= 0:
+        raise SimulatorRuleError(f"episode {task.task_id!r} produced no transitions")
     result_queue.put(
         {
             "type": "episode_done",
@@ -544,20 +809,9 @@ def _run_worker_episode(worker_id: int, task: EpisodeTask, command_queue: Any, r
             "map_id": int(reset.info["map_id"]),
             "agent_player_id": int(task.agent_player_id),
             "opponent_spec": reset.info["opponent_spec"],
-            "transitions": _stack_episode_transitions(
-                spatial_planes=spatial_planes_items,
-                scalars=scalars_items,
-                actions=actions_items,
-                k=k_items,
-                order=order_items,
-                vp=vp_items,
-                old_logprob=old_logprob_items,
-                values=value_items,
-                rewards=reward_items,
-                dones=done_items,
-                round_indices=round_index_items,
-                infos=info_items,
-            ),
+            "transition_slot": transition_slot,
+            "episode_length": request_index,
+            "infos": tuple(info_items),
         }
     )
 
@@ -582,12 +836,13 @@ def _initial_tasks(
                 map_id=map_ids[pair_index % len(map_ids)] if map_ids is not None else None,
                 agent_player_id=1,
                 opponent_spec=opponent_specs[pair_index % len(opponent_specs)] if opponent_specs is not None else None,
+                transition_slot=pair_index * 2,
             )
         )
     return tasks
 
 
-def _episode_payloads_to_batch(payloads: list[dict[str, Any]]) -> PpoBatch:
+def _episode_payloads_to_batch(payloads: list[dict[str, Any]], transition_shared: TransitionSharedMemory) -> PpoBatch:
     import numpy as np
 
     if not payloads:
@@ -610,25 +865,32 @@ def _episode_payloads_to_batch(payloads: list[dict[str, Any]]) -> PpoBatch:
     infos: list[dict[str, Any]] = []
 
     for payload in payloads:
-        transitions = payload["transitions"]
-        episode_length = int(transitions["done"].shape[0])
+        transition_slot = int(payload["transition_slot"])
+        episode_length = int(payload["episode_length"])
         if episode_length <= 0:
             raise SimulatorRuleError(f"episode payload {payload['task_id']!r} has no transitions")
-        spatial_planes.append(transitions["spatial_planes"])
-        scalars.append(transitions["scalars"])
-        actions.append(transitions["actions"])
-        k.append(transitions["k"])
-        order.append(transitions["order"])
-        vp.append(transitions["vp"])
-        old_logprob.append(transitions["old_logprob"])
-        values.append(transitions["value"])
-        rewards.append(transitions["reward"])
-        dones.append(transitions["done"])
-        round_indices.append(transitions["round_index"])
+        if not 0 <= transition_slot < int(transition_shared.done.shape[0]):
+            raise SimulatorRuleError(f"transition slot out of range for {payload['task_id']!r}: {transition_slot}")
+        if episode_length > int(transition_shared.done.shape[1]):
+            raise SimulatorRuleError(
+                f"episode payload {payload['task_id']!r} length {episode_length} exceeds shared transition length "
+                f"{int(transition_shared.done.shape[1])}"
+            )
+        spatial_planes.append(transition_shared.planes[transition_slot, :episode_length])
+        scalars.append(transition_shared.scalars[transition_slot, :episode_length])
+        actions.append(transition_shared.actions[transition_slot, :episode_length])
+        k.append(transition_shared.k[transition_slot, :episode_length])
+        order.append(transition_shared.order[transition_slot, :episode_length])
+        vp.append(transition_shared.vp[transition_slot, :episode_length])
+        old_logprob.append(transition_shared.old_logprob[transition_slot, :episode_length])
+        values.append(transition_shared.value[transition_slot, :episode_length])
+        rewards.append(transition_shared.reward[transition_slot, :episode_length])
+        dones.append(transition_shared.done[transition_slot, :episode_length])
+        round_indices.append(transition_shared.round_index[transition_slot, :episode_length])
         episode_ids.extend((f"{payload['pair_id']}-{payload['pair_role']}",) * episode_length)
         map_ids.extend((int(payload["map_id"]),) * episode_length)
         agent_player_ids.extend((int(payload["agent_player_id"]),) * episode_length)
-        episode_infos = tuple(transitions["infos"])
+        episode_infos = tuple(payload["infos"])
         if len(episode_infos) != episode_length:
             raise SimulatorRuleError(
                 f"episode payload {payload['task_id']!r} infos length {len(episode_infos)} != {episode_length}"
@@ -654,7 +916,12 @@ def _episode_payloads_to_batch(payloads: list[dict[str, Any]]) -> PpoBatch:
     )
 
 
-def _worker_static_config(sampler: BatchRolloutSampler, config: MultiprocessRolloutConfig) -> dict[str, Any]:
+def _worker_static_config(
+    sampler: BatchRolloutSampler,
+    config: MultiprocessRolloutConfig,
+    feature_shared: FeatureSharedMemory,
+    transition_shared: TransitionSharedMemory,
+) -> dict[str, Any]:
     return {
         "env_config": sampler.env_config,
         "mechanisms": sampler.mechanisms,
@@ -662,6 +929,8 @@ def _worker_static_config(sampler: BatchRolloutSampler, config: MultiprocessRoll
         "spawn": sampler.spawn,
         "reward_fn": sampler.reward_fn,
         "transition_info_mode": config.transition_info_mode,
+        "feature_shared_memory": feature_shared.config(),
+        "transition_shared_memory": transition_shared.config(),
     }
 
 
