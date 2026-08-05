@@ -116,6 +116,7 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
             "grad_norm": stats.grad_norm,
             "ppo_update_count": stats.update_count,
             "early_stopped": stats.early_stopped,
+            **_training_diagnostics(batch),
         }
         _append_jsonl(metrics_path, train_record)
         train_metrics.append(train_record)
@@ -369,6 +370,103 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError(f"save_interval must be non-negative, got {config.save_interval}")
     if config.eval_interval is not None and config.eval_interval <= 0:
         raise ValueError(f"eval_interval must be positive when set, got {config.eval_interval}")
+
+
+def _training_diagnostics(batch) -> dict[str, float]:
+    batch.require_gae()
+    diagnostics: dict[str, float] = {}
+
+    actions = batch.actions.detach().cpu()
+    action_total = float(actions.numel())
+    action_names = ("up", "down", "left", "right", "stay")
+    for action_value, name in enumerate(action_names):
+        diagnostics[f"action_fraction_{name}"] = float((actions == action_value).sum().item()) / action_total
+    diagnostics["stay_action_fraction"] = diagnostics["action_fraction_stay"]
+
+    for value in range(7):
+        diagnostics[f"k_fraction_{value}"] = _fraction(batch.k, value)
+    for value in range(2):
+        diagnostics[f"order_fraction_{value}"] = _fraction(batch.order, value)
+    for value in range(3):
+        diagnostics[f"vp_fraction_{value}"] = _fraction(batch.vp, value)
+    diagnostics["vp_nonzero_fraction"] = float((batch.vp.detach().cpu() != 0).sum().item()) / float(batch.vp.numel())
+
+    terminal_indices = [idx for idx, done in enumerate(batch.dones.detach().cpu().tolist()) if done]
+    diagnostics.update(_terminal_diagnostics(batch, terminal_indices))
+
+    assert batch.returns is not None
+    assert batch.advantages is not None
+    diagnostics["return_mean"] = _tensor_mean(batch.returns)
+    diagnostics["return_std"] = _tensor_std(batch.returns)
+    diagnostics["value_mean"] = _tensor_mean(batch.old_values)
+    diagnostics["value_std"] = _tensor_std(batch.old_values)
+    diagnostics["advantage_mean"] = _tensor_mean(batch.advantages)
+    diagnostics["advantage_std"] = _tensor_std(batch.advantages)
+    return diagnostics
+
+
+def _terminal_diagnostics(batch, terminal_indices: list[int]) -> dict[str, float]:
+    if not terminal_indices:
+        return {
+            "train_win_rate": 0.0,
+            "train_net_gold_margin_mean": 0.0,
+            "train_agent_net_gold_mean": 0.0,
+            "train_opponent_net_gold_mean": 0.0,
+            "train_agent_pickups_mean": 0.0,
+            "train_opponent_pickups_mean": 0.0,
+            "train_agent_vision_spent_mean": 0.0,
+        }
+
+    wins: list[float] = []
+    margins: list[float] = []
+    agent_net_gold: list[float] = []
+    opponent_net_gold: list[float] = []
+    agent_pickups: list[float] = []
+    opponent_pickups: list[float] = []
+    agent_vision_spent: list[float] = []
+    agent_player_ids = batch.agent_player_ids.detach().cpu().tolist()
+    for idx in terminal_indices:
+        agent_player_id = int(agent_player_ids[idx])
+        opponent_player_id = 2 if agent_player_id == 1 else 1
+        info = batch.infos[idx]
+        scores = info["scores"]
+        events = info["events"]
+        wins.append(1.0 if info["game_result"].winner_id == agent_player_id else 0.0)
+        agent_score = float(scores["net_gold"][agent_player_id])
+        opponent_score = float(scores["net_gold"][opponent_player_id])
+        agent_net_gold.append(agent_score)
+        opponent_net_gold.append(opponent_score)
+        margins.append(agent_score - opponent_score)
+        agent_pickups.append(float(events["pickups"][agent_player_id]))
+        opponent_pickups.append(float(events["pickups"][opponent_player_id]))
+        agent_vision_spent.append(float(scores["vision_spent"][agent_player_id]))
+
+    return {
+        "train_win_rate": _mean(wins),
+        "train_net_gold_margin_mean": _mean(margins),
+        "train_agent_net_gold_mean": _mean(agent_net_gold),
+        "train_opponent_net_gold_mean": _mean(opponent_net_gold),
+        "train_agent_pickups_mean": _mean(agent_pickups),
+        "train_opponent_pickups_mean": _mean(opponent_pickups),
+        "train_agent_vision_spent_mean": _mean(agent_vision_spent),
+    }
+
+
+def _fraction(values: torch.Tensor, target: int) -> float:
+    values = values.detach().cpu()
+    return float((values == target).sum().item()) / float(values.numel())
+
+
+def _tensor_mean(values: torch.Tensor) -> float:
+    return float(values.detach().float().mean().cpu().item())
+
+
+def _tensor_std(values: torch.Tensor) -> float:
+    return float(values.detach().float().std(unbiased=False).cpu().item())
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values)
 
 
 def _config_to_jsonable(config: TrainPpoConfig) -> dict[str, Any]:
