@@ -16,7 +16,6 @@ from simulator.errors import SimulatorRuleError
 from simulator.types import GameOutput
 from training.models import (
     GoldRushPolicyNetwork,
-    policy_action_to_game_output,
     policy_output_is_finite,
     sample_action,
 )
@@ -36,6 +35,7 @@ class MultiprocessRolloutConfig:
     max_inference_batch_size: int = 64
     inference_timeout_ms: float = 2.0
     worker_join_timeout_s: float = 5.0
+    transition_info_mode: Literal["training", "debug"] = "training"
 
 
 @dataclass(frozen=True)
@@ -79,7 +79,7 @@ def collect_multiprocess_ppo_rollouts(
     ctx = mp.get_context("spawn")
     result_queue = ctx.Queue()
     command_queues = [ctx.Queue() for _ in range(config.num_workers)]
-    worker_config = _worker_static_config(sampler)
+    worker_config = _worker_static_config(sampler, config)
     processes = [
         ctx.Process(
             target=_worker_loop,
@@ -88,10 +88,13 @@ def collect_multiprocess_ppo_rollouts(
         )
         for worker_id in range(config.num_workers)
     ]
+    worker_startup_start = time.perf_counter_ns()
     for process in processes:
         process.start()
+    worker_startup_ns = time.perf_counter_ns() - worker_startup_start
 
     try:
+        scheduler_start = time.perf_counter_ns()
         payloads, stats = _scheduler_loop(
             model,
             command_queues,
@@ -102,7 +105,9 @@ def collect_multiprocess_ppo_rollouts(
             opponent_specs=opponent_specs,
             device=rollout_device,
             config=config,
+            worker_startup_start_ns=worker_startup_start,
         )
+        scheduler_ns = time.perf_counter_ns() - scheduler_start
     finally:
         if was_training:
             model.train()
@@ -114,8 +119,17 @@ def collect_multiprocess_ppo_rollouts(
                 process.terminate()
                 process.join(timeout=1.0)
 
+    batch_assembly_start = time.perf_counter_ns()
     transitions = [_payload_to_transition(payload) for payload in payloads]
-    return PpoBatch.from_transitions(transitions), stats
+    batch = PpoBatch.from_transitions(transitions)
+    batch_assembly_ns = time.perf_counter_ns() - batch_assembly_start
+    stats = {
+        **stats,
+        "worker_startup_ms": worker_startup_ns / 1_000_000,
+        "scheduler_ms": scheduler_ns / 1_000_000,
+        "batch_assembly_ms": batch_assembly_ns / 1_000_000,
+    }
+    return batch, stats
 
 
 def _scheduler_loop(
@@ -129,6 +143,7 @@ def _scheduler_loop(
     opponent_specs: Sequence[OpponentSpec] | None,
     device: torch.device,
     config: MultiprocessRolloutConfig,
+    worker_startup_start_ns: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     pending_tasks = _initial_tasks(seed=seed, pair_count=pair_count, map_ids=map_ids, opponent_specs=opponent_specs)
     idle_workers = list(range(len(command_queues)))
@@ -145,23 +160,54 @@ def _scheduler_loop(
     second_enqueued_pairs: set[str] = set()
     expected_episodes = pair_count * 2
     completed_episodes = 0
+    ready_workers = 0
+    first_worker_ready_ns: int | None = None
+    all_workers_ready_ns: int | None = None
     timeout_s = config.inference_timeout_ms / 1000.0
+    queue_get_ns = 0
+    queue_get_empty_ns = 0
+    queue_get_by_type_ns: dict[str, int] = {}
+    message_handle_ns = 0
+    message_handle_by_type_ns: dict[str, int] = {}
+    task_dispatch_ns = 0
+    payload_extend_ns = 0
+    inference_stack_ns = 0
+    inference_model_sample_ns = 0
+    inference_action_send_ns = 0
+    inference_total_with_action_send_ns = 0
 
     while completed_episodes < expected_episodes:
         while idle_workers and pending_tasks:
+            dispatch_start = time.perf_counter_ns()
             worker_id = idle_workers.pop(0)
             task = pending_tasks.pop(0)
             active_tasks[task.task_id] = task
             command_queues[worker_id].put({"type": "start_episode", "task": task})
+            task_dispatch_ns += time.perf_counter_ns() - dispatch_start
 
         try:
+            queue_get_start = time.perf_counter_ns()
             msg = result_queue.get(timeout=timeout_s)
+            queue_get_elapsed = time.perf_counter_ns() - queue_get_start
+            queue_get_ns += queue_get_elapsed
         except queue.Empty:
+            queue_get_elapsed = time.perf_counter_ns() - queue_get_start
+            queue_get_ns += queue_get_elapsed
+            queue_get_empty_ns += queue_get_elapsed
             msg = None
 
         if msg is not None:
             msg_type = msg["type"]
-            if msg_type == "feature_request":
+            queue_get_by_type_ns[msg_type] = queue_get_by_type_ns.get(msg_type, 0) + queue_get_elapsed
+            message_handle_start = time.perf_counter_ns()
+            if msg_type == "worker_ready":
+                ready_workers += 1
+                now_ns = time.perf_counter_ns()
+                if first_worker_ready_ns is None:
+                    first_worker_ready_ns = now_ns
+                if ready_workers == len(command_queues):
+                    all_workers_ready_ns = now_ns
+            elif msg_type == "feature_request":
                 pending_requests.append(msg["request"])
             elif msg_type == "episode_started":
                 task = active_tasks[msg["task_id"]]
@@ -187,7 +233,9 @@ def _scheduler_loop(
                 worker_id = int(msg["worker_id"])
                 idle_workers.append(worker_id)
                 task = active_tasks.pop(msg["task_id"])
+                payload_extend_start = time.perf_counter_ns()
                 payloads.extend(msg["transitions"])
+                payload_extend_ns += time.perf_counter_ns() - payload_extend_start
                 if task.pair_role == "first":
                     first_done += 1
                 else:
@@ -196,24 +244,46 @@ def _scheduler_loop(
                 raise RuntimeError(f"worker {msg['worker_id']} failed: {msg['error']}\n{msg['traceback']}")
             else:
                 raise RuntimeError(f"unexpected worker message type: {msg_type!r}")
+            handle_elapsed = time.perf_counter_ns() - message_handle_start
+            message_handle_ns += handle_elapsed
+            message_handle_by_type_ns[msg_type] = message_handle_by_type_ns.get(msg_type, 0) + handle_elapsed
 
         if pending_requests and (len(pending_requests) >= config.max_inference_batch_size or msg is None):
-            elapsed_ns, batch_size = _run_inference_batch(model, pending_requests, command_queues, device)
+            inference_stats = _run_inference_batch(model, pending_requests, command_queues, device)
+            elapsed_ns = inference_stats["elapsed_ns"]
+            batch_size = inference_stats["batch_size"]
             inference_ns += elapsed_ns
+            inference_stack_ns += inference_stats["stack_ns"]
+            inference_model_sample_ns += inference_stats["model_sample_ns"]
+            inference_action_send_ns += inference_stats["action_send_ns"]
+            inference_total_with_action_send_ns += inference_stats["total_with_action_send_ns"]
             feature_batches += 1
             feature_batch_sizes.append(batch_size)
             pending_requests.clear()
 
     if pending_requests:
-        elapsed_ns, batch_size = _run_inference_batch(model, pending_requests, command_queues, device)
+        inference_stats = _run_inference_batch(model, pending_requests, command_queues, device)
+        elapsed_ns = inference_stats["elapsed_ns"]
+        batch_size = inference_stats["batch_size"]
         inference_ns += elapsed_ns
+        inference_stack_ns += inference_stats["stack_ns"]
+        inference_model_sample_ns += inference_stats["model_sample_ns"]
+        inference_action_send_ns += inference_stats["action_send_ns"]
+        inference_total_with_action_send_ns += inference_stats["total_with_action_send_ns"]
         feature_batches += 1
         feature_batch_sizes.append(batch_size)
 
+    payload_sort_start = time.perf_counter_ns()
     payloads.sort(key=lambda item: (item["pair_id"], 0 if item["pair_role"] == "first" else 1, item["round_index"]))
+    payload_sort_ns = time.perf_counter_ns() - payload_sort_start
+    all_ready_elapsed_ns = None if all_workers_ready_ns is None else all_workers_ready_ns - worker_startup_start_ns
+    first_ready_elapsed_ns = None if first_worker_ready_ns is None else first_worker_ready_ns - worker_startup_start_ns
     return payloads, {
         "rollout_mode": "multiprocess",
         "rollout_num_workers": len(command_queues),
+        "worker_ready_count": ready_workers,
+        "worker_first_ready_ms": None if first_ready_elapsed_ns is None else first_ready_elapsed_ns / 1_000_000,
+        "worker_all_ready_ms": None if all_ready_elapsed_ns is None else all_ready_elapsed_ns / 1_000_000,
         "first_started": first_started,
         "second_started": second_started,
         "first_episodes": first_done,
@@ -223,6 +293,24 @@ def _scheduler_loop(
         "max_feature_batch_size": max(feature_batch_sizes) if feature_batch_sizes else 0,
         "inference_ms": inference_ns / 1_000_000,
         "inference_mean_ms": inference_ns / max(feature_batches, 1) / 1_000_000,
+        "inference_stack_ms": inference_stack_ns / 1_000_000,
+        "inference_model_sample_ms": inference_model_sample_ns / 1_000_000,
+        "inference_action_send_ms": inference_action_send_ns / 1_000_000,
+        "inference_total_with_action_send_ms": inference_total_with_action_send_ns / 1_000_000,
+        "scheduler_queue_get_ms": queue_get_ns / 1_000_000,
+        "scheduler_queue_get_empty_ms": queue_get_empty_ns / 1_000_000,
+        "scheduler_queue_get_worker_ready_ms": queue_get_by_type_ns.get("worker_ready", 0) / 1_000_000,
+        "scheduler_queue_get_feature_request_ms": queue_get_by_type_ns.get("feature_request", 0) / 1_000_000,
+        "scheduler_queue_get_episode_started_ms": queue_get_by_type_ns.get("episode_started", 0) / 1_000_000,
+        "scheduler_queue_get_episode_done_ms": queue_get_by_type_ns.get("episode_done", 0) / 1_000_000,
+        "scheduler_message_handle_ms": message_handle_ns / 1_000_000,
+        "scheduler_message_handle_worker_ready_ms": message_handle_by_type_ns.get("worker_ready", 0) / 1_000_000,
+        "scheduler_message_handle_feature_request_ms": message_handle_by_type_ns.get("feature_request", 0) / 1_000_000,
+        "scheduler_message_handle_episode_started_ms": message_handle_by_type_ns.get("episode_started", 0) / 1_000_000,
+        "scheduler_message_handle_episode_done_ms": message_handle_by_type_ns.get("episode_done", 0) / 1_000_000,
+        "scheduler_task_dispatch_ms": task_dispatch_ns / 1_000_000,
+        "scheduler_payload_extend_ms": payload_extend_ns / 1_000_000,
+        "scheduler_payload_sort_ms": payload_sort_ns / 1_000_000,
     }
 
 
@@ -231,41 +319,75 @@ def _run_inference_batch(
     requests: list[FeatureRequest],
     command_queues: list[Any],
     device: torch.device,
-) -> tuple[int, int]:
+) -> dict[str, int]:
     import numpy as np
 
     _sync(device)
     start = time.perf_counter_ns()
+    stack_start = time.perf_counter_ns()
     spatial = torch.as_tensor(np.stack([request.spatial_planes for request in requests]), dtype=torch.float32, device=device)
     scalars = torch.as_tensor(np.stack([request.scalars for request in requests]), dtype=torch.float32, device=device)
+    stack_ns = time.perf_counter_ns() - stack_start
+    model_sample_start = time.perf_counter_ns()
     with torch.no_grad():
         output = model(spatial, scalars)
         if not policy_output_is_finite(output):
             raise SimulatorRuleError("multiprocess rollout model produced NaN or Inf")
         action = sample_action(output)
+    model_sample_ns = time.perf_counter_ns() - model_sample_start
     _sync(device)
     elapsed_ns = time.perf_counter_ns() - start
+    action_send_start = time.perf_counter_ns()
+    actions_cpu = action.actions.detach().cpu().tolist()
+    k_cpu = action.k.detach().cpu().tolist()
+    order_cpu = action.order.detach().cpu().tolist()
+    vp_cpu = action.vp.detach().cpu().tolist()
+    logprob_cpu = action.logprob.detach().cpu().tolist()
+    value_cpu = action.value.detach().cpu().tolist()
     for batch_index, request in enumerate(requests):
-        game_output = policy_action_to_game_output(action, batch_index=batch_index)
         command_queues[request.worker_id].put(
             {
                 "type": "action_result",
                 "request_id": request.request_id,
                 "action": {
-                    "actions": tuple(int(value) for value in game_output.actions),
-                    "k": int(game_output.k),
-                    "order": int(game_output.order),
-                    "vp": int(game_output.vp),
+                    "actions": tuple(int(value) for value in actions_cpu[batch_index]),
+                    "k": int(k_cpu[batch_index]),
+                    "order": int(order_cpu[batch_index]),
+                    "vp": int(vp_cpu[batch_index]),
                 },
-                "old_logprob": float(action.logprob[batch_index].detach().cpu().item()),
-                "value": float(action.value[batch_index].detach().cpu().item()),
+                "old_logprob": float(logprob_cpu[batch_index]),
+                "value": float(value_cpu[batch_index]),
             }
         )
-    return elapsed_ns, len(requests)
+    action_send_ns = time.perf_counter_ns() - action_send_start
+    total_with_action_send_ns = time.perf_counter_ns() - start
+    return {
+        "elapsed_ns": elapsed_ns,
+        "batch_size": len(requests),
+        "stack_ns": stack_ns,
+        "model_sample_ns": model_sample_ns,
+        "action_send_ns": action_send_ns,
+        "total_with_action_send_ns": total_with_action_send_ns,
+    }
+
+
+def _transition_info(step_info: dict[str, Any], *, done: bool, mode: str) -> dict[str, Any]:
+    if mode == "debug":
+        return step_info
+    if mode == "training":
+        if not done:
+            return {}
+        return {
+            "scores": step_info["scores"],
+            "events": step_info["events"],
+            "game_result": step_info["game_result"],
+        }
+    raise SimulatorRuleError(f"unknown transition_info_mode: {mode!r}")
 
 
 def _worker_loop(worker_id: int, command_queue: Any, result_queue: Any, static_config: dict[str, Any]) -> None:
     try:
+        result_queue.put({"type": "worker_ready", "worker_id": worker_id})
         while True:
             msg = command_queue.get()
             msg_type = msg["type"]
@@ -350,6 +472,7 @@ def _run_worker_episode(worker_id: int, task: EpisodeTask, command_queue: Any, r
         )
         extractor.commit_action(game_output)
         step = env.step(game_output)
+        done = bool(step.terminated)
         transitions.append(
             {
                 "spatial_planes": spatial_planes,
@@ -361,14 +484,14 @@ def _run_worker_episode(worker_id: int, task: EpisodeTask, command_queue: Any, r
                 "old_logprob": float(action_msg["old_logprob"]),
                 "value": float(action_msg["value"]),
                 "reward": float(step.reward),
-                "done": bool(step.terminated),
+                "done": done,
                 "episode_id": f"{task.pair_id}-{task.pair_role}",
                 "pair_id": task.pair_id,
                 "pair_role": task.pair_role,
                 "round_index": int(observation.round),
                 "map_id": int(reset.info["map_id"]),
                 "agent_player_id": int(task.agent_player_id),
-                "info": step.info,
+                "info": _transition_info(step.info, done=done, mode=str(static_config["transition_info_mode"])),
             }
         )
         observation = step.observation
@@ -435,13 +558,14 @@ def _payload_to_transition(payload: dict[str, Any]) -> PpoTransition:
     )
 
 
-def _worker_static_config(sampler: BatchRolloutSampler) -> dict[str, Any]:
+def _worker_static_config(sampler: BatchRolloutSampler, config: MultiprocessRolloutConfig) -> dict[str, Any]:
     return {
         "env_config": sampler.env_config,
         "mechanisms": sampler.mechanisms,
         "map_pool": sampler.map_pool,
         "spawn": sampler.spawn,
         "reward_fn": sampler.reward_fn,
+        "transition_info_mode": config.transition_info_mode,
     }
 
 
@@ -466,6 +590,8 @@ def _validate_inputs(
         raise SimulatorRuleError(f"inference_timeout_ms must be non-negative, got {config.inference_timeout_ms}")
     if config.worker_join_timeout_s <= 0.0:
         raise SimulatorRuleError(f"worker_join_timeout_s must be positive, got {config.worker_join_timeout_s}")
+    if config.transition_info_mode not in ("training", "debug"):
+        raise SimulatorRuleError(f"transition_info_mode must be training or debug, got {config.transition_info_mode!r}")
 
 
 def _sync(device: torch.device) -> None:
