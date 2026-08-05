@@ -14,6 +14,7 @@ from training.opponents import OpponentSpec
 from training.rl import (
     BatchRolloutSampler,
     MultiprocessRolloutConfig,
+    MultiprocessRolloutPool,
     PpoConfig,
     SingleAgentEnvConfig,
     collect_multiprocess_ppo_rollouts,
@@ -74,7 +75,54 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertGreaterEqual(stats["inference_model_sample_ms"], 0.0)
         self.assertGreaterEqual(stats["inference_action_send_ms"], 0.0)
         self.assertGreaterEqual(stats["inference_total_with_action_send_ms"], stats["inference_ms"])
+        self.assertFalse(stats["worker_pool_reused"])
+        self.assertGreaterEqual(stats["worker_configure_ms"], 0.0)
+        self.assertGreaterEqual(stats["worker_release_ms"], 0.0)
+        self.assertEqual(stats["worker_profile_episode_count"], 2)
+        self.assertEqual(stats["worker_profile_transition_count"], 2)
+        self.assertEqual(stats["worker_sum_steps"], 2)
+        self.assertGreaterEqual(stats["worker_sum_episode_wall_ms"], 0.0)
+        self.assertGreaterEqual(stats["worker_per_transition_action_wait_ms"], 0.0)
+        self.assertGreaterEqual(stats["scheduler_accounted_ms"], 0.0)
         self.assertEqual(update_stats.update_count, 1)
+
+    def test_multiprocess_rollout_pool_reuses_workers(self) -> None:
+        model = _small_model()
+        sampler = BatchRolloutSampler(
+            env_config=SingleAgentEnvConfig(episode=_one_round_episode(), opponent_spec=_stay_opponent_spec()),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+        )
+
+        with MultiprocessRolloutPool(
+            sampler,
+            MultiprocessRolloutConfig(num_workers=2, max_inference_batch_size=4, inference_timeout_ms=1.0),
+        ) as pool:
+            first, first_stats = pool.collect(
+                model,
+                pair_count=1,
+                seed=5,
+                map_ids=(1,),
+                opponent_specs=(_stay_opponent_spec(),),
+                device="cpu",
+            )
+            second, second_stats = pool.collect(
+                model,
+                pair_count=1,
+                seed=6,
+                map_ids=(1,),
+                opponent_specs=(_stay_opponent_spec(),),
+                device="cpu",
+            )
+
+        self.assertEqual(first.transition_count, 2)
+        self.assertEqual(second.transition_count, 2)
+        self.assertFalse(first_stats["worker_pool_reused"])
+        self.assertTrue(second_stats["worker_pool_reused"])
+        self.assertGreater(first_stats["worker_all_ready_ms"], 0.0)
+        self.assertEqual(second_stats["worker_startup_ms"], 0.0)
+        self.assertEqual(second_stats["worker_all_ready_ms"], 0.0)
+        self.assertEqual(second_stats["worker_ready_count"], 2)
 
     def test_training_info_mode_keeps_non_terminal_infos_empty(self) -> None:
         model = _small_model()

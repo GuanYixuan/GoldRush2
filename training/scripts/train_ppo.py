@@ -19,11 +19,11 @@ from training.rl import (
     EvaluationCase,
     EvaluationConfig,
     MultiprocessRolloutConfig,
+    MultiprocessRolloutPool,
     PpoConfig,
     RuntimePolicyWrapper,
     SingleAgentEnvConfig,
     TerminalWinPlusMarginPotentialReward,
-    collect_multiprocess_ppo_rollouts,
     collect_ppo_rollouts,
     evaluate_policy,
     ppo_update,
@@ -87,65 +87,71 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
     eval_metrics: list[dict[str, Any]] = []
     metrics_path = output_dir / "metrics.jsonl"
     sampler = _sampler(config)
+    rollout_pool = MultiprocessRolloutPool(sampler, config.multiprocess_rollout) if config.rollout_mode == "multiprocess" else None
 
-    for update_index in range(start_update + 1, config.total_updates + 1):
-        batch, rollout_stats = _collect_training_rollouts(
-            model,
-            sampler,
-            config=config,
-            update_index=update_index,
-            device=device,
-        )
-        batch = batch.to(device).compute_gae(
-            gamma=config.ppo.gamma,
-            gae_lambda=config.ppo.gae_lambda,
-            normalize_advantage=config.ppo.normalize_advantage,
-        )
-        stats = ppo_update(model, optimizer, batch, config.ppo)
-        train_record = {
-            "kind": "train",
-            "update": update_index,
-            "transition_count": batch.transition_count,
-            "mean_reward": float(batch.rewards.mean().detach().cpu().item()),
-            "reward_sum": float(batch.rewards.sum().detach().cpu().item()),
-            "policy_loss": stats.policy_loss,
-            "value_loss": stats.value_loss,
-            "entropy_bonus": stats.entropy_bonus,
-            "loss": stats.loss,
-            "approx_joint_kl": stats.approx_joint_kl,
-            "clip_fraction": stats.clip_fraction,
-            "explained_variance": stats.explained_variance,
-            "grad_norm": stats.grad_norm,
-            "ppo_update_count": stats.update_count,
-            "early_stopped": stats.early_stopped,
-            **rollout_stats,
-            **_training_diagnostics(batch),
-        }
-        _append_jsonl(metrics_path, train_record)
-        train_metrics.append(train_record)
+    try:
+        for update_index in range(start_update + 1, config.total_updates + 1):
+            batch, rollout_stats = _collect_training_rollouts(
+                model,
+                sampler,
+                config=config,
+                update_index=update_index,
+                device=device,
+                rollout_pool=rollout_pool,
+            )
+            batch = batch.to(device).compute_gae(
+                gamma=config.ppo.gamma,
+                gae_lambda=config.ppo.gae_lambda,
+                normalize_advantage=config.ppo.normalize_advantage,
+            )
+            stats = ppo_update(model, optimizer, batch, config.ppo)
+            train_record = {
+                "kind": "train",
+                "update": update_index,
+                "transition_count": batch.transition_count,
+                "mean_reward": float(batch.rewards.mean().detach().cpu().item()),
+                "reward_sum": float(batch.rewards.sum().detach().cpu().item()),
+                "policy_loss": stats.policy_loss,
+                "value_loss": stats.value_loss,
+                "entropy_bonus": stats.entropy_bonus,
+                "loss": stats.loss,
+                "approx_joint_kl": stats.approx_joint_kl,
+                "clip_fraction": stats.clip_fraction,
+                "explained_variance": stats.explained_variance,
+                "grad_norm": stats.grad_norm,
+                "ppo_update_count": stats.update_count,
+                "early_stopped": stats.early_stopped,
+                **rollout_stats,
+                **_training_diagnostics(batch),
+            }
+            _append_jsonl(metrics_path, train_record)
+            train_metrics.append(train_record)
 
-        latest_checkpoint = _save_checkpoint(
-            checkpoint_dir / "latest.pt",
-            model=model,
-            optimizer=optimizer,
-            config=config,
-            update_index=update_index,
-            last_metrics=train_record,
-        )
-        if config.save_interval > 0 and update_index % config.save_interval == 0:
-            _save_checkpoint(
-                checkpoint_dir / f"update_{update_index:06d}.pt",
+            latest_checkpoint = _save_checkpoint(
+                checkpoint_dir / "latest.pt",
                 model=model,
                 optimizer=optimizer,
                 config=config,
                 update_index=update_index,
                 last_metrics=train_record,
             )
+            if config.save_interval > 0 and update_index % config.save_interval == 0:
+                _save_checkpoint(
+                    checkpoint_dir / f"update_{update_index:06d}.pt",
+                    model=model,
+                    optimizer=optimizer,
+                    config=config,
+                    update_index=update_index,
+                    last_metrics=train_record,
+                )
 
-        if config.eval_interval is not None and update_index % config.eval_interval == 0:
-            eval_record = _run_eval(model, config=config, update_index=update_index, device=device)
-            _append_jsonl(metrics_path, eval_record)
-            eval_metrics.append(eval_record)
+            if config.eval_interval is not None and update_index % config.eval_interval == 0:
+                eval_record = _run_eval(model, config=config, update_index=update_index, device=device)
+                _append_jsonl(metrics_path, eval_record)
+                eval_metrics.append(eval_record)
+    finally:
+        if rollout_pool is not None:
+            rollout_pool.close()
 
     latest_path = output_dir / "checkpoints" / "latest.pt"
     return TrainPpoResult(
@@ -300,6 +306,7 @@ def _collect_training_rollouts(
     config: TrainPpoConfig,
     update_index: int,
     device: torch.device,
+    rollout_pool: MultiprocessRolloutPool | None = None,
 ):
     seed = config.seed + (update_index - 1) * config.pair_count
     if config.rollout_mode == "serial":
@@ -314,15 +321,15 @@ def _collect_training_rollouts(
         )
         return batch, {"rollout_mode": "serial"}
     if config.rollout_mode == "multiprocess":
-        return collect_multiprocess_ppo_rollouts(
+        if rollout_pool is None:
+            raise ValueError("multiprocess rollout requires a MultiprocessRolloutPool")
+        return rollout_pool.collect(
             model,
-            sampler,
             pair_count=config.pair_count,
             seed=seed,
             map_ids=config.map_ids,
             opponent_specs=config.opponent_specs,
             device=device,
-            config=config.multiprocess_rollout,
         )
     raise ValueError(f"unknown rollout_mode: {config.rollout_mode!r}")
 

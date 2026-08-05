@@ -84,6 +84,7 @@ class TrainPpoTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _smoke_config(
                 output_dir=Path(tmpdir),
+                total_updates=2,
                 rollout_mode="multiprocess",
                 multiprocess_rollout=MultiprocessRolloutConfig(
                     num_workers=2,
@@ -94,10 +95,13 @@ class TrainPpoTests(unittest.TestCase):
 
             result = run_training(config)
 
-            self.assertEqual(result.final_update, 1)
+            self.assertEqual(result.final_update, 2)
             self.assertEqual(result.train_metrics[0]["rollout_mode"], "multiprocess")
             self.assertEqual(result.train_metrics[0]["first_episodes"], 1)
             self.assertEqual(result.train_metrics[0]["second_episodes"], 1)
+            self.assertFalse(result.train_metrics[0]["worker_pool_reused"])
+            self.assertTrue(result.train_metrics[1]["worker_pool_reused"])
+            self.assertEqual(result.train_metrics[1]["worker_startup_ms"], 0.0)
             self.assertTrue(result.latest_checkpoint.exists())
 
     def test_cli_smoke(self) -> None:

@@ -54,6 +54,7 @@ class EpisodeTask:
 @dataclass(frozen=True)
 class FeatureRequest:
     worker_id: int
+    rollout_id: str
     task_id: str
     request_id: str
     round_index: int
@@ -154,6 +155,245 @@ class TransitionSharedMemory:
         )
 
 
+class MultiprocessRolloutPool:
+    def __init__(self, sampler: BatchRolloutSampler, config: MultiprocessRolloutConfig | None = None) -> None:
+        self.sampler = sampler
+        self.config = MultiprocessRolloutConfig() if config is None else config
+        _validate_pool_config(self.config)
+        self.ctx = mp.get_context("spawn")
+        self.result_queue = self.ctx.Queue()
+        self.command_queues = [self.ctx.Queue() for _ in range(self.config.num_workers)]
+        self.feature_shared: FeatureSharedMemory | None = None
+        self.processes: list[mp.Process] = []
+        self.closed = False
+        self.broken = False
+        self.collect_count = 0
+        self.startup_stats: dict[str, Any] = {}
+        self._start_workers()
+
+    def __enter__(self) -> MultiprocessRolloutPool:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+    def collect(
+        self,
+        model: GoldRushPolicyNetwork,
+        *,
+        pair_count: int,
+        seed: int,
+        map_ids: Sequence[int] | None = None,
+        opponent_specs: Sequence[OpponentSpec] | None = None,
+        device: torch.device | str | None = None,
+    ) -> tuple[PpoBatch, dict[str, Any]]:
+        self._ensure_usable()
+        _validate_inputs(pair_count=pair_count, map_ids=map_ids, opponent_specs=opponent_specs, config=self.config)
+        assert self.feature_shared is not None
+
+        rollout_id = f"rollout-{self.collect_count + 1:06d}"
+        rollout_device = torch.device(device) if device is not None else next(model.parameters()).device
+        was_training = model.training
+        model.eval()
+        transition_shared: TransitionSharedMemory | None = None
+        released = False
+
+        try:
+            transition_shared = _create_transition_shared_memory(
+                episode_count=pair_count * 2,
+                round_count=self.sampler.env_config.episode.rules.round_count,
+            )
+            configure_start = time.perf_counter_ns()
+            self._broadcast(
+                {
+                    "type": "configure_rollout",
+                    "rollout_id": rollout_id,
+                    "transition_shared_memory": transition_shared.config(),
+                }
+            )
+            self._wait_for_worker_messages("configure_ready", rollout_id=rollout_id)
+            configure_ms = (time.perf_counter_ns() - configure_start) / 1_000_000
+
+            scheduler_start = time.perf_counter_ns()
+            payloads, stats = _scheduler_loop(
+                model,
+                self.command_queues,
+                self.result_queue,
+                pair_count=pair_count,
+                seed=seed,
+                map_ids=map_ids,
+                opponent_specs=opponent_specs,
+                device=rollout_device,
+                config=self.config,
+                feature_shared=self.feature_shared,
+                rollout_id=rollout_id,
+            )
+            scheduler_ns = time.perf_counter_ns() - scheduler_start
+            batch_assembly_start = time.perf_counter_ns()
+            batch = _episode_payloads_to_batch(payloads, transition_shared)
+            batch_assembly_ns = time.perf_counter_ns() - batch_assembly_start
+            release_ms = self._release_rollout(rollout_id)
+            released = True
+            stats = self._finalize_collect_stats(
+                stats,
+                scheduler_ns=scheduler_ns,
+                batch_assembly_ns=batch_assembly_ns,
+                configure_ms=configure_ms,
+                release_ms=release_ms,
+            )
+            self.collect_count += 1
+            return batch, stats
+        except Exception:
+            self.broken = True
+            raise
+        finally:
+            if was_training:
+                model.train()
+            if transition_shared is not None:
+                if not released and not self.closed:
+                    try:
+                        self._release_rollout(rollout_id)
+                    except Exception:
+                        self.broken = True
+                transition_shared.close()
+                transition_shared.unlink()
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for command_queue in self.command_queues:
+            command_queue.put({"type": "stop"})
+        for process in self.processes:
+            process.join(timeout=self.config.worker_join_timeout_s)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=1.0)
+        if self.feature_shared is not None:
+            self.feature_shared.close()
+            self.feature_shared.unlink()
+            self.feature_shared = None
+
+    def _start_workers(self) -> None:
+        started_processes: list[mp.Process] = []
+        startup_start = time.perf_counter_ns()
+        try:
+            self.feature_shared = _create_feature_shared_memory(self.config.num_workers)
+            worker_config = _worker_static_config(self.sampler, self.config, self.feature_shared)
+            self.processes = [
+                self.ctx.Process(
+                    target=_worker_loop,
+                    args=(worker_id, self.command_queues[worker_id], self.result_queue, worker_config),
+                    daemon=True,
+                )
+                for worker_id in range(self.config.num_workers)
+            ]
+            for process in self.processes:
+                process.start()
+                started_processes.append(process)
+            worker_startup_ns = time.perf_counter_ns() - startup_start
+            ready_count, first_ready_ns, all_ready_ns = self._wait_for_worker_ready(startup_start)
+            self.startup_stats = {
+                "worker_ready_count": ready_count,
+                "worker_startup_ms": worker_startup_ns / 1_000_000,
+                "worker_first_ready_ms": None if first_ready_ns is None else first_ready_ns / 1_000_000,
+                "worker_all_ready_ms": None if all_ready_ns is None else all_ready_ns / 1_000_000,
+            }
+        except Exception:
+            self.processes = started_processes
+            self.broken = True
+            self.close()
+            raise
+
+    def _wait_for_worker_ready(self, startup_start: int) -> tuple[int, int | None, int | None]:
+        ready_workers = 0
+        first_ready_ns: int | None = None
+        all_ready_ns: int | None = None
+        while ready_workers < self.config.num_workers:
+            msg = self.result_queue.get(timeout=self.config.worker_join_timeout_s)
+            msg_type = msg["type"]
+            if msg_type == "worker_ready":
+                ready_workers += 1
+                now_ns = time.perf_counter_ns()
+                if first_ready_ns is None:
+                    first_ready_ns = now_ns - startup_start
+                if ready_workers == self.config.num_workers:
+                    all_ready_ns = now_ns - startup_start
+            elif msg_type == "worker_error":
+                raise RuntimeError(f"worker {msg['worker_id']} failed: {msg['error']}\n{msg['traceback']}")
+            else:
+                raise RuntimeError(f"unexpected worker startup message type: {msg_type!r}")
+        return ready_workers, first_ready_ns, all_ready_ns
+
+    def _broadcast(self, msg: dict[str, Any]) -> None:
+        for command_queue in self.command_queues:
+            command_queue.put(msg)
+
+    def _wait_for_worker_messages(self, expected_type: str, *, rollout_id: str) -> None:
+        ready_workers = 0
+        while ready_workers < self.config.num_workers:
+            msg = self.result_queue.get(timeout=self.config.worker_join_timeout_s)
+            msg_type = msg["type"]
+            if msg_type == expected_type and msg.get("rollout_id") == rollout_id:
+                ready_workers += 1
+            elif msg_type == "worker_error":
+                raise RuntimeError(f"worker {msg['worker_id']} failed: {msg['error']}\n{msg['traceback']}")
+            else:
+                raise RuntimeError(f"unexpected worker message while waiting for {expected_type}: {msg}")
+
+    def _release_rollout(self, rollout_id: str) -> float:
+        release_start = time.perf_counter_ns()
+        self._broadcast({"type": "release_rollout", "rollout_id": rollout_id})
+        self._wait_for_worker_messages("release_ready", rollout_id=rollout_id)
+        return (time.perf_counter_ns() - release_start) / 1_000_000
+
+    def _finalize_collect_stats(
+        self,
+        stats: dict[str, Any],
+        *,
+        scheduler_ns: int,
+        batch_assembly_ns: int,
+        configure_ms: float,
+        release_ms: float,
+    ) -> dict[str, Any]:
+        if self.collect_count == 0:
+            startup_stats = dict(self.startup_stats)
+            worker_pool_reused = False
+        else:
+            startup_stats = {
+                "worker_ready_count": self.config.num_workers,
+                "worker_startup_ms": 0.0,
+                "worker_first_ready_ms": 0.0,
+                "worker_all_ready_ms": 0.0,
+            }
+            worker_pool_reused = True
+        stats = {
+            **stats,
+            **startup_stats,
+            "worker_pool_reused": worker_pool_reused,
+            "worker_configure_ms": configure_ms,
+            "worker_release_ms": release_ms,
+            "scheduler_ms": scheduler_ns / 1_000_000,
+            "batch_assembly_ms": batch_assembly_ns / 1_000_000,
+        }
+        scheduler_accounted_ms = (
+            float(stats["scheduler_queue_get_ms"])
+            + float(stats["inference_total_with_action_send_ms"])
+            + float(stats["scheduler_message_handle_ms"])
+            + float(stats["scheduler_task_dispatch_ms"])
+            + float(stats["scheduler_payload_sort_ms"])
+        )
+        stats["scheduler_accounted_ms"] = scheduler_accounted_ms
+        stats["scheduler_unaccounted_ms"] = float(stats["scheduler_ms"]) - scheduler_accounted_ms
+        return stats
+
+    def _ensure_usable(self) -> None:
+        if self.closed:
+            raise RuntimeError("multiprocess rollout pool is closed")
+        if self.broken:
+            raise RuntimeError("multiprocess rollout pool is broken after a previous failure")
+
+
 def collect_multiprocess_ppo_rollouts(
     model: GoldRushPolicyNetwork,
     sampler: BatchRolloutSampler,
@@ -165,81 +405,15 @@ def collect_multiprocess_ppo_rollouts(
     device: torch.device | str | None = None,
     config: MultiprocessRolloutConfig | None = None,
 ) -> tuple[PpoBatch, dict[str, Any]]:
-    config = MultiprocessRolloutConfig() if config is None else config
-    _validate_inputs(pair_count=pair_count, map_ids=map_ids, opponent_specs=opponent_specs, config=config)
-
-    rollout_device = torch.device(device) if device is not None else next(model.parameters()).device
-    was_training = model.training
-    model.eval()
-    ctx = mp.get_context("spawn")
-    result_queue = ctx.Queue()
-    command_queues = [ctx.Queue() for _ in range(config.num_workers)]
-    worker_startup_start = time.perf_counter_ns()
-    started_processes: list[mp.Process] = []
-    worker_startup_ns = 0
-    feature_shared: FeatureSharedMemory | None = None
-    transition_shared: TransitionSharedMemory | None = None
-
-    try:
-        feature_shared = _create_feature_shared_memory(config.num_workers)
-        transition_shared = _create_transition_shared_memory(
-            episode_count=pair_count * 2,
-            round_count=sampler.env_config.episode.rules.round_count,
-        )
-        worker_config = _worker_static_config(sampler, config, feature_shared, transition_shared)
-        processes = [
-            ctx.Process(
-                target=_worker_loop,
-                args=(worker_id, command_queues[worker_id], result_queue, worker_config),
-                daemon=True,
-            )
-            for worker_id in range(config.num_workers)
-        ]
-        for process in processes:
-            process.start()
-            started_processes.append(process)
-        worker_startup_ns = time.perf_counter_ns() - worker_startup_start
-        scheduler_start = time.perf_counter_ns()
-        payloads, stats = _scheduler_loop(
+    with MultiprocessRolloutPool(sampler, config) as pool:
+        return pool.collect(
             model,
-            command_queues,
-            result_queue,
             pair_count=pair_count,
             seed=seed,
             map_ids=map_ids,
             opponent_specs=opponent_specs,
-            device=rollout_device,
-            config=config,
-            worker_startup_start_ns=worker_startup_start,
-            feature_shared=feature_shared,
+            device=device,
         )
-        scheduler_ns = time.perf_counter_ns() - scheduler_start
-        batch_assembly_start = time.perf_counter_ns()
-        batch = _episode_payloads_to_batch(payloads, transition_shared)
-        batch_assembly_ns = time.perf_counter_ns() - batch_assembly_start
-    finally:
-        if was_training:
-            model.train()
-        for command_queue in command_queues:
-            command_queue.put({"type": "stop"})
-        for process in started_processes:
-            process.join(timeout=config.worker_join_timeout_s)
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=1.0)
-        if feature_shared is not None:
-            feature_shared.close()
-            feature_shared.unlink()
-        if transition_shared is not None:
-            transition_shared.close()
-            transition_shared.unlink()
-    stats = {
-        **stats,
-        "worker_startup_ms": worker_startup_ns / 1_000_000,
-        "scheduler_ms": scheduler_ns / 1_000_000,
-        "batch_assembly_ms": batch_assembly_ns / 1_000_000,
-    }
-    return batch, stats
 
 
 def _scheduler_loop(
@@ -253,8 +427,8 @@ def _scheduler_loop(
     opponent_specs: Sequence[OpponentSpec] | None,
     device: torch.device,
     config: MultiprocessRolloutConfig,
-    worker_startup_start_ns: int,
     feature_shared: FeatureSharedMemory,
+    rollout_id: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     pending_tasks = _initial_tasks(seed=seed, pair_count=pair_count, map_ids=map_ids, opponent_specs=opponent_specs)
     idle_workers = list(range(len(command_queues)))
@@ -271,9 +445,6 @@ def _scheduler_loop(
     second_enqueued_pairs: set[str] = set()
     expected_episodes = pair_count * 2
     completed_episodes = 0
-    ready_workers = 0
-    first_worker_ready_ns: int | None = None
-    all_workers_ready_ns: int | None = None
     timeout_s = config.inference_timeout_ms / 1000.0
     queue_get_ns = 0
     queue_get_empty_ns = 0
@@ -286,6 +457,8 @@ def _scheduler_loop(
     inference_model_sample_ns = 0
     inference_action_send_ns = 0
     inference_total_with_action_send_ns = 0
+    worker_stat_totals: dict[str, int] = {}
+    worker_episode_count = 0
 
     while completed_episodes < expected_episodes:
         while idle_workers and pending_tasks:
@@ -293,7 +466,7 @@ def _scheduler_loop(
             worker_id = idle_workers.pop(0)
             task = pending_tasks.pop(0)
             active_tasks[task.task_id] = task
-            command_queues[worker_id].put({"type": "start_episode", "task": task})
+            command_queues[worker_id].put({"type": "start_episode", "rollout_id": rollout_id, "task": task})
             task_dispatch_ns += time.perf_counter_ns() - dispatch_start
 
         try:
@@ -311,16 +484,13 @@ def _scheduler_loop(
             msg_type = msg["type"]
             queue_get_by_type_ns[msg_type] = queue_get_by_type_ns.get(msg_type, 0) + queue_get_elapsed
             message_handle_start = time.perf_counter_ns()
-            if msg_type == "worker_ready":
-                ready_workers += 1
-                now_ns = time.perf_counter_ns()
-                if first_worker_ready_ns is None:
-                    first_worker_ready_ns = now_ns
-                if ready_workers == len(command_queues):
-                    all_workers_ready_ns = now_ns
-            elif msg_type == "feature_request":
+            if msg_type == "feature_request":
+                if msg.get("rollout_id") != rollout_id:
+                    raise RuntimeError(f"feature_request rollout_id mismatch: {msg}")
                 pending_requests.append(msg["request"])
             elif msg_type == "episode_started":
+                if msg.get("rollout_id") != rollout_id:
+                    raise RuntimeError(f"episode_started rollout_id mismatch: {msg}")
                 task = active_tasks[msg["task_id"]]
                 if task.pair_role == "first":
                     first_started += 1
@@ -341,6 +511,8 @@ def _scheduler_loop(
                 else:
                     second_started += 1
             elif msg_type == "episode_done":
+                if msg.get("rollout_id") != rollout_id:
+                    raise RuntimeError(f"episode_done rollout_id mismatch: {msg}")
                 completed_episodes += 1
                 worker_id = int(msg["worker_id"])
                 idle_workers.append(worker_id)
@@ -348,6 +520,12 @@ def _scheduler_loop(
                 payload_extend_start = time.perf_counter_ns()
                 payloads.append(msg)
                 payload_extend_ns += time.perf_counter_ns() - payload_extend_start
+                worker_stats = msg.get("worker_stats", {})
+                if worker_stats:
+                    worker_episode_count += 1
+                    for key, value in worker_stats.items():
+                        if isinstance(value, int):
+                            worker_stat_totals[key] = worker_stat_totals.get(key, 0) + value
                 if task.pair_role == "first":
                     first_done += 1
                 else:
@@ -388,14 +566,9 @@ def _scheduler_loop(
     payload_sort_start = time.perf_counter_ns()
     payloads.sort(key=lambda item: (item["pair_id"], 0 if item["pair_role"] == "first" else 1))
     payload_sort_ns = time.perf_counter_ns() - payload_sort_start
-    all_ready_elapsed_ns = None if all_workers_ready_ns is None else all_workers_ready_ns - worker_startup_start_ns
-    first_ready_elapsed_ns = None if first_worker_ready_ns is None else first_worker_ready_ns - worker_startup_start_ns
-    return payloads, {
+    stats = {
         "rollout_mode": "multiprocess",
         "rollout_num_workers": len(command_queues),
-        "worker_ready_count": ready_workers,
-        "worker_first_ready_ms": None if first_ready_elapsed_ns is None else first_ready_elapsed_ns / 1_000_000,
-        "worker_all_ready_ms": None if all_ready_elapsed_ns is None else all_ready_elapsed_ns / 1_000_000,
         "first_started": first_started,
         "second_started": second_started,
         "first_episodes": first_done,
@@ -416,7 +589,6 @@ def _scheduler_loop(
         "scheduler_queue_get_episode_started_ms": queue_get_by_type_ns.get("episode_started", 0) / 1_000_000,
         "scheduler_queue_get_episode_done_ms": queue_get_by_type_ns.get("episode_done", 0) / 1_000_000,
         "scheduler_message_handle_ms": message_handle_ns / 1_000_000,
-        "scheduler_message_handle_worker_ready_ms": message_handle_by_type_ns.get("worker_ready", 0) / 1_000_000,
         "scheduler_message_handle_feature_request_ms": message_handle_by_type_ns.get("feature_request", 0) / 1_000_000,
         "scheduler_message_handle_episode_started_ms": message_handle_by_type_ns.get("episode_started", 0) / 1_000_000,
         "scheduler_message_handle_episode_done_ms": message_handle_by_type_ns.get("episode_done", 0) / 1_000_000,
@@ -424,6 +596,8 @@ def _scheduler_loop(
         "scheduler_payload_extend_ms": payload_extend_ns / 1_000_000,
         "scheduler_payload_sort_ms": payload_sort_ns / 1_000_000,
     }
+    stats.update(_worker_profile_metrics(worker_stat_totals, worker_episode_count))
+    return payloads, stats
 
 
 def _run_inference_batch(
@@ -462,6 +636,7 @@ def _run_inference_batch(
         command_queues[request.worker_id].put(
             {
                 "type": "action_result",
+                "rollout_id": request.rollout_id,
                 "request_id": request.request_id,
                 "action": {
                     "actions": tuple(int(value) for value in actions_cpu[batch_index]),
@@ -664,19 +839,43 @@ def _shared_array_config(shm: shared_memory.SharedMemory, array: Any) -> dict[st
 def _worker_loop(worker_id: int, command_queue: Any, result_queue: Any, static_config: dict[str, Any]) -> None:
     feature_shared: FeatureSharedMemory | None = None
     transition_shared: TransitionSharedMemory | None = None
+    current_rollout_id: str | None = None
     try:
         feature_shared = _attach_feature_shared_memory(static_config["feature_shared_memory"])
-        transition_shared = _attach_transition_shared_memory(static_config["transition_shared_memory"])
         result_queue.put({"type": "worker_ready", "worker_id": worker_id})
         while True:
             msg = command_queue.get()
             msg_type = msg["type"]
             if msg_type == "stop":
                 return
+            if msg_type == "configure_rollout":
+                if transition_shared is not None:
+                    transition_shared.close()
+                current_rollout_id = str(msg["rollout_id"])
+                transition_shared = _attach_transition_shared_memory(msg["transition_shared_memory"])
+                result_queue.put({"type": "configure_ready", "worker_id": worker_id, "rollout_id": current_rollout_id})
+                continue
+            if msg_type == "release_rollout":
+                rollout_id = str(msg["rollout_id"])
+                if current_rollout_id != rollout_id:
+                    raise RuntimeError(f"worker {worker_id} release rollout mismatch: {rollout_id!r} != {current_rollout_id!r}")
+                if transition_shared is not None:
+                    transition_shared.close()
+                    transition_shared = None
+                current_rollout_id = None
+                result_queue.put({"type": "release_ready", "worker_id": worker_id, "rollout_id": rollout_id})
+                continue
             if msg_type != "start_episode":
                 raise RuntimeError(f"worker expected start_episode, got {msg_type!r}")
+            if transition_shared is None or current_rollout_id is None:
+                raise RuntimeError(f"worker {worker_id} received start_episode before configure_rollout")
+            if msg.get("rollout_id") != current_rollout_id:
+                raise RuntimeError(
+                    f"worker {worker_id} start_episode rollout mismatch: {msg.get('rollout_id')!r} != {current_rollout_id!r}"
+                )
             _run_worker_episode(
                 worker_id,
+                current_rollout_id,
                 msg["task"],
                 command_queue,
                 result_queue,
@@ -703,6 +902,7 @@ def _worker_loop(worker_id: int, command_queue: Any, result_queue: Any, static_c
 
 def _run_worker_episode(
     worker_id: int,
+    rollout_id: str,
     task: EpisodeTask,
     command_queue: Any,
     result_queue: Any,
@@ -712,6 +912,8 @@ def _run_worker_episode(
 ) -> None:
     import numpy as np
 
+    profile_stats: dict[str, int] = {"steps": 0}
+    episode_wall_start = time.perf_counter_ns()
     env = SingleAgentGoldRushEnv(
         config=static_config["env_config"],
         mechanisms=copy.deepcopy(static_config["mechanisms"]),
@@ -724,6 +926,7 @@ def _run_worker_episode(
         {
             "type": "episode_started",
             "worker_id": worker_id,
+            "rollout_id": rollout_id,
             "task_id": task.task_id,
             "pair_id": task.pair_id,
             "pair_role": task.pair_role,
@@ -756,8 +959,10 @@ def _run_worker_episode(
         result_queue.put(
             {
                 "type": "feature_request",
+                "rollout_id": rollout_id,
                 "request": FeatureRequest(
                     worker_id=worker_id,
+                    rollout_id=rollout_id,
                     task_id=task.task_id,
                     request_id=request_id,
                     round_index=int(observation.round),
@@ -765,10 +970,18 @@ def _run_worker_episode(
                 ),
             }
         )
+        action_wait_start = time.perf_counter_ns()
         action_msg = command_queue.get()
+        profile_stats["action_wait_ns"] = profile_stats.get("action_wait_ns", 0) + (
+            time.perf_counter_ns() - action_wait_start
+        )
         if action_msg["type"] == "stop":
             return
-        if action_msg["type"] != "action_result" or action_msg["request_id"] != request_id:
+        if (
+            action_msg["type"] != "action_result"
+            or action_msg["rollout_id"] != rollout_id
+            or action_msg["request_id"] != request_id
+        ):
             raise RuntimeError(f"worker received unexpected action message: {action_msg}")
 
         action_payload = action_msg["action"]
@@ -779,7 +992,9 @@ def _run_worker_episode(
             vp=int(action_payload["vp"]),
         )
         extractor.commit_action(game_output)
+        env_step_start = time.perf_counter_ns()
         step = env.step(game_output)
+        profile_stats["env_step_ns"] = profile_stats.get("env_step_ns", 0) + (time.perf_counter_ns() - env_step_start)
         done = bool(step.terminated)
         transition_shared.planes[transition_slot, request_index, ...] = spatial_planes
         transition_shared.scalars[transition_slot, request_index, ...] = scalars
@@ -792,16 +1007,21 @@ def _run_worker_episode(
         transition_shared.reward[transition_slot, request_index] = float(step.reward)
         transition_shared.done[transition_slot, request_index] = done
         transition_shared.round_index[transition_slot, request_index] = int(observation.round)
+        # 已测 w64/p256：feature/extractor/action decode/info/SHM writes 通常 <=0.12ms/transition；
+        # env.step 内部几乎全在 RoundStepEnv.step，opponent/reward/info 均 <0.04ms/transition。
         info_items.append(_transition_info(step.info, done=done, mode=str(static_config["transition_info_mode"])))
         observation = step.observation
         request_index += 1
+        profile_stats["steps"] = request_index
 
     if request_index <= 0:
         raise SimulatorRuleError(f"episode {task.task_id!r} produced no transitions")
+    profile_stats["episode_wall_ns"] = time.perf_counter_ns() - episode_wall_start
     result_queue.put(
         {
             "type": "episode_done",
             "worker_id": worker_id,
+            "rollout_id": rollout_id,
             "task_id": task.task_id,
             "pair_id": task.pair_id,
             "pair_role": task.pair_role,
@@ -812,6 +1032,7 @@ def _run_worker_episode(
             "transition_slot": transition_slot,
             "episode_length": request_index,
             "infos": tuple(info_items),
+            "worker_stats": profile_stats,
         }
     )
 
@@ -920,7 +1141,6 @@ def _worker_static_config(
     sampler: BatchRolloutSampler,
     config: MultiprocessRolloutConfig,
     feature_shared: FeatureSharedMemory,
-    transition_shared: TransitionSharedMemory,
 ) -> dict[str, Any]:
     return {
         "env_config": sampler.env_config,
@@ -930,7 +1150,6 @@ def _worker_static_config(
         "reward_fn": sampler.reward_fn,
         "transition_info_mode": config.transition_info_mode,
         "feature_shared_memory": feature_shared.config(),
-        "transition_shared_memory": transition_shared.config(),
     }
 
 
@@ -959,6 +1178,45 @@ def _validate_inputs(
         raise SimulatorRuleError(f"transition_info_mode must be training or debug, got {config.transition_info_mode!r}")
 
 
+def _validate_pool_config(config: MultiprocessRolloutConfig) -> None:
+    if config.num_workers <= 0:
+        raise SimulatorRuleError(f"num_workers must be positive, got {config.num_workers}")
+    if config.max_inference_batch_size <= 0:
+        raise SimulatorRuleError(f"max_inference_batch_size must be positive, got {config.max_inference_batch_size}")
+    if config.inference_timeout_ms < 0.0:
+        raise SimulatorRuleError(f"inference_timeout_ms must be non-negative, got {config.inference_timeout_ms}")
+    if config.worker_join_timeout_s <= 0.0:
+        raise SimulatorRuleError(f"worker_join_timeout_s must be positive, got {config.worker_join_timeout_s}")
+    if config.transition_info_mode not in ("training", "debug"):
+        raise SimulatorRuleError(f"transition_info_mode must be training or debug, got {config.transition_info_mode!r}")
+
+
+def _worker_profile_metrics(totals: dict[str, int], episode_count: int) -> dict[str, float | int]:
+    if not totals:
+        return {
+            "worker_profile_episode_count": 0,
+            "worker_profile_transition_count": 0,
+        }
+    transition_count = int(totals.get("steps", 0))
+    metrics: dict[str, float | int] = {
+        "worker_profile_episode_count": episode_count,
+        "worker_profile_transition_count": transition_count,
+    }
+    for key, value in sorted(totals.items()):
+        if key == "steps":
+            metrics["worker_sum_steps"] = int(value)
+            metrics["worker_mean_steps_per_episode"] = int(value) / max(episode_count, 1)
+            continue
+        if not key.endswith("_ns"):
+            continue
+        name = key[:-3]
+        total_ms = int(value) / 1_000_000
+        metrics[f"worker_sum_{name}_ms"] = total_ms
+        metrics[f"worker_mean_episode_{name}_ms"] = total_ms / max(episode_count, 1)
+        metrics[f"worker_per_transition_{name}_ms"] = total_ms / max(transition_count, 1)
+    return metrics
+
+
 def _sync(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -968,4 +1226,4 @@ def _mean(values: list[int]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-__all__ = ["MultiprocessRolloutConfig", "collect_multiprocess_ppo_rollouts"]
+__all__ = ["MultiprocessRolloutConfig", "MultiprocessRolloutPool", "collect_multiprocess_ppo_rollouts"]

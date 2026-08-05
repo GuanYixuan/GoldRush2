@@ -2,7 +2,7 @@
 
 from .env import SingleAgentEnvConfig, SingleAgentGoldRushEnv
 from .eval import EvaluationCase, EvaluationConfig, EvaluationResult, EvaluationSuite, evaluate_policy
-from .multiprocess_rollout import MultiprocessRolloutConfig, collect_multiprocess_ppo_rollouts
+from .multiprocess_rollout import MultiprocessRolloutConfig, MultiprocessRolloutPool, collect_multiprocess_ppo_rollouts
 from .ppo import PpoConfig, PpoEvaluation, PpoUpdateStats, collect_ppo_rollouts, evaluate_actions, ppo_update
 from .ppo_buffer import PpoBatch, PpoMiniBatch, PpoTransition
 from .rewards import TerminalWinPlusMarginPotentialReward, WinLossReward
@@ -19,6 +19,7 @@ __all__ = [
     "EvaluationResult",
     "EvaluationSuite",
     "MultiprocessRolloutConfig",
+    "MultiprocessRolloutPool",
     "PpoBatch",
     "PpoConfig",
     "PpoEvaluation",
