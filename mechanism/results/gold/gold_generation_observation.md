@@ -169,6 +169,12 @@ if static2_high_batch_triggered:
 
 地图1/2 的 `no_high` 背景几乎为 0；地图3 `no_high` 在新 observed 口径下也降到很弱。第一版不建议把它建成强背景率。
 
+## 已有金币格叠加
+
+金币生成不应把已有地面金币视为阻挡。基于当前四批 `cell_transitions.csv`，中心、外围 `static_map=2` high batch、以及 high region 外外围 `static_map=0` 伴随项中，都存在大量 `prev_gold > 0 && delta > 0` 的干净可见样本；其中后续中心区样本为 `45134` 条，static2 high batch 样本为 `11514` 条，外围 static0 high 外伴随项样本为 `2177` 条。
+
+因此模拟器生成器应允许在已有金币格上产生新增金额，并由状态推进层把新增金额叠加到原地面金币。当前有数据支撑的动态排除条件是炸弹和玩家/NPC 占用；不要把 `prev_gold > 0` 当作候选格不可用。
+
 ## 建模建议
 
 金币生成属于 `simulator/` 的机制近似层，不应写死在官方规则层中。第一版建议使用 `GoldGenerationConfig` 驱动：对齐 replay 时使用 `fit` 配置，RL 主训练时每局由 `EpisodeConfig` 采样一组参数，固定评估时使用若干 `eval_holdout` 配置。

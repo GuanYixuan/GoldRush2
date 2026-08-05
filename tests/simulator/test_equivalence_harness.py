@@ -12,7 +12,7 @@ from simulator.envs.round_step import RoundStepConfig, RoundStepEnv
 from simulator.types import Action, GameOutput
 
 
-EXPECTED_DEFAULT_ROLLOUT_DIGEST = "8c6a2ea6f242fc7bc93ce2f7b3abdf34779b07164d555572def6cafe2130dfca"
+EXPECTED_DEFAULT_ROLLOUT_DIGEST = "26abf12758c1fa85c26a85c77c6d547af0c85f4bb5bbc2791a4e698d3705b519"
 
 
 class SimulatorEquivalenceHarnessTests(unittest.TestCase):

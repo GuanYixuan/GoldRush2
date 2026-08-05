@@ -235,7 +235,6 @@ def _generate_gold(
         template,
         outer_state,
         rng,
-        reserved_positions=tuple(event.position for event in center_events),
     )
     return center_events + outer_events
 

@@ -78,6 +78,14 @@ tests/simulator/
   test_transition.py
 ```
 
+运行 simulator 测试时需要显式把仓库根目录加入 Python import path：
+
+```bash
+PYTHONPATH=. conda run --no-capture-output -n goldrush pytest tests/simulator
+```
+
+直接运行 `conda run --no-capture-output -n goldrush pytest tests/simulator` 可能因找不到本地 `simulator` 包而在收集阶段失败。
+
 ## 分层边界
 
 ### `rules/`
@@ -194,7 +202,8 @@ static_map, spawn_points = map_provider.sample(rng)
 
 中心金币生成口径：
 
-- 第一版只覆盖中心 `9x9` 区域内的 `static_grid == 0` 格；障碍、已有金币、炸弹、玩家和 NPC 位置全部排除。
+- 第一版只覆盖中心 `9x9` 区域内的 `static_grid == 0` 格；障碍由候选格定义排除，动态排除炸弹、玩家和 NPC。
+- 已有金币不阻挡中心生成；命中已有金币格时由 transition/env 层把新增金额叠加到地面金币。
 - 每个候选格独立采样，概率为 `A * exp(-B * ((row - 8)^2 + (col - 8)^2))`。
 - 命中后金额从闭区间 `[1, 11]` 均匀整数采样。
 - 生成器只返回事件，不直接落盘到状态；由 transition/env 层统一应用，以便单测和 replay 对齐复用同一事件流。
@@ -207,8 +216,8 @@ static_map, spawn_points = map_provider.sample(rng)
 - high region 内必须有 5 个 `static_grid == 2` 模板格，否则认为地图模板与当前机制不匹配并 fail-fast。
 - `static2` high batch 先采样 batch total，再把 total 近似均分到 high region 内全部合法 `static_grid == 2` 候选格，余数随机分配到合法候选格。
 - high region 之外的外围 `static_grid == 0` 普通格按经验事件数采样，并按经验金额分布生成小额金币；high region 内普通格不生成伴随项。
-- 候选格动态排除已有金币、炸弹、玩家和 NPC。
-- 若 high region 内部分 `static_grid == 2` 候选格被动态对象、炸弹或已有金币占用，本次 high batch 仍在其它合法候选格上生成。
+- 候选格动态排除炸弹、玩家和 NPC；已有金币不排除，生成金额叠加到原地面金币。
+- 若 high region 内部分 `static_grid == 2` 候选格被动态对象或炸弹占用，本次 high batch 仍在其它合法候选格上生成。
 - TODO：全部 `static_grid == 2` 候选格均不可用时官方行为未观测；第一版跳过本次 `static2` 分配并继续推进下一次 gap。
 - 首次 high batch 相位分布暂定为 `UniformInteger(8, 14)`；后续若 replay 首触发分布给出更强证据，再替换该默认参数。
 
@@ -328,7 +337,7 @@ EpisodeConfig
 6. 已完成：用 `mechanisms.scripted` 组装 deterministic transition 测试。
 7. 引入默认机制近似模型。该步骤拆成如下子阶段：
    - 7.1 已完成：`mechanisms.maps` 提供 3 张公开地图 pool、固定出生点配置、seeded 均匀抽样和初始 `GameState` 构造。
-   - 7.2 基本完成：`mechanisms.gold.CenterGoldGenerator` 已实现中心区域小额金币生成 approximation；`OuterGoldGenerator` 已实现 stateful `static_grid == 2` high batch 与伴随外围 `static_grid == 0` 小额金币，首次 high batch offset 暂定 `UniformInteger(8, 14)`。已覆盖同 seed 可复现、不生成在障碍/炸弹/玩家/NPC/已有金币格、不直接修改状态、非法配置 fail-fast。剩余参数观察项是动态占用导致候选不足时的官方处理。
+   - 7.2 基本完成：`mechanisms.gold.CenterGoldGenerator` 已实现中心区域小额金币生成 approximation；`OuterGoldGenerator` 已实现 stateful `static_grid == 2` high batch 与伴随外围 `static_grid == 0` 小额金币，首次 high batch offset 暂定 `UniformInteger(8, 14)`。已覆盖同 seed 可复现、不生成在障碍/炸弹/玩家/NPC 格、可叠加到已有金币格、不直接修改状态、非法配置 fail-fast。剩余参数观察项是动态占用导致候选不足时的官方处理。
    - 7.3 已完成机制本体：`mechanisms.npc` 提供 seeded NPC 策略 approximation，默认实现 simultaneous-start M4e static-pickup+center path-level softmax。必须只产生不会越界/撞障碍的动作，因为 `rules.movement.apply_npc_step()` 对 NPC 非法动作 fail-fast。已覆盖同 seed 可复现、每个 NPC 每回合 3 个动作、合法 path 枚举、动态拾金/炸弹风险特征、`bomb_blind_p`、同一轮 7 个 NPC 基于同一决策快照生成 actions。transition/env 接入时应先生成全体 NPC actions，再按随机 dispatch order 执行结算。
    - 7.4 已完成：`mechanisms.bombs` 提供固定 20 回合刷新周期和 `p_bomb=0.0795` 的 Bernoulli 候选格采样，严格执行刷新约束。
    - 7.5 已完成：`simulator.replay` 实现 `goldrush2_simulator_full_replay` recorder/exporter，记录完整上帝视角 start/end、双方输出、机制事件、规则事件和 snapshot。该格式是 simulator 调试产物，不伪装成官方 NDJSON 或 merged replay。已覆盖固定小局输出 JSON 可稳定复现，且不会写出 `npc.gold` 或 `grid=-2/-4` canonical 标记。

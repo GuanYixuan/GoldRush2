@@ -17,7 +17,8 @@ from simulator.mechanisms.gold import (
 )
 from simulator.mechanisms.maps import build_initial_state, built_in_public_map_pool
 from simulator.rules.snapshot import region_id
-from simulator.types import Position
+from simulator.rules.transition import apply_gold_generation
+from simulator.types import GoldGenerationEvent, Position
 
 
 class CenterGoldTests(unittest.TestCase):
@@ -50,7 +51,7 @@ class CenterGoldTests(unittest.TestCase):
         self.assertEqual(state1.gold, {})
         self.assertTrue(all(1 <= event.amount <= 11 for event in events1))
 
-    def test_generate_filters_existing_gold_bombs_players_and_npcs(self) -> None:
+    def test_generate_allows_existing_gold_but_filters_bombs_players_and_npcs(self) -> None:
         template = built_in_public_map_pool().get(1)
         state = build_initial_state(template)
         state.players[1].units[0].position = Position(8, 8)
@@ -64,7 +65,7 @@ class CenterGoldTests(unittest.TestCase):
 
         self.assertNotIn(Position(8, 8), positions)
         self.assertNotIn(Position(8, 7), positions)
-        self.assertNotIn(Position(8, 9), positions)
+        self.assertIn(Position(8, 9), positions)
         self.assertNotIn(Position(9, 8), positions)
         self.assertIn(Position(7, 8), positions)
 
@@ -163,9 +164,7 @@ class OuterGoldTests(unittest.TestCase):
         template = built_in_public_map_pool().get(1)
         state = build_initial_state(template)
         blocked_static2 = outer_static2_candidate_cells(template, 2)[0]
-        blocked_static0 = outer_static0_candidate_cells(template, exclude_region=2)[0]
         state.players[1].units[0].position = blocked_static2
-        state.gold[blocked_static0] = 4
         generator = OuterGoldGenerator(
             OuterGoldConfig(
                 gap_weights=((8, 1),),
@@ -182,10 +181,62 @@ class OuterGoldTests(unittest.TestCase):
         static2_events = [event for event in events if event.position in static2_positions]
 
         self.assertNotIn(blocked_static2, positions)
-        self.assertNotIn(blocked_static0, positions)
         self.assertEqual(len(static2_events), 4)
         self.assertEqual(sum(event.amount for event in static2_events), 88)
         self.assertEqual(positions, static2_positions - {blocked_static2})
+
+    def test_static2_batch_allows_existing_gold_cells(self) -> None:
+        template = built_in_public_map_pool().get(1)
+        state = build_initial_state(template)
+        existing_gold_static2 = outer_static2_candidate_cells(template, 2)[0]
+        state.gold[existing_gold_static2] = 4
+        generator = OuterGoldGenerator(
+            OuterGoldConfig(
+                gap_weights=((8, 1),),
+                region_weights=((2, 1),),
+                static2_total_weights=((88, 1),),
+                outer_static0_count_weights=((0, 1),),
+            )
+        )
+
+        events = generator.generate(state, template, OuterGoldState(next_static2_round=0), random.Random(5))
+        static2_positions = set(outer_static2_candidate_cells(template, 2))
+        static2_events = [event for event in events if event.position in static2_positions]
+
+        self.assertIn(existing_gold_static2, {event.position for event in static2_events})
+        self.assertEqual(len(static2_events), 5)
+        self.assertEqual(sum(event.amount for event in static2_events), 88)
+
+    def test_outer_static0_generation_allows_existing_gold_cells(self) -> None:
+        template = built_in_public_map_pool().get(1)
+        state = build_initial_state(template)
+        existing_gold_static0 = outer_static0_candidate_cells(template, exclude_region=2)[0]
+        state.gold[existing_gold_static0] = 4
+        generator = OuterGoldGenerator(
+            OuterGoldConfig(
+                gap_weights=((8, 1),),
+                region_weights=((2, 1),),
+                static2_total_weights=((88, 1),),
+                outer_static0_count_weights=((999, 1),),
+                outer_static0_amount_weights=((6, 1),),
+            )
+        )
+
+        events = generator.generate(state, template, OuterGoldState(next_static2_round=0), random.Random(5))
+        static2_positions = set(outer_static2_candidate_cells(template, 2))
+        static0_events = [event for event in events if event.position not in static2_positions]
+
+        self.assertIn(existing_gold_static0, {event.position for event in static0_events})
+
+    def test_apply_gold_generation_stacks_on_existing_gold(self) -> None:
+        template = built_in_public_map_pool().get(1)
+        state = build_initial_state(template)
+        position = Position(8, 9)
+        state.gold[position] = 3
+
+        apply_gold_generation(state, (GoldGenerationEvent(position, 5),))
+
+        self.assertEqual(state.gold[position], 8)
 
     def test_invalid_outer_config_fails_fast(self) -> None:
         with self.assertRaises(SimulatorRuleError):
