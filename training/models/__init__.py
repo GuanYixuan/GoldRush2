@@ -3,6 +3,7 @@ from __future__ import annotations
 from .policy_network import (
     GoldRushPolicyNetwork,
     PolicyAction,
+    PolicyBcEvaluation,
     PolicyEvaluation,
     PolicyNetworkConfig,
     TorchFeaturePolicy,
@@ -14,6 +15,7 @@ from .policy_network import (
 __all__ = [
     "GoldRushPolicyNetwork",
     "PolicyAction",
+    "PolicyBcEvaluation",
     "PolicyEvaluation",
     "PolicyNetworkConfig",
     "TorchFeaturePolicy",

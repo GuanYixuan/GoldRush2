@@ -12,6 +12,7 @@ from simulator.config import EpisodeConfig, RulesConfig
 from simulator.envs.round_step import RoundStepMechanisms
 from simulator.errors import SimulatorRuleError
 from simulator.mechanisms.maps import SpawnConfig
+from training.bc.schema import BC_CHECKPOINT_SCHEMA, FEATURE_SCHEMA as BC_FEATURE_SCHEMA
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig, TorchFeaturePolicy
 from training.opponents import OpponentSpec
 from training.rl import (
@@ -52,6 +53,7 @@ class TrainPpoConfig:
     model: PolicyNetworkConfig = field(default_factory=PolicyNetworkConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     resume_checkpoint: Path | None = None
+    init_model_checkpoint: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,8 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
     _write_json(output_dir / "config.json", _config_to_jsonable(config))
 
     model = GoldRushPolicyNetwork(config.model).to(device)
+    if config.init_model_checkpoint is not None:
+        _load_init_model_checkpoint(Path(config.init_model_checkpoint), model=model, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, eps=config.adam_eps)
     start_update = 0
     if config.resume_checkpoint is not None:
@@ -217,6 +221,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=2.0e-4)
     parser.add_argument("--adam-eps", type=float, default=1.0e-5)
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
+    parser.add_argument("--init-model-checkpoint", type=Path, default=None)
     parser.add_argument("--rollout-mode", choices=["serial", "multiprocess"], default="serial")
     parser.add_argument("--rollout-workers", type=int, default=8)
     parser.add_argument("--rollout-max-inference-batch-size", type=int, default=64)
@@ -280,6 +285,7 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         model=model,
         episode=episode,
         resume_checkpoint=None if args.resume_checkpoint is None else Path(args.resume_checkpoint),
+        init_model_checkpoint=None if args.init_model_checkpoint is None else Path(args.init_model_checkpoint),
     )
 
 
@@ -403,6 +409,38 @@ def _load_checkpoint(
     return int(checkpoint["update_index"])
 
 
+def _load_init_model_checkpoint(
+    checkpoint_path: Path,
+    *,
+    model: GoldRushPolicyNetwork,
+    device: torch.device,
+) -> None:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    if checkpoint.get("schema") != BC_CHECKPOINT_SCHEMA:
+        raise SimulatorRuleError(f"init model checkpoint must be {BC_CHECKPOINT_SCHEMA}, got {checkpoint.get('schema')!r}")
+    if checkpoint.get("feature_schema") != BC_FEATURE_SCHEMA:
+        raise SimulatorRuleError(f"unsupported init feature schema: {checkpoint.get('feature_schema')!r}")
+    raw_model_config = checkpoint.get("model_config")
+    if raw_model_config is None:
+        raise SimulatorRuleError("BC checkpoint missing model_config")
+    expected_config = asdict(model.config)
+    if dict(raw_model_config) != expected_config:
+        raise SimulatorRuleError("BC checkpoint model_config does not match PPO model config")
+
+    current = model.state_dict()
+    loaded = checkpoint["model_state_dict"]
+    filtered = {
+        key: value
+        for key, value in loaded.items()
+        if key in current and not key.startswith("critic_mlp.")
+    }
+    missing = sorted(key for key in current if key not in filtered and not key.startswith("critic_mlp."))
+    if missing:
+        raise SimulatorRuleError(f"BC checkpoint missing non-critic model keys: {missing[:5]}")
+    current.update(filtered)
+    model.load_state_dict(current)
+
+
 def _model_config_from_checkpoint(checkpoint: dict[str, Any]) -> PolicyNetworkConfig:
     raw = checkpoint["train_config"]["model"]
     missing = {"decoder_hidden", "decoder_embedding"} - raw.keys()
@@ -439,6 +477,8 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError(f"eval_interval must be positive when set, got {config.eval_interval}")
     if config.rollout_mode not in ("serial", "multiprocess"):
         raise ValueError(f"rollout_mode must be serial or multiprocess, got {config.rollout_mode!r}")
+    if config.resume_checkpoint is not None and config.init_model_checkpoint is not None:
+        raise ValueError("resume_checkpoint and init_model_checkpoint cannot both be set")
 
 
 def _training_diagnostics(batch) -> dict[str, float]:
@@ -565,6 +605,7 @@ def _config_to_jsonable(config: TrainPpoConfig) -> dict[str, Any]:
     payload = asdict(config)
     payload["output_dir"] = str(config.output_dir)
     payload["resume_checkpoint"] = None if config.resume_checkpoint is None else str(config.resume_checkpoint)
+    payload["init_model_checkpoint"] = None if config.init_model_checkpoint is None else str(config.init_model_checkpoint)
     payload["opponent_specs"] = [_opponent_to_jsonable(spec) for spec in config.opponent_specs]
     payload["eval_cases"] = [_eval_case_to_jsonable(case) for case in config.eval_cases]
     return _jsonable(payload)

@@ -63,6 +63,22 @@ class PolicyEvaluation:
 
 
 @dataclass(frozen=True)
+class PolicyBcEvaluation:
+    ko_logprob: Tensor
+    action_logprob: Tensor
+    vp_logprob: Tensor
+    value: Tensor
+    normalized_entropy: Tensor
+    action_entropy: Tensor
+    ko_entropy: Tensor
+    vp_entropy: Tensor
+
+    @property
+    def logprob(self) -> Tensor:
+        return self.ko_logprob + self.action_logprob + self.vp_logprob
+
+
+@dataclass(frozen=True)
 class _EncodedState:
     spatial_features: Tensor
     actor_context: Tensor
@@ -258,6 +274,25 @@ class GoldRushPolicyNetwork(nn.Module):
         order: Tensor,
         vp: Tensor,
     ) -> PolicyEvaluation:
+        evaluation = self.evaluate_bc_actions(spatial_planes, scalars, actions, k, order, vp)
+        return PolicyEvaluation(
+            logprob=evaluation.logprob,
+            value=evaluation.value,
+            normalized_entropy=evaluation.normalized_entropy,
+            action_entropy=evaluation.action_entropy,
+            ko_entropy=evaluation.ko_entropy,
+            vp_entropy=evaluation.vp_entropy,
+        )
+
+    def evaluate_bc_actions(
+        self,
+        spatial_planes: Tensor,
+        scalars: Tensor,
+        actions: Tensor,
+        k: Tensor,
+        order: Tensor,
+        vp: Tensor,
+    ) -> PolicyBcEvaluation:
         self._validate_action_inputs(spatial_planes, actions, k, order, vp)
         encoded = self._encode(spatial_planes, scalars)
         ko = 2 * k.long() + order.long()
@@ -271,8 +306,10 @@ class GoldRushPolicyNetwork(nn.Module):
         vp_logprob = _logprob(vp_logits, vp.long())
         ko_entropy = _normalized_entropy(ko_logits, math.log(KO_COUNT))
         vp_entropy = _normalized_entropy(vp_logits, math.log(3.0))
-        return PolicyEvaluation(
-            logprob=ko_logprob + vp_logprob + decoded.logprob,
+        return PolicyBcEvaluation(
+            ko_logprob=ko_logprob,
+            action_logprob=decoded.logprob,
+            vp_logprob=vp_logprob,
             value=encoded.value,
             normalized_entropy=0.0100 * decoded.entropy + 0.0040 * ko_entropy + 0.0003 * vp_entropy,
             action_entropy=decoded.entropy,
