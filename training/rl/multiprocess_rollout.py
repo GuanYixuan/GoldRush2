@@ -17,8 +17,7 @@ from simulator.errors import SimulatorRuleError
 from simulator.types import GameOutput
 from training.models import (
     GoldRushPolicyNetwork,
-    policy_output_is_finite,
-    sample_action,
+    policy_action_is_finite,
 )
 from training.opponents import OpponentSpec
 
@@ -618,12 +617,11 @@ def _run_inference_batch(
     stack_ns = time.perf_counter_ns() - stack_start
     model_sample_start = time.perf_counter_ns()
     with torch.no_grad():
-        output = model(spatial, scalars)
-        if not policy_output_is_finite(output):
+        action = model.act(spatial, scalars)
+        if not policy_action_is_finite(action):
             raise SimulatorRuleError("multiprocess rollout model produced NaN or Inf")
-        action = sample_action(output)
-    model_sample_ns = time.perf_counter_ns() - model_sample_start
     _sync(device)
+    model_sample_ns = time.perf_counter_ns() - model_sample_start
     elapsed_ns = time.perf_counter_ns() - start
     action_send_start = time.perf_counter_ns()
     actions_cpu = action.actions.detach().cpu().tolist()

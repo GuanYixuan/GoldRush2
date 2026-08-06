@@ -226,6 +226,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scalar-hidden", type=int, nargs=2, default=[96, 96])
     parser.add_argument("--actor-hidden", type=int, default=256)
     parser.add_argument("--critic-hidden", type=int, nargs=2, default=[256, 128])
+    parser.add_argument("--decoder-hidden", type=int, default=128)
+    parser.add_argument("--decoder-embedding", type=int, default=16)
     parser.add_argument("--ppo-minibatch-size", type=int, default=1024)
     parser.add_argument("--ppo-update-epochs", type=int, default=2)
     parser.add_argument("--ppo-target-kl", type=float, default=0.05)
@@ -240,6 +242,8 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         scalar_hidden=tuple(int(value) for value in args.scalar_hidden),
         actor_hidden=int(args.actor_hidden),
         critic_hidden=tuple(int(value) for value in args.critic_hidden),
+        decoder_hidden=int(args.decoder_hidden),
+        decoder_embedding=int(args.decoder_embedding),
     )
     ppo = PpoConfig(
         minibatch_size=int(args.ppo_minibatch_size),
@@ -401,6 +405,12 @@ def _load_checkpoint(
 
 def _model_config_from_checkpoint(checkpoint: dict[str, Any]) -> PolicyNetworkConfig:
     raw = checkpoint["train_config"]["model"]
+    missing = {"decoder_hidden", "decoder_embedding"} - raw.keys()
+    if missing:
+        raise SimulatorRuleError(
+            "checkpoint uses the retired factorized action head and cannot be loaded by the autoregressive model; "
+            f"missing config fields: {sorted(missing)}"
+        )
     return PolicyNetworkConfig(
         width=int(raw["width"]),
         residual_blocks=int(raw["residual_blocks"]),
@@ -408,6 +418,8 @@ def _model_config_from_checkpoint(checkpoint: dict[str, Any]) -> PolicyNetworkCo
         scalar_hidden=tuple(int(value) for value in raw["scalar_hidden"]),
         actor_hidden=int(raw["actor_hidden"]),
         critic_hidden=tuple(int(value) for value in raw["critic_hidden"]),
+        decoder_hidden=int(raw["decoder_hidden"]),
+        decoder_embedding=int(raw["decoder_embedding"]),
         activation=str(raw["activation"]),
     )
 
@@ -440,13 +452,21 @@ def _training_diagnostics(batch) -> dict[str, float]:
         diagnostics[f"action_fraction_{name}"] = float((actions == action_value).sum().item()) / action_total
     diagnostics["stay_action_fraction"] = diagnostics["action_fraction_stay"]
 
+    k = batch.k.detach().cpu()
+    order = batch.order.detach().cpu()
+    vp = batch.vp.detach().cpu()
+    ko = 2 * k + order
     for value in range(7):
-        diagnostics[f"k_fraction_{value}"] = _fraction(batch.k, value)
+        diagnostics[f"k_fraction_{value}"] = _fraction(k, value)
     for value in range(2):
-        diagnostics[f"order_fraction_{value}"] = _fraction(batch.order, value)
+        diagnostics[f"order_fraction_{value}"] = _fraction(order, value)
+    for value in range(14):
+        diagnostics[f"ko_fraction_{value}"] = _fraction(ko, value)
     for value in range(3):
-        diagnostics[f"vp_fraction_{value}"] = _fraction(batch.vp, value)
-    diagnostics["vp_nonzero_fraction"] = float((batch.vp.detach().cpu() != 0).sum().item()) / float(batch.vp.numel())
+        diagnostics[f"vp_fraction_{value}"] = _fraction(vp, value)
+    diagnostics["vp_nonzero_fraction"] = float((vp != 0).sum().item()) / float(vp.numel())
+    diagnostics["k_edge_fraction"] = float(((k == 0) | (k == 6)).sum().item()) / float(k.numel())
+    diagnostics["same_role_reverse_fraction"] = _same_role_reverse_fraction(actions, k)
 
     terminal_indices = [idx for idx, done in enumerate(batch.dones.detach().cpu().tolist()) if done]
     diagnostics.update(_terminal_diagnostics(batch, terminal_indices))
@@ -512,6 +532,21 @@ def _terminal_diagnostics(batch, terminal_indices: list[int]) -> dict[str, float
 def _fraction(values: torch.Tensor, target: int) -> float:
     values = values.detach().cpu()
     return float((values == target).sum().item()) / float(values.numel())
+
+
+def _same_role_reverse_fraction(actions: torch.Tensor, k: torch.Tensor) -> float:
+    slot = torch.arange(actions.shape[1] - 1).unsqueeze(0)
+    same_role = ((slot + 1) < k.unsqueeze(1)) | (slot >= k.unsqueeze(1))
+    first = actions[:, :-1]
+    second = actions[:, 1:]
+    reverse = (
+        ((first == 0) & (second == 1))
+        | ((first == 1) & (second == 0))
+        | ((first == 2) & (second == 3))
+        | ((first == 3) & (second == 2))
+    )
+    denominator = int(same_role.sum().item())
+    return 0.0 if denominator == 0 else float((reverse & same_role).sum().item()) / denominator
 
 
 def _tensor_mean(values: torch.Tensor) -> float:

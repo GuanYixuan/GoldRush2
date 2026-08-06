@@ -10,7 +10,7 @@ from simulator.envs.round_step import RoundStepMechanisms
 from simulator.mechanisms.bombs import BernoulliBombRefresher, BombConfig
 from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, OuterGoldConfig, OuterGoldGenerator
 from simulator.mechanisms.maps import SpawnConfig
-from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig, sample_action
+from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.opponents import OpponentSpec
 from training.rl import (
     BatchRolloutSampler,
@@ -105,6 +105,8 @@ def _small_model() -> GoldRushPolicyNetwork:
             scalar_hidden=(16, 16),
             actor_hidden=32,
             critic_hidden=(32, 16),
+            decoder_hidden=16,
+            decoder_embedding=4,
         )
     )
 
@@ -113,8 +115,7 @@ def _batch_from_model(model: GoldRushPolicyNetwork) -> PpoBatch:
     transitions: list[PpoTransition] = []
     spatial, scalars = _feature_tensors(batch_size=4)
     with torch.no_grad():
-        output = model(spatial, scalars)
-        action = sample_action(output)
+        action = model.act(spatial, scalars)
     rewards = (1.0, -1.0, 0.5, -0.5)
     for idx, reward in enumerate(rewards):
         transitions.append(

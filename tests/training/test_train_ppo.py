@@ -8,12 +8,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import torch
+
 from simulator.config import EpisodeConfig, RulesConfig
 from training.models import PolicyNetworkConfig
 from training.rl import EvaluationCase, PpoConfig
 from training.rl import MultiprocessRolloutConfig
 from training.scripts.train_ppo import (
     TrainPpoConfig,
+    _same_role_reverse_fraction,
     load_checkpoint,
     opponent_spec_from_name,
     run_training,
@@ -21,6 +24,14 @@ from training.scripts.train_ppo import (
 
 
 class TrainPpoTests(unittest.TestCase):
+    def test_same_role_reverse_fraction_excludes_role_boundary(self) -> None:
+        actions = torch.tensor([[0, 1, 3, 2, 3, 4]])
+        k = torch.tensor([3])
+
+        result = _same_role_reverse_fraction(actions, k)
+
+        self.assertEqual(result, 0.5)
+
     def test_smoke_training_writes_metrics_and_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _smoke_config(output_dir=Path(tmpdir))
@@ -136,6 +147,10 @@ class TrainPpoTests(unittest.TestCase):
                 "--critic-hidden",
                 "32",
                 "16",
+                "--decoder-hidden",
+                "16",
+                "--decoder-embedding",
+                "4",
                 "--ppo-minibatch-size",
                 "2",
                 "--ppo-update-epochs",
@@ -190,6 +205,8 @@ def _small_model_config() -> PolicyNetworkConfig:
         scalar_hidden=(16, 16),
         actor_hidden=32,
         critic_hidden=(32, 16),
+        decoder_hidden=16,
+        decoder_embedding=4,
     )
 
 
@@ -209,6 +226,10 @@ def _diagnostic_keys() -> tuple[str, ...]:
         "k_fraction_6",
         "order_fraction_0",
         "order_fraction_1",
+        "ko_fraction_0",
+        "ko_fraction_13",
+        "k_edge_fraction",
+        "same_role_reverse_fraction",
         "vp_fraction_0",
         "vp_fraction_2",
         "vp_nonzero_fraction",

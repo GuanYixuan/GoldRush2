@@ -13,10 +13,9 @@ from simulator.errors import SimulatorRuleError
 from simulator.types import GameOutput
 from training.models import (
     GoldRushPolicyNetwork,
-    PolicyNetworkOutput,
+    PolicyEvaluation,
     policy_action_to_game_output,
-    policy_output_is_finite,
-    sample_action,
+    policy_action_is_finite,
 )
 from training.opponents import OpponentSpec
 
@@ -40,15 +39,7 @@ class PpoConfig:
     normalize_advantage: bool = True
 
 
-@dataclass(frozen=True)
-class PpoEvaluation:
-    logprob: Tensor
-    value: Tensor
-    normalized_entropy: Tensor
-    action_entropy: Tensor
-    k_entropy: Tensor
-    order_entropy: Tensor
-    vp_entropy: Tensor
+PpoEvaluation = PolicyEvaluation
 
 
 @dataclass(frozen=True)
@@ -125,8 +116,14 @@ def collect_ppo_rollouts(
 
 
 def evaluate_actions(model: GoldRushPolicyNetwork, batch: PpoBatch | PpoMiniBatch) -> PpoEvaluation:
-    output = model(batch.spatial_planes, batch.scalars)
-    return _evaluate_policy_output(output, actions=batch.actions, k=batch.k, order=batch.order, vp=batch.vp)
+    return model.evaluate_actions(
+        batch.spatial_planes,
+        batch.scalars,
+        batch.actions,
+        batch.k,
+        batch.order,
+        batch.vp,
+    )
 
 
 def ppo_update(
@@ -255,10 +252,9 @@ def _collect_one_ppo_episode(
         spatial_planes = torch.as_tensor(features["planes"], dtype=torch.float32, device=device).unsqueeze(0)
         scalars = torch.as_tensor(features["scalars"], dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
-            output = model(spatial_planes, scalars)
-            if not policy_output_is_finite(output):
+            policy_action = model.act(spatial_planes, scalars)
+            if not policy_action_is_finite(policy_action):
                 raise SimulatorRuleError("PPO rollout model produced NaN or Inf")
-            policy_action = sample_action(output)
         game_output = policy_action_to_game_output(policy_action)
         extractor.commit_action(game_output)
         step = env.step(game_output)
@@ -284,47 +280,6 @@ def _collect_one_ppo_episode(
         observation = step.observation
 
     return int(reset.info["map_id"]), reset.info["opponent_spec"]
-
-
-def _evaluate_policy_output(
-    output: PolicyNetworkOutput,
-    *,
-    actions: Tensor,
-    k: Tensor,
-    order: Tensor,
-    vp: Tensor,
-) -> PpoEvaluation:
-    action_logprob = _logprob(output.action_logits, actions).sum(dim=1)
-    k_logprob = _logprob(output.k_logits, k)
-    order_logprob = _logprob(output.order_logits, order)
-    vp_logprob = _logprob(output.vp_logits, vp)
-
-    action_entropy = _normalized_entropy(output.action_logits, torch.log(torch.tensor(5.0, device=output.action_logits.device))).mean(dim=1)
-    k_entropy = _normalized_entropy(output.k_logits, torch.log(torch.tensor(7.0, device=output.k_logits.device)))
-    order_entropy = _normalized_entropy(output.order_logits, torch.log(torch.tensor(2.0, device=output.order_logits.device)))
-    vp_entropy = _normalized_entropy(output.vp_logits, torch.log(torch.tensor(3.0, device=output.vp_logits.device)))
-    normalized_entropy = 0.0100 * action_entropy + 0.0030 * k_entropy + 0.0010 * order_entropy + 0.0003 * vp_entropy
-
-    return PpoEvaluation(
-        logprob=action_logprob + k_logprob + order_logprob + vp_logprob,
-        value=output.value,
-        normalized_entropy=normalized_entropy,
-        action_entropy=action_entropy,
-        k_entropy=k_entropy,
-        order_entropy=order_entropy,
-        vp_entropy=vp_entropy,
-    )
-
-
-def _logprob(logits: Tensor, values: Tensor) -> Tensor:
-    log_probabilities = F.log_softmax(logits, dim=-1)
-    return log_probabilities.gather(dim=-1, index=values.unsqueeze(-1)).squeeze(-1)
-
-
-def _normalized_entropy(logits: Tensor, denominator: Tensor) -> Tensor:
-    probabilities = torch.softmax(logits, dim=-1)
-    log_probabilities = F.log_softmax(logits, dim=-1)
-    return -(probabilities * log_probabilities).sum(dim=-1) / denominator
 
 
 def _validate_config(config: PpoConfig) -> None:
