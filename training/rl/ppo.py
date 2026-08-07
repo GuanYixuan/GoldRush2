@@ -284,6 +284,8 @@ def _collect_one_ppo_episode(
             PpoTransition(
                 spatial_planes=spatial_planes.squeeze(0).detach().cpu(),
                 scalars=scalars.squeeze(0).detach().cpu(),
+                critic_planes=spatial_planes.squeeze(0).detach().cpu(),
+                critic_scalars=scalars.squeeze(0).detach().cpu(),
                 actions=policy_action.actions.squeeze(0).detach().cpu(),
                 k=policy_action.k.squeeze(0).detach().cpu(),
                 order=policy_action.order.squeeze(0).detach().cpu(),

@@ -14,6 +14,8 @@ from simulator.errors import SimulatorRuleError
 class PpoTransition:
     spatial_planes: Tensor
     scalars: Tensor
+    critic_planes: Tensor
+    critic_scalars: Tensor
     actions: Tensor
     k: Tensor
     order: Tensor
@@ -33,6 +35,8 @@ class PpoTransition:
 class PpoMiniBatch:
     spatial_planes: Tensor
     scalars: Tensor
+    critic_planes: Tensor
+    critic_scalars: Tensor
     actions: Tensor
     k: Tensor
     order: Tensor
@@ -51,6 +55,8 @@ class PpoMiniBatch:
 class PpoBatch:
     spatial_planes: Tensor
     scalars: Tensor
+    critic_planes: Tensor
+    critic_scalars: Tensor
     actions: Tensor
     k: Tensor
     order: Tensor
@@ -76,6 +82,8 @@ class PpoBatch:
         return PpoBatch(
             spatial_planes=torch.stack([transition.spatial_planes.float() for transition in transitions]),
             scalars=torch.stack([transition.scalars.float() for transition in transitions]),
+            critic_planes=torch.stack([transition.critic_planes.float() for transition in transitions]),
+            critic_scalars=torch.stack([transition.critic_scalars.float() for transition in transitions]),
             actions=torch.stack([transition.actions.long() for transition in transitions]),
             k=torch.stack([transition.k.long().reshape(()) for transition in transitions]),
             order=torch.stack([transition.order.long().reshape(()) for transition in transitions]),
@@ -96,6 +104,8 @@ class PpoBatch:
         *,
         spatial_planes: Any,
         scalars: Any,
+        critic_planes: Any,
+        critic_scalars: Any,
         actions: Any,
         k: Any,
         order: Any,
@@ -113,6 +123,8 @@ class PpoBatch:
         batch = PpoBatch(
             spatial_planes=torch.as_tensor(spatial_planes, dtype=torch.float32),
             scalars=torch.as_tensor(scalars, dtype=torch.float32),
+            critic_planes=torch.as_tensor(critic_planes, dtype=torch.float32),
+            critic_scalars=torch.as_tensor(critic_scalars, dtype=torch.float32),
             actions=torch.as_tensor(actions, dtype=torch.long),
             k=torch.as_tensor(k, dtype=torch.long),
             order=torch.as_tensor(order, dtype=torch.long),
@@ -195,6 +207,8 @@ class PpoBatch:
             self,
             spatial_planes=self.spatial_planes.to(device),
             scalars=self.scalars.to(device),
+            critic_planes=self.critic_planes.to(device),
+            critic_scalars=self.critic_scalars.to(device),
             actions=self.actions.to(device),
             k=self.k.to(device),
             order=self.order.to(device),
@@ -215,6 +229,8 @@ class PpoBatch:
         return PpoMiniBatch(
             spatial_planes=self.spatial_planes[indices],
             scalars=self.scalars[indices],
+            critic_planes=self.critic_planes[indices],
+            critic_scalars=self.critic_scalars[indices],
             actions=self.actions[indices],
             k=self.k[indices],
             order=self.order[indices],
@@ -232,6 +248,10 @@ def _validate_transitions(transitions: list[PpoTransition] | tuple[PpoTransition
             raise ValueError(f"transition {idx} spatial_planes must have shape 38x17x17")
         if tuple(transition.scalars.shape) != (10,):
             raise ValueError(f"transition {idx} scalars must have shape 10")
+        if transition.critic_planes.ndim != 3 or tuple(transition.critic_planes.shape[1:]) != (17, 17):
+            raise ValueError(f"transition {idx} critic_planes must have shape Cx17x17")
+        if transition.critic_scalars.ndim != 1:
+            raise ValueError(f"transition {idx} critic_scalars must have shape S")
         if tuple(transition.actions.shape) != (6,):
             raise ValueError(f"transition {idx} actions must have shape 6")
         if transition.agent_player_id not in (1, 2):
@@ -246,6 +266,10 @@ def _validate_batch_arrays(batch: PpoBatch) -> None:
         raise ValueError(f"spatial_planes must have shape Nx38x17x17, got {tuple(batch.spatial_planes.shape)}")
     if tuple(batch.scalars.shape) != (transition_count, 10):
         raise ValueError(f"scalars must have shape Nx10, got {tuple(batch.scalars.shape)}")
+    if batch.critic_planes.ndim != 4 or tuple(batch.critic_planes.shape[2:]) != (17, 17) or batch.critic_planes.shape[0] != transition_count:
+        raise ValueError(f"critic_planes must have shape NxCx17x17, got {tuple(batch.critic_planes.shape)}")
+    if batch.critic_scalars.ndim != 2 or batch.critic_scalars.shape[0] != transition_count:
+        raise ValueError(f"critic_scalars must have shape NxS, got {tuple(batch.critic_scalars.shape)}")
     if tuple(batch.actions.shape) != (transition_count, 6):
         raise ValueError(f"actions must have shape Nx6, got {tuple(batch.actions.shape)}")
     for name, tensor in (

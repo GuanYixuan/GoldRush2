@@ -122,6 +122,8 @@ def _batch_from_model(model: GoldRushPolicyNetwork) -> PpoBatch:
             PpoTransition(
                 spatial_planes=spatial[idx],
                 scalars=scalars[idx],
+                critic_planes=spatial[idx],
+                critic_scalars=scalars[idx],
                 actions=action.actions[idx],
                 k=action.k[idx],
                 order=action.order[idx],
