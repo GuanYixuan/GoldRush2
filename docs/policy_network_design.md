@@ -22,11 +22,11 @@ vp: B，取值 0..2
 logprob/value/entropy diagnostics: B
 ```
 
-网络不维护 observation memory，不访问 replay/full-state privileged 信息，不模拟敌方或 NPC 行动，也不执行金币、炸弹和终局结算。
+网络不维护 observation memory，不访问 replay/full-state privileged 信息，不模拟敌方或 NPC 行动，也不执行金币、炸弹和终局结算。当前 critic 虽然已与 actor 参数分离，但仍使用同一份 feature v1 输入；privileged critic 属于后续结构升级。
 
-## Backbone
+## Encoder
 
-当前默认结构：
+actor 和 critic 使用两套参数独立的 encoder。两套 encoder 结构相同，输入也相同，但不共享任何可训练参数：
 
 ```text
 Stem:
@@ -51,14 +51,16 @@ Backbone:
 
 SE residual block 不使用 normalization。FiLM 最后一层零初始化；residual branch 第二个卷积使用小 gain；SE gate 最后一层零初始化。默认激活为 SiLU，ReLU 只保留为部署实验配置。
 
-Backbone 输出 `H: B x 96 x 17 x 17`。actor 使用全局 average/max pooling 和两个己方角色初始位置处的 feature gather：
+actor encoder 输出 `H_actor: B x 96 x 17 x 17`。actor 使用全局 average/max pooling 和两个己方角色初始位置处的 feature gather：
 
 ```text
 actor_context = MLP(concat(avg, max, unit0_local, unit1_local))
 actor_hidden = 256
 ```
 
-critic 只使用 `concat(avg, max)`，经 `256,128` MLP 输出标量 value，不依赖采样动作或 decoder hidden。
+critic encoder 输出 `H_critic: B x 96 x 17 x 17`。critic 只使用 `concat(avg, max)`，经 `256,128` MLP 输出标量 value，不依赖采样动作、actor local gather 或 decoder hidden。
+
+PPO 中 `policy_loss` 和 entropy 只更新 actor encoder、actor heads、embedding 和 decoder；`value_loss` 只更新 critic encoder 和 `critic_mlp`。启动时会 fail-fast 检查 actor/critic 参数集合不重叠且覆盖全部模型参数。
 
 ## 动作概率模型
 
@@ -140,7 +142,7 @@ evaluate_actions(
 ) -> PolicyEvaluation
 ```
 
-`act()` 采样或逐步 argmax `ko/vp/actions`。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder。两者共用 encoder、执行表、位置转移和 mask。
+`act()` 采样或逐步 argmax `ko/vp/actions`，并同时通过 critic encoder 输出 value。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder，并用 critic encoder 重算 value。actor 路径与 critic 路径只共用输入 feature、执行表、位置转移和 mask 规则，不共享可训练参数。
 
 `forward()` 是部署友好的 deterministic `act()` 包装，不用于 PPO 更新。
 
@@ -201,8 +203,9 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - GRU input weight 使用 Xavier，hidden weight 使用 orthogonal，bias 为 0。
 - embedding 使用小正态初始化。
 - value 输出层使用小初始化，使初始 value 接近 0。
+- BC 训练只优化 actor 参数。PPO 从 BC checkpoint 初始化时，只加载 actor 路径；critic encoder 显式拷贝 actor encoder 初值，critic head 保持随机初始化。
 
-旧 factorized checkpoint 不兼容当前动作头。主线不维护隐式部分加载；需要迁移 backbone/value 时必须使用显式转换实验并记录缺失字段。
+旧 factorized checkpoint 和旧 shared-encoder PPO checkpoint 不兼容当前模型。主线不维护隐式部分加载；需要迁移 actor 或 critic 时必须使用显式转换实验并记录缺失字段。
 
 ## 部署与验证
 

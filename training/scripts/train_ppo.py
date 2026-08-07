@@ -429,16 +429,43 @@ def _load_init_model_checkpoint(
 
     current = model.state_dict()
     loaded = checkpoint["model_state_dict"]
-    filtered = {
-        key: value
-        for key, value in loaded.items()
-        if key in current and not key.startswith("critic_mlp.")
-    }
-    missing = sorted(key for key in current if key not in filtered and not key.startswith("critic_mlp."))
+    filtered = _actor_init_state_from_bc(current, loaded)
+    missing = sorted(
+        key
+        for key in current
+        if _is_actor_state_key(key) and key not in filtered
+    )
     if missing:
-        raise SimulatorRuleError(f"BC checkpoint missing non-critic model keys: {missing[:5]}")
+        raise SimulatorRuleError(f"BC checkpoint missing actor model keys: {missing[:5]}")
     current.update(filtered)
     model.load_state_dict(current)
+    model.copy_actor_encoder_to_critic()
+
+
+def _actor_init_state_from_bc(
+    current: dict[str, torch.Tensor],
+    loaded: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    filtered: dict[str, torch.Tensor] = {}
+    for key, value in loaded.items():
+        mapped_key = _map_bc_actor_key(key)
+        if mapped_key is not None and mapped_key in current:
+            filtered[mapped_key] = value
+    return filtered
+
+
+def _map_bc_actor_key(key: str) -> str | None:
+    if key.startswith("critic_encoder.") or key.startswith("critic_mlp."):
+        return None
+    if key.startswith("actor_encoder."):
+        return key
+    if key.startswith("stem.") or key.startswith("scalar_tower.") or key.startswith("blocks."):
+        return f"actor_encoder.{key}"
+    return key
+
+
+def _is_actor_state_key(key: str) -> bool:
+    return not (key.startswith("critic_encoder.") or key.startswith("critic_mlp."))
 
 
 def _model_config_from_checkpoint(checkpoint: dict[str, Any]) -> PolicyNetworkConfig:

@@ -46,15 +46,26 @@ class PolicyNetworkTests(unittest.TestCase):
     def test_initialization_preserves_feature_and_vp_priors(self) -> None:
         model = _small_model()
 
-        film_last = model.scalar_tower[-1]
-        self.assertEqual(torch.count_nonzero(film_last.weight).item(), 0)
-        self.assertEqual(torch.count_nonzero(film_last.bias).item(), 0)
-        for block in model.blocks:
-            self.assertEqual(torch.count_nonzero(block.se_fc2.weight).item(), 0)
-            self.assertEqual(torch.count_nonzero(block.se_fc2.bias).item(), 0)
+        for encoder in (model.actor_encoder, model.critic_encoder):
+            film_last = encoder.scalar_tower[-1]
+            self.assertEqual(torch.count_nonzero(film_last.weight).item(), 0)
+            self.assertEqual(torch.count_nonzero(film_last.bias).item(), 0)
+            for block in encoder.blocks:
+                self.assertEqual(torch.count_nonzero(block.se_fc2.weight).item(), 0)
+                self.assertEqual(torch.count_nonzero(block.se_fc2.bias).item(), 0)
 
         vp_prior = torch.softmax(model.vp_head.bias.detach(), dim=0)
         self.assertTrue(torch.allclose(vp_prior, torch.tensor([0.90, 0.07, 0.03]), atol=1e-6))
+
+    def test_actor_and_critic_parameters_are_disjoint(self) -> None:
+        model = _small_model()
+
+        actor_ids = {id(parameter) for parameter in model.actor_parameters()}
+        critic_ids = {id(parameter) for parameter in model.critic_parameters()}
+        all_ids = {id(parameter) for parameter in model.parameters()}
+
+        self.assertFalse(actor_ids & critic_ids)
+        self.assertEqual(actor_ids | critic_ids, all_ids)
 
     def test_execution_tables_cover_all_ko_values(self) -> None:
         model = _small_model()

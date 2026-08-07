@@ -70,7 +70,7 @@ def run_bc_training(config: TrainBcConfig) -> TrainBcResult:
 
     device = torch.device(config.device)
     model = GoldRushPolicyNetwork(config.model).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, eps=config.adam_eps)
+    optimizer = torch.optim.Adam(model.actor_parameters(), lr=config.learning_rate, eps=config.adam_eps)
     metrics: list[dict[str, Any]] = []
     metrics_path = output_dir / "metrics.jsonl"
 

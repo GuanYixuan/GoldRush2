@@ -10,6 +10,7 @@
 - env 默认 reward 是终局 `WinLossReward`：非终局 `0`，agent 胜 `+1`，agent 负 `-1`。PPO v1 主线应显式使用 `TerminalWinPlusMarginPotentialReward`，默认 `beta=0.2`；smoke/debug 可设 `beta=0` 退化为纯终局胜负 reward。
 - 同分判定按“agent 慢、opponent 快”的 P90 假设处理，避免交换 P1/P2 时引入固定玩家 ID 偏置。
 - PPO v1 只支持完整 episode rollout，GAE terminal bootstrap 固定为 `0`；暂不支持 rollout chunk bootstrap。rollout 支持默认 serial collector 和可选 multiprocess collector。
+- 当前 `GoldRushPolicyNetwork` 使用 actor/critic 参数分离。`ppo_update()` 中 policy/entropy 梯度只作用于 actor 路径，value 梯度只作用于 critic 路径；critic 暂时仍吃 feature v1，而非 privileged state。
 
 ## 主要入口
 

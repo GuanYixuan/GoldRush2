@@ -82,7 +82,18 @@ class PolicyBcEvaluation:
 class _EncodedState:
     spatial_features: Tensor
     actor_context: Tensor
-    value: Tensor
+    known_obstacles: Tensor
+    unit0_position: Tensor
+    unit1_position: Tensor
+
+
+@dataclass(frozen=True)
+class _EncoderOutput:
+    spatial_features: Tensor
+    avg: Tensor
+    max_pool: Tensor
+    unit0: Tensor
+    unit1: Tensor
     known_obstacles: Tensor
     unit0_position: Tensor
     unit1_position: Tensor
@@ -139,6 +150,59 @@ class AutoregressiveGRUCell(nn.Module):
         return candidate + update * (hidden - candidate)
 
 
+class GoldRushFeatureEncoder(nn.Module):
+    def __init__(self, config: PolicyNetworkConfig) -> None:
+        super().__init__()
+        width = config.width
+        activation = config.activation
+        self.stem = nn.Sequential(
+            nn.Conv2d(config.spatial_channels, width, kernel_size=3, padding=1),
+            _activation(activation),
+            nn.Conv2d(width, width, kernel_size=3, padding=1),
+            _activation(activation),
+        )
+
+        scalar_layers: list[nn.Module] = []
+        input_dim = config.scalar_features
+        for hidden_dim in config.scalar_hidden:
+            scalar_layers.extend((nn.Linear(input_dim, hidden_dim), _activation(activation)))
+            input_dim = hidden_dim
+        scalar_layers.append(nn.Linear(input_dim, width * 2))
+        self.scalar_tower = nn.Sequential(*scalar_layers)
+
+        self.blocks = nn.ModuleList(
+            SEResidualBlock(width, config.se_reduction, activation)
+            for _ in range(config.residual_blocks)
+        )
+
+    def forward(self, spatial_planes: Tensor, scalars: Tensor) -> _EncoderOutput:
+        h = self.stem(spatial_planes)
+        film = self.scalar_tower(scalars)
+        gamma, beta = film.chunk(2, dim=1)
+        h = h * (1.0 + gamma[:, :, None, None]) + beta[:, :, None, None]
+        for block in self.blocks:
+            h = block(h)
+
+        avg = h.mean(dim=(-2, -1))
+        max_pool = h.amax(dim=(-2, -1))
+        unit0 = _gather_unit(h, spatial_planes[:, OWN_UNIT0_CHANNEL])
+        unit1 = _gather_unit(h, spatial_planes[:, OWN_UNIT1_CHANNEL])
+        known_obstacles = (
+            (spatial_planes[:, OBSTACLE_KNOWN_CHANNEL] > 0.5)
+            & (spatial_planes[:, OBSTACLE_CHANNEL] > 0.5)
+        ).flatten(1)
+        return _EncoderOutput(
+            spatial_features=h,
+            avg=avg,
+            max_pool=max_pool,
+            unit0=unit0,
+            unit1=unit1,
+            known_obstacles=known_obstacles,
+            unit0_position=spatial_planes[:, OWN_UNIT0_CHANNEL].flatten(1).argmax(dim=1),
+            unit1_position=spatial_planes[:, OWN_UNIT1_CHANNEL].flatten(1).argmax(dim=1),
+        )
+
+
 class GoldRushPolicyNetwork(nn.Module):
     def __init__(self, config: PolicyNetworkConfig | None = None) -> None:
         super().__init__()
@@ -148,25 +212,8 @@ class GoldRushPolicyNetwork(nn.Module):
         width = self.config.width
         activation = self.config.activation
         embedding = self.config.decoder_embedding
-        self.stem = nn.Sequential(
-            nn.Conv2d(self.config.spatial_channels, width, kernel_size=3, padding=1),
-            _activation(activation),
-            nn.Conv2d(width, width, kernel_size=3, padding=1),
-            _activation(activation),
-        )
-
-        scalar_layers: list[nn.Module] = []
-        input_dim = self.config.scalar_features
-        for hidden_dim in self.config.scalar_hidden:
-            scalar_layers.extend((nn.Linear(input_dim, hidden_dim), _activation(activation)))
-            input_dim = hidden_dim
-        scalar_layers.append(nn.Linear(input_dim, width * 2))
-        self.scalar_tower = nn.Sequential(*scalar_layers)
-
-        self.blocks = nn.ModuleList(
-            SEResidualBlock(width, self.config.se_reduction, activation)
-            for _ in range(self.config.residual_blocks)
-        )
+        self.actor_encoder = GoldRushFeatureEncoder(self.config)
+        self.critic_encoder = GoldRushFeatureEncoder(self.config)
 
         self.actor_mlp = nn.Sequential(
             nn.Linear(width * 4, self.config.actor_hidden),
@@ -209,17 +256,8 @@ class GoldRushPolicyNetwork(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-        film_last = self.scalar_tower[-1]
-        if not isinstance(film_last, nn.Linear):
-            raise TypeError("scalar_tower final module must be nn.Linear")
-        nn.init.zeros_(film_last.weight)
-        nn.init.zeros_(film_last.bias)
-
-        for block in self.blocks:
-            nn.init.orthogonal_(block.conv2.weight, gain=0.1)
-            nn.init.zeros_(block.conv2.bias)
-            nn.init.zeros_(block.se_fc2.weight)
-            nn.init.zeros_(block.se_fc2.bias)
+        self._reset_encoder_specials(self.actor_encoder)
+        self._reset_encoder_specials(self.critic_encoder)
 
         nn.init.xavier_uniform_(self.decoder.input_linear.weight)
         nn.init.orthogonal_(self.decoder.hidden_linear.weight)
@@ -239,11 +277,51 @@ class GoldRushPolicyNetwork(nn.Module):
         nn.init.normal_(value_head.weight, mean=0.0, std=0.01)
         nn.init.zeros_(value_head.bias)
 
+    @staticmethod
+    def _reset_encoder_specials(encoder: GoldRushFeatureEncoder) -> None:
+        film_last = encoder.scalar_tower[-1]
+        if not isinstance(film_last, nn.Linear):
+            raise TypeError("scalar_tower final module must be nn.Linear")
+        nn.init.zeros_(film_last.weight)
+        nn.init.zeros_(film_last.bias)
+
+        for block in encoder.blocks:
+            nn.init.orthogonal_(block.conv2.weight, gain=0.1)
+            nn.init.zeros_(block.conv2.bias)
+            nn.init.zeros_(block.se_fc2.weight)
+            nn.init.zeros_(block.se_fc2.bias)
+
+    def actor_parameters(self) -> tuple[nn.Parameter, ...]:
+        modules = (
+            self.actor_encoder,
+            self.actor_mlp,
+            self.ko_head,
+            self.vp_head,
+            self.ko_embedding,
+            self.role_embedding,
+            self.previous_action_embedding,
+            self.step_embedding,
+            self.decoder_initial,
+            self.decoder,
+            self.decoder_action_head,
+        )
+        return tuple(parameter for module in modules for parameter in module.parameters())
+
+    def critic_parameters(self) -> tuple[nn.Parameter, ...]:
+        return tuple(self.critic_encoder.parameters()) + tuple(self.critic_mlp.parameters())
+
+    def copy_actor_encoder_to_critic(self) -> None:
+        self.critic_encoder.load_state_dict(self.actor_encoder.state_dict())
+
     def forward(self, spatial_planes: Tensor, scalars: Tensor) -> PolicyAction:
         return self.act(spatial_planes, scalars, deterministic=True)
 
     def act(self, spatial_planes: Tensor, scalars: Tensor, *, deterministic: bool = False) -> PolicyAction:
-        encoded = self._encode(spatial_planes, scalars)
+        self._validate_inputs(spatial_planes, scalars)
+        spatial_planes = spatial_planes.float()
+        scalars = scalars.float()
+        encoded = self._encode_actor(spatial_planes, scalars)
+        value = self._critic_value(spatial_planes, scalars)
         ko_logits = self.ko_head(encoded.actor_context)
         vp_logits = self.vp_head(encoded.actor_context)
         ko, ko_logprob = _select_logits(ko_logits, deterministic=deterministic)
@@ -258,7 +336,7 @@ class GoldRushPolicyNetwork(nn.Module):
             order=torch.remainder(ko, 2),
             vp=vp,
             logprob=ko_logprob + vp_logprob + decoded.logprob,
-            value=encoded.value,
+            value=value,
             normalized_entropy=0.0100 * decoded.entropy + 0.0040 * ko_entropy + 0.0003 * vp_entropy,
             action_entropy=decoded.entropy,
             ko_entropy=ko_entropy,
@@ -294,7 +372,11 @@ class GoldRushPolicyNetwork(nn.Module):
         vp: Tensor,
     ) -> PolicyBcEvaluation:
         self._validate_action_inputs(spatial_planes, actions, k, order, vp)
-        encoded = self._encode(spatial_planes, scalars)
+        self._validate_inputs(spatial_planes, scalars)
+        spatial_planes = spatial_planes.float()
+        scalars = scalars.float()
+        encoded = self._encode_actor(spatial_planes, scalars)
+        value = self._critic_value(spatial_planes, scalars)
         ko = 2 * k.long() + order.long()
         ko_logits = self.ko_head(encoded.actor_context)
         vp_logits = self.vp_head(encoded.actor_context)
@@ -310,7 +392,7 @@ class GoldRushPolicyNetwork(nn.Module):
             ko_logprob=ko_logprob,
             action_logprob=decoded.logprob,
             vp_logprob=vp_logprob,
-            value=encoded.value,
+            value=value,
             normalized_entropy=0.0100 * decoded.entropy + 0.0040 * ko_entropy + 0.0003 * vp_entropy,
             action_entropy=decoded.entropy,
             ko_entropy=ko_entropy,
@@ -321,31 +403,24 @@ class GoldRushPolicyNetwork(nn.Module):
         self._validate_inputs(spatial_planes, scalars)
         spatial_planes = spatial_planes.float()
         scalars = scalars.float()
+        return self._encode_actor(spatial_planes, scalars)
 
-        h = self.stem(spatial_planes)
-        film = self.scalar_tower(scalars)
-        gamma, beta = film.chunk(2, dim=1)
-        h = h * (1.0 + gamma[:, :, None, None]) + beta[:, :, None, None]
-        for block in self.blocks:
-            h = block(h)
-
-        avg = h.mean(dim=(-2, -1))
-        max_pool = h.amax(dim=(-2, -1))
-        unit0 = _gather_unit(h, spatial_planes[:, OWN_UNIT0_CHANNEL])
-        unit1 = _gather_unit(h, spatial_planes[:, OWN_UNIT1_CHANNEL])
-        actor_context = self.actor_mlp(torch.cat((avg, max_pool, unit0, unit1), dim=1))
-        known_obstacles = (
-            (spatial_planes[:, OBSTACLE_KNOWN_CHANNEL] > 0.5)
-            & (spatial_planes[:, OBSTACLE_CHANNEL] > 0.5)
-        ).flatten(1)
-        return _EncodedState(
-            spatial_features=h,
-            actor_context=actor_context,
-            value=self.critic_mlp(torch.cat((avg, max_pool), dim=1)).squeeze(-1),
-            known_obstacles=known_obstacles,
-            unit0_position=spatial_planes[:, OWN_UNIT0_CHANNEL].flatten(1).argmax(dim=1),
-            unit1_position=spatial_planes[:, OWN_UNIT1_CHANNEL].flatten(1).argmax(dim=1),
+    def _encode_actor(self, spatial_planes: Tensor, scalars: Tensor) -> _EncodedState:
+        encoded = self.actor_encoder(spatial_planes, scalars)
+        actor_context = self.actor_mlp(
+            torch.cat((encoded.avg, encoded.max_pool, encoded.unit0, encoded.unit1), dim=1)
         )
+        return _EncodedState(
+            spatial_features=encoded.spatial_features,
+            actor_context=actor_context,
+            known_obstacles=encoded.known_obstacles,
+            unit0_position=encoded.unit0_position,
+            unit1_position=encoded.unit1_position,
+        )
+
+    def _critic_value(self, spatial_planes: Tensor, scalars: Tensor) -> Tensor:
+        encoded = self.critic_encoder(spatial_planes, scalars)
+        return self.critic_mlp(torch.cat((encoded.avg, encoded.max_pool), dim=1)).squeeze(-1)
 
     def _decode(
         self,

@@ -134,6 +134,7 @@ def ppo_update(
 ) -> PpoUpdateStats:
     config = PpoConfig() if config is None else config
     _validate_config(config)
+    _validate_actor_critic_parameter_split(model)
     batch.require_gae()
 
     policy_losses: list[float] = []
@@ -171,11 +172,15 @@ def ppo_update(
             )
             value_loss = torch.maximum(unclipped_value_loss, clipped_value_loss).mean()
             entropy_bonus = evaluation.normalized_entropy.mean()
-            loss = policy_loss + config.value_coef * value_loss - entropy_bonus
+            actor_loss = policy_loss - entropy_bonus
+            critic_loss = config.value_coef * value_loss
+            loss = actor_loss + critic_loss
 
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+            actor_loss.backward()
+            critic_loss.backward()
+            actor_grad_norm = nn.utils.clip_grad_norm_(model.actor_parameters(), config.max_grad_norm)
+            critic_grad_norm = nn.utils.clip_grad_norm_(model.critic_parameters(), config.max_grad_norm)
             optimizer.step()
 
             with torch.no_grad():
@@ -188,7 +193,12 @@ def ppo_update(
             losses.append(float(loss.detach().cpu().item()))
             kls.append(float(approx_joint_kl.detach().cpu().item()))
             clip_fractions.append(float(clip_fraction.detach().cpu().item()))
-            grad_norms.append(float(torch.as_tensor(grad_norm).detach().cpu().item()))
+            grad_norms.append(
+                max(
+                    float(torch.as_tensor(actor_grad_norm).detach().cpu().item()),
+                    float(torch.as_tensor(critic_grad_norm).detach().cpu().item()),
+                )
+            )
 
             if config.target_joint_kl is not None and float(approx_joint_kl.item()) > config.target_joint_kl:
                 early_stopped = True
@@ -218,6 +228,18 @@ def explained_variance(values: Tensor, returns: Tensor | None) -> float:
         return 0.0
     residual_var = torch.var(returns - values, unbiased=False)
     return float((1.0 - residual_var / returns_var).detach().cpu().item())
+
+
+def _validate_actor_critic_parameter_split(model: GoldRushPolicyNetwork) -> None:
+    actor_ids = {id(parameter) for parameter in model.actor_parameters()}
+    critic_ids = {id(parameter) for parameter in model.critic_parameters()}
+    overlap = actor_ids & critic_ids
+    if overlap:
+        raise SimulatorRuleError(f"actor and critic parameters overlap: {len(overlap)}")
+    all_ids = {id(parameter) for parameter in model.parameters()}
+    missing = all_ids - actor_ids - critic_ids
+    if missing:
+        raise SimulatorRuleError(f"model parameters missing from actor/critic split: {len(missing)}")
 
 
 def _collect_one_ppo_episode(
