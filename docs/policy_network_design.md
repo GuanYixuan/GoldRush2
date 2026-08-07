@@ -1,6 +1,6 @@
 # Policy Network 设计
 
-本文冻结当前训练与部署共享的网络结构和动作概率语义。Feature 输入见 `docs/feature_extractor_design.md`，PPO 栈见 `docs/rl_architecture.md`，游戏动作规则以 `gamerules/gamerules.md` 为准。
+本文冻结当前训练与部署共享的网络结构和动作概率语义。Actor feature 输入见 `docs/features/actor_feature_v1.md`，PPO 栈见 `docs/rl_architecture.md`，游戏动作规则以 `gamerules/gamerules.md` 为准。
 
 ## 定位
 

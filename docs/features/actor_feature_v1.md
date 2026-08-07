@@ -1,10 +1,10 @@
-# Feature Extractor v1 设计
+# Actor Feature v1 设计
 
-本文冻结 GoldRush2.0 初版 feature extractor 的网络输入语义。v1 按 CNN 主线设计，只输出 spatial planes 与 scalars，不引入 tokens。RL 栈总览见 `docs/rl_architecture.md`，运行时工程入口见 `policy_runtime/README.md`。
+本文冻结 GoldRush2.0 actor 可提交路径的网络输入语义。v1 按 CNN 主线设计，只输出 spatial planes 与 scalars，不引入 tokens。feature 总览见 `docs/features/README.md`，RL 栈总览见 `docs/rl_architecture.md`，运行时工程入口见 `policy_runtime/README.md`。
 
 ## 定位
 
-feature extractor 属于 `policy_runtime/`，由 C++ 单实现承担，Python 训练侧通过 binding 调用同一套状态机。它负责把官方形状 `GameInput` 转换为网络输入，同时维护 agent 自身在部分可观测环境中的记忆。
+actor feature extractor 属于 `policy_runtime/`，由 C++ 单实现承担，Python 训练侧通过 binding 调用同一套状态机。它负责把官方形状 `GameInput` 转换为 actor 网络输入，同时维护 agent 自身在部分可观测环境中的记忆。
 
 它不负责：
 
