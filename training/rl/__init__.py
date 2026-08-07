@@ -5,6 +5,12 @@ from .eval import EvaluationCase, EvaluationConfig, EvaluationResult, Evaluation
 from .multiprocess_rollout import MultiprocessRolloutConfig, MultiprocessRolloutPool, collect_multiprocess_ppo_rollouts
 from .ppo import PpoConfig, PpoEvaluation, PpoUpdateStats, collect_ppo_rollouts, evaluate_actions, ppo_update
 from .ppo_buffer import PpoBatch, PpoMiniBatch, PpoTransition
+from .privileged_critic_features import (
+    extract_privileged_critic_features,
+    privileged_critic_channel_names,
+    privileged_critic_feature_schema,
+    privileged_critic_scalar_names,
+)
 from .rewards import TerminalWinPlusMarginPotentialReward, WinLossReward
 from .rollout import EpisodeBatch, Trajectory, Transition
 from .runtime_policy import RuntimeAwarePolicy, RuntimePolicyWrapper
@@ -40,5 +46,9 @@ __all__ = [
     "collect_ppo_rollouts",
     "evaluate_actions",
     "evaluate_policy",
+    "extract_privileged_critic_features",
+    "privileged_critic_channel_names",
+    "privileged_critic_feature_schema",
+    "privileged_critic_scalar_names",
     "ppo_update",
 ]
