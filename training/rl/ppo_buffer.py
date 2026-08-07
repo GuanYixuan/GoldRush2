@@ -10,6 +10,14 @@ from torch import Tensor
 from simulator.errors import SimulatorRuleError
 
 
+ACTOR_SPATIAL_CHANNELS = 38
+ACTOR_SCALAR_FEATURES = 10
+CRITIC_SPATIAL_CHANNELS = 26
+CRITIC_SCALAR_FEATURES = 17
+GRID_SIZE = 17
+MOVE_BUDGET = 6
+
+
 @dataclass(frozen=True)
 class PpoTransition:
     spatial_planes: Tensor
@@ -244,15 +252,15 @@ class PpoBatch:
 
 def _validate_transitions(transitions: list[PpoTransition] | tuple[PpoTransition, ...]) -> None:
     for idx, transition in enumerate(transitions):
-        if tuple(transition.spatial_planes.shape) != (38, 17, 17):
+        if tuple(transition.spatial_planes.shape) != (ACTOR_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
             raise ValueError(f"transition {idx} spatial_planes must have shape 38x17x17")
-        if tuple(transition.scalars.shape) != (10,):
+        if tuple(transition.scalars.shape) != (ACTOR_SCALAR_FEATURES,):
             raise ValueError(f"transition {idx} scalars must have shape 10")
-        if transition.critic_planes.ndim != 3 or tuple(transition.critic_planes.shape[1:]) != (17, 17):
-            raise ValueError(f"transition {idx} critic_planes must have shape Cx17x17")
-        if transition.critic_scalars.ndim != 1:
-            raise ValueError(f"transition {idx} critic_scalars must have shape S")
-        if tuple(transition.actions.shape) != (6,):
+        if tuple(transition.critic_planes.shape) != (CRITIC_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
+            raise ValueError(f"transition {idx} critic_planes must have shape 26x17x17")
+        if tuple(transition.critic_scalars.shape) != (CRITIC_SCALAR_FEATURES,):
+            raise ValueError(f"transition {idx} critic_scalars must have shape 17")
+        if tuple(transition.actions.shape) != (MOVE_BUDGET,):
             raise ValueError(f"transition {idx} actions must have shape 6")
         if transition.agent_player_id not in (1, 2):
             raise ValueError(f"transition {idx} agent_player_id must be 1 or 2")
@@ -262,15 +270,15 @@ def _validate_batch_arrays(batch: PpoBatch) -> None:
     transition_count = int(batch.rewards.shape[0])
     if transition_count <= 0:
         raise SimulatorRuleError("PpoBatch requires at least one transition")
-    if tuple(batch.spatial_planes.shape) != (transition_count, 38, 17, 17):
+    if tuple(batch.spatial_planes.shape) != (transition_count, ACTOR_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
         raise ValueError(f"spatial_planes must have shape Nx38x17x17, got {tuple(batch.spatial_planes.shape)}")
-    if tuple(batch.scalars.shape) != (transition_count, 10):
+    if tuple(batch.scalars.shape) != (transition_count, ACTOR_SCALAR_FEATURES):
         raise ValueError(f"scalars must have shape Nx10, got {tuple(batch.scalars.shape)}")
-    if batch.critic_planes.ndim != 4 or tuple(batch.critic_planes.shape[2:]) != (17, 17) or batch.critic_planes.shape[0] != transition_count:
-        raise ValueError(f"critic_planes must have shape NxCx17x17, got {tuple(batch.critic_planes.shape)}")
-    if batch.critic_scalars.ndim != 2 or batch.critic_scalars.shape[0] != transition_count:
-        raise ValueError(f"critic_scalars must have shape NxS, got {tuple(batch.critic_scalars.shape)}")
-    if tuple(batch.actions.shape) != (transition_count, 6):
+    if tuple(batch.critic_planes.shape) != (transition_count, CRITIC_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
+        raise ValueError(f"critic_planes must have shape Nx26x17x17, got {tuple(batch.critic_planes.shape)}")
+    if tuple(batch.critic_scalars.shape) != (transition_count, CRITIC_SCALAR_FEATURES):
+        raise ValueError(f"critic_scalars must have shape Nx17, got {tuple(batch.critic_scalars.shape)}")
+    if tuple(batch.actions.shape) != (transition_count, MOVE_BUDGET):
         raise ValueError(f"actions must have shape Nx6, got {tuple(batch.actions.shape)}")
     for name, tensor in (
         ("k", batch.k),

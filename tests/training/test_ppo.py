@@ -93,6 +93,8 @@ class PpoTests(unittest.TestCase):
         self.assertEqual(batch.episode_ids[0], "pair-000000-seed-5-first")
         self.assertEqual(batch.episode_ids[1], "pair-000000-seed-5-second")
         self.assertEqual(tuple(batch.spatial_planes.shape), (2, 38, 17, 17))
+        self.assertEqual(tuple(batch.critic_planes.shape), (2, 26, 17, 17))
+        self.assertEqual(tuple(batch.critic_scalars.shape), (2, 17))
         self.assertEqual(stats.update_count, 1)
 
 
@@ -114,6 +116,8 @@ def _small_model() -> GoldRushPolicyNetwork:
 def _batch_from_model(model: GoldRushPolicyNetwork) -> PpoBatch:
     transitions: list[PpoTransition] = []
     spatial, scalars = _feature_tensors(batch_size=4)
+    critic_spatial = torch.zeros(4, 26, 17, 17)
+    critic_scalars = torch.zeros(4, 17)
     with torch.no_grad():
         action = model.act(spatial, scalars)
     rewards = (1.0, -1.0, 0.5, -0.5)
@@ -122,8 +126,8 @@ def _batch_from_model(model: GoldRushPolicyNetwork) -> PpoBatch:
             PpoTransition(
                 spatial_planes=spatial[idx],
                 scalars=scalars[idx],
-                critic_planes=spatial[idx],
-                critic_scalars=scalars[idx],
+                critic_planes=critic_spatial[idx],
+                critic_scalars=critic_scalars[idx],
                 actions=action.actions[idx],
                 k=action.k[idx],
                 order=action.order[idx],

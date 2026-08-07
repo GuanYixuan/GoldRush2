@@ -21,6 +21,7 @@ from training.opponents import OpponentSpec
 
 from .env import SingleAgentGoldRushEnv
 from .ppo_buffer import PpoBatch, PpoMiniBatch, PpoTransition
+from .privileged_critic_features import extract_privileged_critic_features
 from .sampler import BatchRolloutSampler
 
 
@@ -273,6 +274,9 @@ def _collect_one_ppo_episode(
             raise SimulatorRuleError(f"unexpected feature schema: {features['feature_schema']!r}")
         spatial_planes = torch.as_tensor(features["planes"], dtype=torch.float32, device=device).unsqueeze(0)
         scalars = torch.as_tensor(features["scalars"], dtype=torch.float32, device=device).unsqueeze(0)
+        critic_features = _extract_critic_features(env, agent_player_id)
+        critic_planes = torch.as_tensor(critic_features["planes"], dtype=torch.float32, device=device).unsqueeze(0)
+        critic_scalars = torch.as_tensor(critic_features["scalars"], dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
             policy_action = model.act(spatial_planes, scalars)
             if not policy_action_is_finite(policy_action):
@@ -284,8 +288,8 @@ def _collect_one_ppo_episode(
             PpoTransition(
                 spatial_planes=spatial_planes.squeeze(0).detach().cpu(),
                 scalars=scalars.squeeze(0).detach().cpu(),
-                critic_planes=spatial_planes.squeeze(0).detach().cpu(),
-                critic_scalars=scalars.squeeze(0).detach().cpu(),
+                critic_planes=critic_planes.squeeze(0).detach().cpu(),
+                critic_scalars=critic_scalars.squeeze(0).detach().cpu(),
                 actions=policy_action.actions.squeeze(0).detach().cpu(),
                 k=policy_action.k.squeeze(0).detach().cpu(),
                 order=policy_action.order.squeeze(0).detach().cpu(),
@@ -304,6 +308,20 @@ def _collect_one_ppo_episode(
         observation = step.observation
 
     return int(reset.info["map_id"]), reset.info["opponent_spec"]
+
+
+def _extract_critic_features(env: SingleAgentGoldRushEnv, agent_player_id: int) -> dict[str, object]:
+    if env.round_env is None:
+        raise SimulatorRuleError("single-agent env has no round_env while extracting critic features")
+    if env.round_env.state is None or env.round_env.template is None or env.round_env.outer_state is None:
+        raise SimulatorRuleError("round_env missing state/template/outer_state while extracting critic features")
+    return extract_privileged_critic_features(
+        state=env.round_env.state,
+        template=env.round_env.template,
+        outer_state=env.round_env.outer_state,
+        agent_player_id=agent_player_id,
+        round_count=env.round_env.config.episode.rules.round_count,
+    )
 
 
 def _validate_config(config: PpoConfig) -> None:
