@@ -14,6 +14,7 @@ from ..mechanisms.maps import MapPool, MapTemplate, SpawnConfig, build_initial_s
 from ..mechanisms.npc import M4aNpcPolicy, NpcEpisodeProfile
 from ..observation.sdk import GameInput, make_game_inputs
 from ..replay import SimulatorReplayRecorder
+from ..randomness import make_simulator_rng_streams
 from ..rules.scoring import GameResult, determine_winner
 from ..rules.snapshot import SnapshotAccumulator
 from ..rules.transition import TransitionResult, apply_gold_generation, transition_started_round
@@ -84,6 +85,10 @@ class RoundStepEnv:
         self.p90_latency_ns = p90_latency_ns
 
         self.rng = random.Random()
+        self.npc_rng = random.Random()
+        self.bomb_rng = random.Random()
+        self.center_gold_rng = random.Random()
+        self.outer_gold_rng = random.Random()
         self.template: MapTemplate | None = None
         self.state: GameState | None = None
         self.snapshot_accumulator: SnapshotAccumulator | None = None
@@ -103,13 +108,18 @@ class RoundStepEnv:
             episode = replace(episode, map_id=map_id)
         self.config = replace(self.config, episode=episode)
 
-        self.rng = random.Random(episode.seed)
+        rng_streams = make_simulator_rng_streams(episode.seed)
+        self.rng = rng_streams.environment
+        self.npc_rng = rng_streams.npc
+        self.bomb_rng = rng_streams.bomb
+        self.center_gold_rng = rng_streams.center_gold
+        self.outer_gold_rng = rng_streams.outer_gold
         self.template = _select_map(self.map_pool, episode.map_id, self.rng)
         self.state = build_initial_state(self.template, self.spawn)
         self.snapshot_accumulator = SnapshotAccumulator(episode.rules)
         self.visible_snapshot = None
-        self.outer_state = self.mechanisms.outer_gold.initial_state(self.rng, self.state.round_index)
-        self.npc_profile = self.mechanisms.npc_policy.sample_profile(self.state, self.rng)
+        self.outer_state = self.mechanisms.outer_gold.initial_state(self.outer_gold_rng, self.state.round_index)
+        self.npc_profile = self.mechanisms.npc_policy.sample_profile(self.state, self.npc_rng)
         self.recorder = (
             SimulatorReplayRecorder(
                 map_template=self.template,
@@ -144,9 +154,15 @@ class RoundStepEnv:
         assert self.pending_bomb_refresh_event is not None
         round_index = self.state.round_index
         round_start_state = copy.deepcopy(self.state) if self.recorder is not None else None
-        npc_order = self.mechanisms.npc_policy.sample_order(self.state, self.rng)
+        npc_order = self.mechanisms.npc_policy.sample_order(self.state, self.npc_rng)
         decision_state = self.state if isinstance(self.mechanisms.npc_policy, M4aNpcPolicy) else copy.deepcopy(self.state)
-        npc_actions = self.mechanisms.npc_policy.decide_all(decision_state, self.template, npc_order, self.rng, self.npc_profile)
+        npc_actions = self.mechanisms.npc_policy.decide_all(
+            decision_state,
+            self.template,
+            npc_order,
+            self.npc_rng,
+            self.npc_profile,
+        )
 
         transition_result = transition_started_round(
             self.state,
@@ -202,8 +218,15 @@ class RoundStepEnv:
         assert self.state is not None
         assert self.template is not None
         assert self.outer_state is not None
-        self.pending_bomb_refresh_event = self.mechanisms.bomb_refresher.refresh(self.state, self.rng)
-        self.pending_gold_generated = _generate_gold(self.state, self.template, self.outer_state, self.mechanisms, self.rng)
+        self.pending_bomb_refresh_event = self.mechanisms.bomb_refresher.refresh(self.state, self.bomb_rng)
+        self.pending_gold_generated = _generate_gold(
+            self.state,
+            self.template,
+            self.outer_state,
+            self.mechanisms,
+            self.center_gold_rng,
+            self.outer_gold_rng,
+        )
         apply_gold_generation(self.state, self.pending_gold_generated)
 
     def _observations(self) -> dict[int, GameInput]:
@@ -226,15 +249,16 @@ def _generate_gold(
     template: MapTemplate,
     outer_state: OuterGoldState,
     mechanisms: RoundStepMechanisms,
-    rng: random.Random,
+    center_gold_rng: random.Random,
+    outer_gold_rng: random.Random,
 ) -> tuple[GoldGenerationEvent, ...]:
-    center_events = mechanisms.center_gold.generate(state, template, rng)
+    center_events = mechanisms.center_gold.generate(state, template, center_gold_rng)
     _validate_gold_generation_events(state, center_events)
     outer_events = mechanisms.outer_gold.generate(
         state,
         template,
         outer_state,
-        rng,
+        outer_gold_rng,
     )
     return center_events + outer_events
 

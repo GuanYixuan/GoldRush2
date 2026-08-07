@@ -16,6 +16,7 @@ from ..mechanisms.maps import MapPool, MapTemplate, SpawnConfig, build_initial_s
 from ..mechanisms.npc import M4aNpcPolicy
 from ..observation.sdk import GameInput, make_game_input
 from ..replay import SimulatorReplayRecorder
+from ..randomness import make_simulator_rng_streams
 from ..rules.scoring import GameResult, determine_winner
 from ..rules.snapshot import SnapshotAccumulator
 from ..rules.transition import TransitionResult, apply_gold_generation, transition_started_round
@@ -92,13 +93,14 @@ def run_duel(
 ) -> DuelRunResult:
     config = DuelConfig() if config is None else config
     mechanisms = DuelMechanisms() if mechanisms is None else mechanisms
-    rng = random.Random(config.episode.seed)
+    rng_streams = make_simulator_rng_streams(config.episode.seed)
+    rng = rng_streams.environment
     template = _select_map(map_pool or built_in_public_map_pool(), config.episode.map_id, rng)
     state = build_initial_state(template, spawn)
     snapshot_accumulator = SnapshotAccumulator(config.episode.rules)
     visible_snapshot: Snapshot | None = None
-    outer_state = mechanisms.outer_gold.initial_state(rng, state.round_index)
-    npc_profile = mechanisms.npc_policy.sample_profile(state, rng)
+    outer_state = mechanisms.outer_gold.initial_state(rng_streams.outer_gold, state.round_index)
+    npc_profile = mechanisms.npc_policy.sample_profile(state, rng_streams.npc)
     recorder = (
         SimulatorReplayRecorder(
             map_template=template,
@@ -115,8 +117,15 @@ def run_duel(
     traces: list[RoundTrace] = []
 
     for _ in range(config.episode.rules.round_count):
-        bomb_event = mechanisms.bomb_refresher.refresh(state, rng)
-        gold_generated = _generate_gold(state, template, outer_state, mechanisms, rng)
+        bomb_event = mechanisms.bomb_refresher.refresh(state, rng_streams.bomb)
+        gold_generated = _generate_gold(
+            state,
+            template,
+            outer_state,
+            mechanisms,
+            rng_streams.center_gold,
+            rng_streams.outer_gold,
+        )
         apply_gold_generation(state, gold_generated)
 
         round_index = state.round_index
@@ -125,9 +134,9 @@ def run_duel(
         for player_id, latency_ns in policy_latency.items():
             latencies[player_id].append(latency_ns)
         first_player_id = _first_player_id(config, policy_latency, rng)
-        npc_order = mechanisms.npc_policy.sample_order(state, rng)
+        npc_order = mechanisms.npc_policy.sample_order(state, rng_streams.npc)
         decision_state = state if isinstance(mechanisms.npc_policy, M4aNpcPolicy) else copy.deepcopy(state)
-        npc_actions = mechanisms.npc_policy.decide_all(decision_state, template, npc_order, rng, npc_profile)
+        npc_actions = mechanisms.npc_policy.decide_all(decision_state, template, npc_order, rng_streams.npc, npc_profile)
 
         transition_result = transition_started_round(
             state,
@@ -189,15 +198,16 @@ def _generate_gold(
     template: MapTemplate,
     outer_state: OuterGoldState,
     mechanisms: DuelMechanisms,
-    rng: random.Random,
+    center_gold_rng: random.Random,
+    outer_gold_rng: random.Random,
 ) -> tuple[GoldGenerationEvent, ...]:
-    center_events = mechanisms.center_gold.generate(state, template, rng)
+    center_events = mechanisms.center_gold.generate(state, template, center_gold_rng)
     _validate_gold_generation_events(state, center_events)
     outer_events = mechanisms.outer_gold.generate(
         state,
         template,
         outer_state,
-        rng,
+        outer_gold_rng,
     )
     return center_events + outer_events
 

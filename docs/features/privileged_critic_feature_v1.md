@@ -211,8 +211,8 @@ actor_planes/scalars -> GoldRushActorFeatureEncoder -> action/logprob/entropy
 
 PPO buffer 应同时保存 actor feature 和 critic feature。policy loss 只读取 actor feature；value loss 只读取 critic feature。
 
-## 待冻结事项
+## 已冻结的 Simulator 约束
 
-- critic plane 的最终完整名称、顺序和缩放。
-- simulator 侧 `OuterGoldState` 是否已显式保存 `next_static2_region`，并保证它与 `next_static2_round` 同时预采样。
-- 是否包含 terminal/未来不可用信息；原则上只能使用 action-time state，不能使用本回合执行后的结果。
+- `OuterGoldState` 显式保存 `next_static2_round` 与 `next_static2_region`；二者在 reset 和每次 high batch 结束后同时预采样、同时更新。
+- outer gold、center gold、bomb 与 NPC 使用独立的命名随机流。static2 schedule 的预采样不得扰动中心金币、炸弹或 NPC 的随机序列。
+- critic 只能使用本回合开始资源生成完成后的 action-time state；不得读取 terminal 结果、本回合执行后的状态或未来实际生成结果。

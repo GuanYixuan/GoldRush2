@@ -169,10 +169,15 @@ class CenterGoldGenerator:
 @dataclass
 class OuterGoldState:
     next_static2_round: int
+    next_static2_region: int
 
     def __post_init__(self) -> None:
         if self.next_static2_round < 0:
             raise SimulatorRuleError(f"next_static2_round must be non-negative, got {self.next_static2_round}")
+        if self.next_static2_region not in OUTER_REGIONS:
+            raise SimulatorRuleError(
+                f"next_static2_region must be one of {OUTER_REGIONS}, got {self.next_static2_region}"
+            )
 
 
 @dataclass(frozen=True)
@@ -200,7 +205,10 @@ class OuterGoldGenerator:
     def initial_state(self, rng: random.Random, round_index: int = 0) -> OuterGoldState:
         if round_index < 0:
             raise SimulatorRuleError(f"round_index must be non-negative, got {round_index}")
-        return OuterGoldState(round_index + _sample_weighted(self.config.first_round_offset_weights, rng))
+        return OuterGoldState(
+            next_static2_round=round_index + _sample_weighted(self.config.first_round_offset_weights, rng),
+            next_static2_region=_sample_weighted(self.config.region_weights, rng),
+        )
 
     def generate(
         self,
@@ -216,17 +224,23 @@ class OuterGoldGenerator:
                 f"outer gold state missed scheduled static2 round {outer_state.next_static2_round}; current round is {state.round_index}"
             )
 
-        events = self._generate_static2_batch(state, template, rng)
-        outer_state.next_static2_round = state.round_index + _sample_weighted(self.config.gap_weights, rng)
+        events = self._generate_static2_batch(state, template, outer_state.next_static2_region, rng)
+        self._schedule_next(outer_state, state.round_index, rng)
         return events
+
+    def _schedule_next(self, outer_state: OuterGoldState, round_index: int, rng: random.Random) -> None:
+        next_round = round_index + _sample_weighted(self.config.gap_weights, rng)
+        next_region = _sample_weighted(self.config.region_weights, rng)
+        outer_state.next_static2_round = next_round
+        outer_state.next_static2_region = next_region
 
     def _generate_static2_batch(
         self,
         state: GameState,
         template: MapTemplate,
+        high_region: int,
         rng: random.Random,
     ) -> tuple[GoldGenerationEvent, ...]:
-        high_region = _sample_weighted(self.config.region_weights, rng)
         static2_cells = _generation_available_cells(
             outer_static2_candidate_cells(template, high_region),
             state,
