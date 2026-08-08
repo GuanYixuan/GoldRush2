@@ -37,11 +37,18 @@ class PolicyNetworkTests(unittest.TestCase):
     def test_input_shape_validation_fails_fast(self) -> None:
         model = _small_model()
         spatial, scalars = _feature_tensors(batch_size=1)
+        critic_spatial, critic_scalars = _critic_feature_tensors(batch_size=1)
 
         with self.assertRaisesRegex(ValueError, "spatial_planes must have shape"):
-            model.act(spatial[:, :37], scalars)
+            model.act_actor_only(spatial[:, :37], scalars)
         with self.assertRaisesRegex(ValueError, "scalars must have 10 features"):
-            model.act(spatial, scalars[:, :9])
+            model.act_actor_only(spatial, scalars[:, :9])
+        with self.assertRaisesRegex(ValueError, "critic_planes must have shape"):
+            model.act(spatial, scalars, critic_spatial[:, :25], critic_scalars)
+        with self.assertRaisesRegex(ValueError, "critic_scalars must have 17 features"):
+            model.act(spatial, scalars, critic_spatial, critic_scalars[:, :16])
+        with self.assertRaisesRegex(ValueError, "actor/critic batch size mismatch"):
+            model.act(spatial, scalars, *_critic_feature_tensors(batch_size=2))
 
     def test_initialization_preserves_feature_and_vp_priors(self) -> None:
         model = _small_model()
@@ -84,7 +91,9 @@ class PolicyNetworkTests(unittest.TestCase):
 
     def test_sample_action_returns_valid_game_output_and_stats(self) -> None:
         model = _small_model()
-        action = model.act(*_feature_tensors(batch_size=4))
+        spatial, scalars = _feature_tensors(batch_size=4)
+        critic_spatial, critic_scalars = _critic_feature_tensors(batch_size=4)
+        action = model.act(spatial, scalars, critic_spatial, critic_scalars)
         game_output = policy_action_to_game_output(action, batch_index=0)
 
         self.assertIsInstance(game_output, GameOutput)
@@ -96,10 +105,11 @@ class PolicyNetworkTests(unittest.TestCase):
 
     def test_deterministic_action_is_repeatable(self) -> None:
         model = _small_model()
-        features = _feature_tensors(batch_size=2)
+        spatial, scalars = _feature_tensors(batch_size=2)
+        critic_spatial, critic_scalars = _critic_feature_tensors(batch_size=2)
 
-        first = model.act(*features, deterministic=True)
-        second = model.act(*features, deterministic=True)
+        first = model.act(spatial, scalars, critic_spatial, critic_scalars, deterministic=True)
+        second = model.act(spatial, scalars, critic_spatial, critic_scalars, deterministic=True)
 
         self.assertTrue(torch.equal(first.actions, second.actions))
         self.assertTrue(torch.equal(first.k, second.k))
@@ -109,15 +119,63 @@ class PolicyNetworkTests(unittest.TestCase):
     def test_teacher_forcing_exactly_recomputes_sampled_logprob(self) -> None:
         model = _small_model()
         spatial, scalars = _feature_tensors(batch_size=8)
+        critic_spatial, critic_scalars = _critic_feature_tensors(batch_size=8)
         with torch.no_grad():
-            action = model.act(spatial, scalars)
+            action = model.act(spatial, scalars, critic_spatial, critic_scalars)
             evaluation = model.evaluate_actions(
-                spatial, scalars, action.actions, action.k, action.order, action.vp
+                spatial,
+                scalars,
+                critic_spatial,
+                critic_scalars,
+                action.actions,
+                action.k,
+                action.order,
+                action.vp,
             )
 
         self.assertTrue(torch.allclose(action.logprob, evaluation.logprob, atol=1e-6, rtol=1e-6))
         self.assertTrue(torch.allclose(action.value, evaluation.value, atol=1e-7, rtol=1e-7))
         self.assertTrue(torch.allclose(action.normalized_entropy, evaluation.normalized_entropy, atol=1e-6))
+
+    def test_actor_and_critic_inputs_are_isolated(self) -> None:
+        model = _small_model()
+        spatial, scalars = _feature_tensors(batch_size=2)
+        critic_spatial, critic_scalars = _critic_feature_tensors(batch_size=2)
+        changed_actor = spatial.clone()
+        changed_actor[:, 0] = 1.0
+        changed_critic = critic_spatial.clone()
+        changed_critic[:, 0] = 2.0
+
+        with torch.no_grad():
+            base = model.act(spatial, scalars, critic_spatial, critic_scalars, deterministic=True)
+            critic_changed = model.act(spatial, scalars, changed_critic, critic_scalars, deterministic=True)
+            actor_changed_eval = model.evaluate_actions(
+                changed_actor,
+                scalars,
+                critic_spatial,
+                critic_scalars,
+                base.actions,
+                base.k,
+                base.order,
+                base.vp,
+            )
+            base_eval = model.evaluate_actions(
+                spatial,
+                scalars,
+                critic_spatial,
+                critic_scalars,
+                base.actions,
+                base.k,
+                base.order,
+                base.vp,
+            )
+
+        self.assertTrue(torch.equal(base.actions, critic_changed.actions))
+        self.assertTrue(torch.equal(base.k, critic_changed.k))
+        self.assertTrue(torch.equal(base.order, critic_changed.order))
+        self.assertTrue(torch.equal(base.vp, critic_changed.vp))
+        self.assertTrue(torch.allclose(base.logprob, critic_changed.logprob, atol=1e-7, rtol=1e-7))
+        self.assertTrue(torch.allclose(base_eval.value, actor_changed_eval.value, atol=1e-7, rtol=1e-7))
 
     def test_movement_mask_blocks_boundaries_obstacles_and_other_unit(self) -> None:
         model = _small_model()
@@ -217,6 +275,7 @@ class PolicyNetworkTests(unittest.TestCase):
             model.evaluate_actions(
                 spatial,
                 scalars,
+                *_critic_feature_tensors(batch_size=1),
                 actions,
                 torch.tensor([6]),
                 torch.tensor([0]),
@@ -248,7 +307,7 @@ class PolicyNetworkTests(unittest.TestCase):
         spatial[:, 20, 1, 0] = 1.0
         spatial[:, 21, 1, 0] = 1.0
 
-        action = model.act(spatial, scalars)
+        action = model.act(spatial, scalars, *_critic_feature_tensors(batch_size=64))
 
         for batch_index in range(64):
             _positions, invalid = _reference_move(
@@ -270,7 +329,7 @@ class PolicyNetworkTests(unittest.TestCase):
         def bad_act(_spatial, _scalars, *, deterministic=False):
             raise ValueError("injected model failure")
 
-        model.act = bad_act  # type: ignore[method-assign]
+        model.act_actor_only = bad_act  # type: ignore[method-assign]
         policy = TorchFeaturePolicy(model)
 
         output = policy(_feature_dict())
@@ -317,6 +376,18 @@ def _feature_tensors(
     scalars = torch.zeros(batch_size, 10)
     spatial[:, 24, unit0[0], unit0[1]] = 1.0
     spatial[:, 25, unit1[0], unit1[1]] = 1.0
+    return spatial, scalars
+
+
+def _critic_feature_tensors(
+    *, batch_size: int, unit0: tuple[int, int] = (1, 1), unit1: tuple[int, int] = (15, 15)
+) -> tuple[torch.Tensor, torch.Tensor]:
+    spatial = torch.zeros(batch_size, 26, 17, 17)
+    scalars = torch.zeros(batch_size, 17)
+    spatial[:, 9, unit0[0], unit0[1]] = 1.0
+    spatial[:, 10, unit1[0], unit1[1]] = 1.0
+    spatial[:, 11, 2, 14] = 1.0
+    spatial[:, 12, 14, 2] = 1.0
     return spatial, scalars
 
 

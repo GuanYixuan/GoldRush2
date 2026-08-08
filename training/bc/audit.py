@@ -112,7 +112,7 @@ def _audit_mask_compatibility(
         for start in range(0, limit, batch_size):
             end = min(limit, start + batch_size)
             try:
-                model.evaluate_actions(
+                model.evaluate_bc_actions(
                     shard["planes"][start:end].to(device),
                     shard["scalars"][start:end].to(device),
                     shard["actions"][start:end].to(device),
@@ -123,7 +123,7 @@ def _audit_mask_compatibility(
             except ValueError:
                 for idx in range(start, end):
                     try:
-                        model.evaluate_actions(
+                        model.evaluate_bc_actions(
                             shard["planes"][idx : idx + 1].to(device),
                             shard["scalars"][idx : idx + 1].to(device),
                             shard["actions"][idx : idx + 1].to(device),

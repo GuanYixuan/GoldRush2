@@ -120,6 +120,8 @@ def evaluate_actions(model: GoldRushPolicyNetwork, batch: PpoBatch | PpoMiniBatc
     return model.evaluate_actions(
         batch.spatial_planes,
         batch.scalars,
+        batch.critic_planes,
+        batch.critic_scalars,
         batch.actions,
         batch.k,
         batch.order,
@@ -278,7 +280,7 @@ def _collect_one_ppo_episode(
         critic_planes = torch.as_tensor(critic_features["planes"], dtype=torch.float32, device=device).unsqueeze(0)
         critic_scalars = torch.as_tensor(critic_features["scalars"], dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
-            policy_action = model.act(spatial_planes, scalars)
+            policy_action = model.act(spatial_planes, scalars, critic_planes, critic_scalars)
             if not policy_action_is_finite(policy_action):
                 raise SimulatorRuleError("PPO rollout model produced NaN or Inf")
         game_output = policy_action_to_game_output(policy_action)

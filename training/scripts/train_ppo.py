@@ -423,8 +423,8 @@ def _load_init_model_checkpoint(
     raw_model_config = checkpoint.get("model_config")
     if raw_model_config is None:
         raise SimulatorRuleError("BC checkpoint missing model_config")
-    expected_config = asdict(model.config)
-    if dict(raw_model_config) != expected_config:
+    expected_config = _actor_init_config(model.config)
+    if _actor_init_config(raw_model_config) != expected_config:
         raise SimulatorRuleError("BC checkpoint model_config does not match PPO model config")
 
     current = model.state_dict()
@@ -439,7 +439,26 @@ def _load_init_model_checkpoint(
         raise SimulatorRuleError(f"BC checkpoint missing actor model keys: {missing[:5]}")
     current.update(filtered)
     model.load_state_dict(current)
-    model.copy_actor_encoder_to_critic()
+
+
+def _actor_init_config(config: PolicyNetworkConfig | dict[str, Any]) -> dict[str, Any]:
+    raw = asdict(config) if isinstance(config, PolicyNetworkConfig) else dict(config)
+    aliases = {
+        "actor_spatial_channels": raw.get("actor_spatial_channels", raw.get("spatial_channels")),
+        "actor_scalar_features": raw.get("actor_scalar_features", raw.get("scalar_features")),
+    }
+    return {
+        "actor_spatial_channels": aliases["actor_spatial_channels"],
+        "actor_scalar_features": aliases["actor_scalar_features"],
+        "width": raw.get("width"),
+        "residual_blocks": raw.get("residual_blocks"),
+        "se_reduction": raw.get("se_reduction"),
+        "scalar_hidden": tuple(raw.get("scalar_hidden", ())),
+        "actor_hidden": raw.get("actor_hidden"),
+        "decoder_hidden": raw.get("decoder_hidden"),
+        "decoder_embedding": raw.get("decoder_embedding"),
+        "activation": raw.get("activation"),
+    }
 
 
 def _actor_init_state_from_bc(

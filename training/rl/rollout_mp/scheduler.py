@@ -212,10 +212,16 @@ def run_inference_batch(
     feature_slots = [request.feature_slot for request in requests]
     spatial = torch.as_tensor(np.asarray(feature_shared.actor_planes[feature_slots]), dtype=torch.float32, device=device)
     scalars = torch.as_tensor(np.asarray(feature_shared.actor_scalars[feature_slots]), dtype=torch.float32, device=device)
+    critic_spatial = torch.as_tensor(
+        np.asarray(feature_shared.critic_planes[feature_slots]), dtype=torch.float32, device=device
+    )
+    critic_scalars = torch.as_tensor(
+        np.asarray(feature_shared.critic_scalars[feature_slots]), dtype=torch.float32, device=device
+    )
     stack_ns = time.perf_counter_ns() - stack_start
     model_sample_start = time.perf_counter_ns()
     with torch.no_grad():
-        action = model.act(spatial, scalars)
+        action = model.act(spatial, scalars, critic_spatial, critic_scalars)
         if not policy_action_is_finite(action):
             raise SimulatorRuleError("multiprocess rollout model produced NaN or Inf")
     sync(device)
