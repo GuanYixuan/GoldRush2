@@ -46,8 +46,10 @@ class TrainPpoConfig:
     beta_win: float = 1.0
     beta_margin: float = 0.2
     beta_gold_gain: float = 0.0
+    beta_net_gold_gain: float = 0.1
     margin_scale: float = 500.0
     gold_gain_scale: float = 100.0
+    net_gold_gain_scale: float = 50.0
     learning_rate: float = 2.0e-4
     adam_eps: float = 1.0e-5
     rollout_mode: str = "serial"
@@ -121,8 +123,10 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "beta_win": config.beta_win,
                 "beta_margin": config.beta_margin,
                 "beta_gold_gain": config.beta_gold_gain,
+                "beta_net_gold_gain": config.beta_net_gold_gain,
                 "margin_scale": config.margin_scale,
                 "gold_gain_scale": config.gold_gain_scale,
+                "net_gold_gain_scale": config.net_gold_gain_scale,
                 "policy_loss": stats.policy_loss,
                 "value_loss": stats.value_loss,
                 "entropy_bonus": stats.entropy_bonus,
@@ -227,8 +231,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--beta-win", type=float, default=1.0)
     parser.add_argument("--beta-margin", type=float, default=0.2)
     parser.add_argument("--beta-gold-gain", type=float, default=0.0)
+    parser.add_argument("--beta-net-gold-gain", type=float, default=0.1)
     parser.add_argument("--margin-scale", type=float, default=500.0)
     parser.add_argument("--gold-gain-scale", type=float, default=100.0)
+    parser.add_argument("--net-gold-gain-scale", type=float, default=50.0)
     parser.add_argument("--learning-rate", type=float, default=2.0e-4)
     parser.add_argument("--adam-eps", type=float, default=1.0e-5)
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
@@ -289,8 +295,10 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         beta_win=float(args.beta_win),
         beta_margin=float(args.beta_margin),
         beta_gold_gain=float(args.beta_gold_gain),
+        beta_net_gold_gain=float(args.beta_net_gold_gain),
         margin_scale=float(args.margin_scale),
         gold_gain_scale=float(args.gold_gain_scale),
+        net_gold_gain_scale=float(args.net_gold_gain_scale),
         learning_rate=float(args.learning_rate),
         adam_eps=float(args.adam_eps),
         rollout_mode=str(args.rollout_mode),
@@ -319,8 +327,10 @@ def _sampler(config: TrainPpoConfig) -> BatchRolloutSampler:
             beta_win=config.beta_win,
             beta_margin=config.beta_margin,
             beta_gold_gain=config.beta_gold_gain,
+            beta_net_gold_gain=config.beta_net_gold_gain,
             margin_scale=config.margin_scale,
             gold_gain_scale=config.gold_gain_scale,
+            net_gold_gain_scale=config.net_gold_gain_scale,
             gamma=config.ppo.gamma,
         ),
     )
@@ -648,6 +658,9 @@ def _reward_component_diagnostics(infos: tuple[dict[str, Any], ...]) -> dict[str
             "reward_gold_gain_mean": 0.0,
             "reward_clipped_gold_gain_mean": 0.0,
             "reward_gold_gain_reward_mean": 0.0,
+            "reward_net_gold_gain_mean": 0.0,
+            "reward_clipped_net_gold_gain_mean": 0.0,
+            "reward_net_gold_gain_reward_mean": 0.0,
             "reward_component_total_mean": 0.0,
         }
     return {
@@ -658,6 +671,9 @@ def _reward_component_diagnostics(infos: tuple[dict[str, Any], ...]) -> dict[str
         "reward_gold_gain_mean": _component_mean(components, "gold_gain"),
         "reward_clipped_gold_gain_mean": _component_mean(components, "clipped_gold_gain"),
         "reward_gold_gain_reward_mean": _component_mean(components, "gold_gain_reward"),
+        "reward_net_gold_gain_mean": _component_mean(components, "net_gold_gain"),
+        "reward_clipped_net_gold_gain_mean": _component_mean(components, "clipped_net_gold_gain"),
+        "reward_net_gold_gain_reward_mean": _component_mean(components, "net_gold_gain_reward"),
         "reward_component_total_mean": _component_mean(components, "total"),
     }
 

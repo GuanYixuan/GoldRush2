@@ -17,7 +17,7 @@ from training.rl import BatchRolloutSampler, SingleAgentEnvConfig, SingleAgentGo
 
 class RewardTests(unittest.TestCase):
     def test_default_dense_terms_disabled_matches_terminal_win_loss_reward(self) -> None:
-        reward = TerminalWinMarginGoldGainReward(beta_margin=0.0, beta_gold_gain=0.0)
+        reward = TerminalWinMarginGoldGainReward(beta_margin=0.0, beta_gold_gain=0.0, beta_net_gold_gain=0.0)
         reward.reset(_state(p1_gold=0, p2_gold=0), agent_player_id=1)
 
         non_terminal = reward(_result(_state(p1_gold=500, p2_gold=0)), agent_player_id=1)
@@ -30,7 +30,7 @@ class RewardTests(unittest.TestCase):
         self.assertEqual(terminal, 1.0)
 
     def test_margin_increase_produces_positive_potential_reward(self) -> None:
-        reward = TerminalWinMarginGoldGainReward(gamma=1.0, beta_win=0.0, beta_margin=1.0)
+        reward = TerminalWinMarginGoldGainReward(gamma=1.0, beta_win=0.0, beta_margin=1.0, beta_net_gold_gain=0.0)
         reward.reset(_state(p1_gold=0, p2_gold=0), agent_player_id=1)
 
         value = reward(_result(_state(p1_gold=500, p2_gold=0)), agent_player_id=1)
@@ -38,7 +38,7 @@ class RewardTests(unittest.TestCase):
         self.assertAlmostEqual(value, math.tanh(1.0))
 
     def test_margin_decrease_produces_negative_potential_reward(self) -> None:
-        reward = TerminalWinMarginGoldGainReward(gamma=1.0, beta_win=0.0, beta_margin=1.0)
+        reward = TerminalWinMarginGoldGainReward(gamma=1.0, beta_win=0.0, beta_margin=1.0, beta_net_gold_gain=0.0)
         reward.reset(_state(p1_gold=500, p2_gold=0), agent_player_id=1)
 
         value = reward(_result(_state(p1_gold=0, p2_gold=0)), agent_player_id=1)
@@ -46,7 +46,7 @@ class RewardTests(unittest.TestCase):
         self.assertAlmostEqual(value, -math.tanh(1.0))
 
     def test_terminal_state_sets_next_potential_to_zero(self) -> None:
-        reward = TerminalWinMarginGoldGainReward(gamma=1.0, beta_win=0.0, beta_margin=1.0)
+        reward = TerminalWinMarginGoldGainReward(gamma=1.0, beta_win=0.0, beta_margin=1.0, beta_net_gold_gain=0.0)
         reward.reset(_state(p1_gold=500, p2_gold=0), agent_player_id=1)
 
         value = reward(
@@ -57,7 +57,7 @@ class RewardTests(unittest.TestCase):
         self.assertAlmostEqual(value, -math.tanh(1.0))
 
     def test_vision_spending_is_included_in_net_margin(self) -> None:
-        reward = TerminalWinMarginGoldGainReward(gamma=1.0, beta_win=0.0, beta_margin=1.0)
+        reward = TerminalWinMarginGoldGainReward(gamma=1.0, beta_win=0.0, beta_margin=1.0, beta_net_gold_gain=0.0)
         reward.reset(_state(p1_gold=0, p2_gold=0), agent_player_id=1)
 
         value = reward(_result(_state(p1_gold=100, p1_vision=200, p2_gold=0)), agent_player_id=1)
@@ -71,6 +71,7 @@ class RewardTests(unittest.TestCase):
             beta_win=0.0,
             beta_margin=0.0,
             beta_gold_gain=2.0,
+            beta_net_gold_gain=0.0,
             gold_gain_scale=100.0,
         )
         reward.reset(_state(p1_gold=0, p2_gold=0), agent_player_id=1)
@@ -89,6 +90,7 @@ class RewardTests(unittest.TestCase):
             beta_win=0.0,
             beta_margin=0.0,
             beta_gold_gain=2.0,
+            beta_net_gold_gain=0.0,
             gold_gain_scale=100.0,
         )
         reward.reset(_state(p1_gold=0, p2_gold=0), agent_player_id=1)
@@ -108,7 +110,7 @@ class RewardTests(unittest.TestCase):
             config=SingleAgentEnvConfig(episode=_one_round_episode(), opponent_spec=_stay_opponent_spec()),
             mechanisms=_quiet_mechanisms(),
             spawn=SpawnConfig(npc_ids=()),
-            reward_fn=TerminalWinMarginGoldGainReward(beta_margin=0.0, beta_gold_gain=0.0),
+            reward_fn=TerminalWinMarginGoldGainReward(beta_margin=0.0, beta_gold_gain=0.0, beta_net_gold_gain=0.0),
         )
 
         env.reset(seed=7, map_id=1, agent_player_id=1)
@@ -118,7 +120,7 @@ class RewardTests(unittest.TestCase):
         self.assertIn(step.reward, (-1.0, 1.0))
 
     def test_paired_rollout_resets_shared_stateful_reward(self) -> None:
-        reward = TerminalWinMarginGoldGainReward(beta_margin=0.0, beta_gold_gain=0.0)
+        reward = TerminalWinMarginGoldGainReward(beta_margin=0.0, beta_gold_gain=0.0, beta_net_gold_gain=0.0)
         sampler = BatchRolloutSampler(
             env_config=SingleAgentEnvConfig(episode=_one_round_episode(), opponent_spec=_stay_opponent_spec()),
             mechanisms=_quiet_mechanisms(),
@@ -131,6 +133,67 @@ class RewardTests(unittest.TestCase):
         self.assertEqual(batch.episode_count, 2)
         self.assertEqual([len(trajectory.transitions) for trajectory in batch.trajectories], [1, 1])
         self.assertTrue(all(trajectory.total_reward in (-1.0, 1.0) for trajectory in batch.trajectories))
+
+    def test_net_gold_gain_reward_uses_agent_net_gold_delta(self) -> None:
+        reward = TerminalWinMarginGoldGainReward(
+            gamma=1.0,
+            beta_win=0.0,
+            beta_margin=0.0,
+            beta_gold_gain=0.0,
+            beta_net_gold_gain=0.1,
+            net_gold_gain_scale=50.0,
+        )
+        reward.reset(_state(p1_gold=0, p2_gold=0), agent_player_id=1)
+
+        value = reward(_result(_state(p1_gold=25, p2_gold=0)), agent_player_id=1)
+
+        self.assertEqual(value, 0.05)
+        self.assertIsNotNone(reward.last_components)
+        assert reward.last_components is not None
+        self.assertEqual(reward.last_components["net_gold_gain"], 25.0)
+        self.assertEqual(reward.last_components["clipped_net_gold_gain"], 0.5)
+        self.assertEqual(reward.last_components["net_gold_gain_reward"], 0.05)
+
+    def test_net_gold_gain_reward_charges_vision_spending(self) -> None:
+        reward = TerminalWinMarginGoldGainReward(
+            gamma=1.0,
+            beta_win=0.0,
+            beta_margin=0.0,
+            beta_gold_gain=0.0,
+            beta_net_gold_gain=0.1,
+            net_gold_gain_scale=50.0,
+        )
+        reward.reset(_state(p1_gold=100, p1_vision=0, p2_gold=0), agent_player_id=1)
+
+        value = reward(_result(_state(p1_gold=100, p1_vision=3, p2_gold=0)), agent_player_id=1)
+
+        self.assertAlmostEqual(value, -0.006)
+        assert reward.last_components is not None
+        self.assertEqual(reward.last_components["net_gold_gain"], -3.0)
+
+    def test_net_gold_gain_reward_is_clipped_to_signed_range(self) -> None:
+        reward = TerminalWinMarginGoldGainReward(
+            gamma=1.0,
+            beta_win=0.0,
+            beta_margin=0.0,
+            beta_gold_gain=0.0,
+            beta_net_gold_gain=0.1,
+            net_gold_gain_scale=50.0,
+        )
+        reward.reset(_state(p1_gold=0, p1_vision=0, p2_gold=0), agent_player_id=1)
+
+        positive = reward(_result(_state(p1_gold=200, p1_vision=0, p2_gold=0)), agent_player_id=1)
+        negative = reward(_result(_state(p1_gold=200, p1_vision=300, p2_gold=0)), agent_player_id=1)
+
+        self.assertEqual(positive, 0.1)
+        self.assertEqual(negative, -0.1)
+
+    def test_default_reward_uses_net_gold_gain_not_gross_gold_gain(self) -> None:
+        reward = TerminalWinMarginGoldGainReward()
+
+        self.assertEqual(reward.beta_gold_gain, 0.0)
+        self.assertEqual(reward.beta_net_gold_gain, 0.1)
+        self.assertEqual(reward.net_gold_gain_scale, 50.0)
 
 
 def _state(
