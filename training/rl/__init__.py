@@ -11,7 +11,7 @@ from .privileged_critic_features import (
     privileged_critic_feature_schema,
     privileged_critic_scalar_names,
 )
-from .rewards import TerminalWinPlusMarginPotentialReward, WinLossReward
+from .rewards import TerminalWinMarginGoldGainReward, WinLossReward
 from .rollout import EpisodeBatch, Trajectory, Transition
 from .runtime_policy import RuntimeAwarePolicy, RuntimePolicyWrapper
 from .sampler import BatchRolloutSampler
@@ -38,7 +38,7 @@ __all__ = [
     "SingleAgentEnvConfig",
     "SingleAgentGoldRushEnv",
     "StepResult",
-    "TerminalWinPlusMarginPotentialReward",
+    "TerminalWinMarginGoldGainReward",
     "Trajectory",
     "Transition",
     "WinLossReward",

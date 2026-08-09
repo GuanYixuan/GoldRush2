@@ -24,7 +24,7 @@ from training.rl import (
     PpoConfig,
     RuntimePolicyWrapper,
     SingleAgentEnvConfig,
-    TerminalWinPlusMarginPotentialReward,
+    TerminalWinMarginGoldGainReward,
     collect_ppo_rollouts,
     evaluate_policy,
     ppo_update,
@@ -43,8 +43,11 @@ class TrainPpoConfig:
     save_interval: int = 1
     eval_interval: int | None = None
     eval_cases: tuple[EvaluationCase, ...] = ()
-    reward_beta: float = 0.2
-    reward_margin_scale: float = 500.0
+    beta_win: float = 1.0
+    beta_margin: float = 0.2
+    beta_gold_gain: float = 0.0
+    margin_scale: float = 500.0
+    gold_gain_scale: float = 100.0
     learning_rate: float = 2.0e-4
     adam_eps: float = 1.0e-5
     rollout_mode: str = "serial"
@@ -115,6 +118,11 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "transition_count": batch.transition_count,
                 "mean_reward": float(batch.rewards.mean().detach().cpu().item()),
                 "reward_sum": float(batch.rewards.sum().detach().cpu().item()),
+                "beta_win": config.beta_win,
+                "beta_margin": config.beta_margin,
+                "beta_gold_gain": config.beta_gold_gain,
+                "margin_scale": config.margin_scale,
+                "gold_gain_scale": config.gold_gain_scale,
                 "policy_loss": stats.policy_loss,
                 "value_loss": stats.value_loss,
                 "entropy_bonus": stats.entropy_bonus,
@@ -216,8 +224,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-interval", type=int, default=1)
     parser.add_argument("--eval-interval", type=int, default=None)
     parser.add_argument("--eval-seed", type=int, default=2026080401)
-    parser.add_argument("--reward-beta", type=float, default=0.2)
-    parser.add_argument("--reward-margin-scale", type=float, default=500.0)
+    parser.add_argument("--beta-win", type=float, default=1.0)
+    parser.add_argument("--beta-margin", type=float, default=0.2)
+    parser.add_argument("--beta-gold-gain", type=float, default=0.0)
+    parser.add_argument("--margin-scale", type=float, default=500.0)
+    parser.add_argument("--gold-gain-scale", type=float, default=100.0)
     parser.add_argument("--learning-rate", type=float, default=2.0e-4)
     parser.add_argument("--adam-eps", type=float, default=1.0e-5)
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
@@ -275,8 +286,11 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         save_interval=int(args.save_interval),
         eval_interval=None if args.eval_interval is None else int(args.eval_interval),
         eval_cases=eval_cases,
-        reward_beta=float(args.reward_beta),
-        reward_margin_scale=float(args.reward_margin_scale),
+        beta_win=float(args.beta_win),
+        beta_margin=float(args.beta_margin),
+        beta_gold_gain=float(args.beta_gold_gain),
+        margin_scale=float(args.margin_scale),
+        gold_gain_scale=float(args.gold_gain_scale),
         learning_rate=float(args.learning_rate),
         adam_eps=float(args.adam_eps),
         rollout_mode=str(args.rollout_mode),
@@ -301,9 +315,12 @@ def _sampler(config: TrainPpoConfig) -> BatchRolloutSampler:
         env_config=SingleAgentEnvConfig(episode=config.episode, opponent_spec=config.opponent_specs[0]),
         mechanisms=RoundStepMechanisms(),
         spawn=SpawnConfig(),
-        reward_fn=TerminalWinPlusMarginPotentialReward(
-            beta=config.reward_beta,
-            margin_scale=config.reward_margin_scale,
+        reward_fn=TerminalWinMarginGoldGainReward(
+            beta_win=config.beta_win,
+            beta_margin=config.beta_margin,
+            beta_gold_gain=config.beta_gold_gain,
+            margin_scale=config.margin_scale,
+            gold_gain_scale=config.gold_gain_scale,
             gamma=config.ppo.gamma,
         ),
     )
@@ -565,6 +582,7 @@ def _training_diagnostics(batch) -> dict[str, float]:
     diagnostics["value_std"] = _tensor_std(batch.old_values)
     diagnostics["advantage_mean"] = _tensor_mean(batch.advantages)
     diagnostics["advantage_std"] = _tensor_std(batch.advantages)
+    diagnostics.update(_reward_component_diagnostics(batch.infos))
     return diagnostics
 
 
@@ -575,6 +593,7 @@ def _terminal_diagnostics(batch, terminal_indices: list[int]) -> dict[str, float
             "train_net_gold_margin_mean": 0.0,
             "train_agent_net_gold_mean": 0.0,
             "train_opponent_net_gold_mean": 0.0,
+            "train_agent_gross_gold_mean": 0.0,
             "train_agent_pickups_mean": 0.0,
             "train_opponent_pickups_mean": 0.0,
             "train_agent_vision_spent_mean": 0.0,
@@ -609,10 +628,42 @@ def _terminal_diagnostics(batch, terminal_indices: list[int]) -> dict[str, float
         "train_net_gold_margin_mean": _mean(margins),
         "train_agent_net_gold_mean": _mean(agent_net_gold),
         "train_opponent_net_gold_mean": _mean(opponent_net_gold),
+        "train_agent_gross_gold_mean": _mean(
+            [net + spent for net, spent in zip(agent_net_gold, agent_vision_spent, strict=True)]
+        ),
         "train_agent_pickups_mean": _mean(agent_pickups),
         "train_opponent_pickups_mean": _mean(opponent_pickups),
         "train_agent_vision_spent_mean": _mean(agent_vision_spent),
     }
+
+
+def _reward_component_diagnostics(infos: tuple[dict[str, Any], ...]) -> dict[str, float]:
+    components = [info.get("reward_components") for info in infos if info.get("reward_components") is not None]
+    if not components:
+        return {
+            "reward_terminal_mean": 0.0,
+            "reward_terminal_reward_mean": 0.0,
+            "reward_margin_shaping_mean": 0.0,
+            "reward_margin_reward_mean": 0.0,
+            "reward_gold_gain_mean": 0.0,
+            "reward_clipped_gold_gain_mean": 0.0,
+            "reward_gold_gain_reward_mean": 0.0,
+            "reward_component_total_mean": 0.0,
+        }
+    return {
+        "reward_terminal_mean": _component_mean(components, "terminal"),
+        "reward_terminal_reward_mean": _component_mean(components, "terminal_reward"),
+        "reward_margin_shaping_mean": _component_mean(components, "margin_shaping"),
+        "reward_margin_reward_mean": _component_mean(components, "margin_reward"),
+        "reward_gold_gain_mean": _component_mean(components, "gold_gain"),
+        "reward_clipped_gold_gain_mean": _component_mean(components, "clipped_gold_gain"),
+        "reward_gold_gain_reward_mean": _component_mean(components, "gold_gain_reward"),
+        "reward_component_total_mean": _component_mean(components, "total"),
+    }
+
+
+def _component_mean(components: list[dict[str, float]], field: str) -> float:
+    return _mean([float(item[field]) for item in components])
 
 
 def _fraction(values: torch.Tensor, target: int) -> float:

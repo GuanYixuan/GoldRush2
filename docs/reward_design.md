@@ -7,18 +7,18 @@
 当前 `training/rl` 已实现两个 reward：
 
 - `WinLossReward`：env smoke/default 使用，非终局 reward 为 `0`，agent 胜为 `+1`，agent 负为 `-1`。
-- `TerminalWinPlusMarginPotentialReward`：PPO v1 主线 reward，schema 为 `terminal_win_plus_margin_potential_v1`。
+- `TerminalWinMarginGoldGainReward`：PPO 主线 reward，schema 为 `terminal_win_margin_gold_gain_v1`。
 
-`SingleAgentGoldRushEnv` 默认仍使用 `WinLossReward`，用于保持基础环境、rollout、evaluation 和 paired sampling 的测试语义稳定。PPO 训练入口应显式传入 `TerminalWinPlusMarginPotentialReward`。
+`SingleAgentGoldRushEnv` 默认仍使用 `WinLossReward`，用于保持基础环境、rollout、evaluation 和 paired sampling 的测试语义稳定。PPO 训练入口应显式传入 `TerminalWinMarginGoldGainReward`。
 
-PPO smoke/debug 时将 `TerminalWinPlusMarginPotentialReward(beta=0)`，同一个 reward 类会退化为纯终局胜负 reward，用于验证 PPO 代码链路、GAE、logprob、KL、checkpoint 和 evaluation。
+PPO smoke/debug 时将 `beta_margin=0` 且 `beta_gold_gain=0`，同一个 reward 类会退化为纯终局胜负 reward，用于验证 PPO 代码链路、GAE、logprob、KL、checkpoint 和 evaluation。
 
 ## 核心原则
 
 - 最终优化目标是胜负，而不是己方绝对金币量。
 - dense reward 用于缓解 500 回合信用分配问题，不替代官方终局目标。
-- reward 应基于双方相对净资产，而不是只奖励己方拾取金币。
-- 不为拾取、炸弹、踩踏、视野购买等事件重复添加 reward；这些事件已经体现在净资产变化中。
+- margin shaping 应基于双方相对净资产。
+- 当 BC 先验在 PPO 中被侵蚀、agent 连基础吃金币行为都无法保持时，可以显式加入己方金币增量 dense reward，作为行为先验保护和信用分配辅助。
 - 训练环境可以使用 simulator privileged state 计算 reward；actor 输入仍必须保持官方合法 observation 或由 `policy_runtime` 维护的 belief。
 
 ## 净资产与 Margin
@@ -55,37 +55,45 @@ DeltaM_t = M_{t+1} - M_t
 - 己方购买视野：即时负成本。
 - 对手购买视野：相对正收益。
 
-## PPO v1 Reward: Margin Potential Shaping
+## PPO Reward: Win / Margin / Gold Gain
 
-第一版 PPO 采用终局胜负加净金币差 potential shaping：
+当前 PPO reward 拆成三个独立系数：
 
 ```text
-reward_schema = "terminal_win_plus_margin_potential_v1"
+reward_schema = "terminal_win_margin_gold_gain_v1"
 
 Phi_t = tanh(M_t / 500)
 shaping_t = gamma * Phi_{t+1} - Phi_t
-r_t = r_win_t + beta * shaping_t
+gold_gain_t = max(0, G_agent(t+1) - G_agent(t))
+gold_gain_reward_t = clip(gold_gain_t / gold_gain_scale, 0, 1)
+
+r_t =
+    beta_win * r_win_t
+    + beta_margin * shaping_t
+    + beta_gold_gain * gold_gain_reward_t
 ```
 
 其中：
 
 - `M_t = W_agent(t) - W_opponent(t)`。
 - `W_i(t) = G_i(t) - C_i^vp(t)`，即毛金币减累计视野花费。
+- `G_agent(t)` 使用己方 gross gold，不扣视野费用；这样 dense gold 项只奖励“吃到金币”，不把“少买视野”误当成吃金币能力。
 - `gamma` 使用 PPO 配置中的 `0.9999`。
-- 默认 `beta=0.2`；smoke/debug 可设 `beta=0`，退化为纯终局胜负 reward。
+- 默认 `beta_win=1.0`、`beta_margin=0.2`、`beta_gold_gain=0.0`，因此默认行为等价于旧的终局胜负加 margin potential shaping。
 - 终止状态的 potential 置为 `0`，避免终局 margin 被重复计入。
-- `500` 是人工固定尺度：`M=500` 时 `tanh(1)≈0.76`，`M=1000` 时 `tanh(2)≈0.96`，表示 500 金币已是很大差距，1000 金币基本饱和。
+- `margin_scale=500` 是人工固定尺度：`M=500` 时 `tanh(1)≈0.76`，`M=1000` 时 `tanh(2)≈0.96`，表示 500 金币已是很大差距，1000 金币基本饱和。
+- `gold_gain_scale=100` 是第一版 dense gold 尺度，单回合吃到 100 金币即达到该项上限。
 - 实现上该 reward 在 `env.reset()` 后用初始 `GameState` 初始化 `Phi_t`；如果未 reset 就调用，会 fail-fast。
 
 设计理由：
 
 - 最终优化目标仍是胜负，终局 `+1/-1` 保持主目标地位。
 - potential shaping 给 500 回合长时任务提供更稳定的中间学习信号。
-- 只基于双方净资产，不为拾取、炸弹、踩踏、视野购买等事件重复写 reward。
 - `tanh` 有界，避免大额金币事件造成 reward 尺度失控。
 - 固定 `s_M=500` 能保持不同训练 run 的 reward 语义一致，避免每次用 rollout 分位数估计导致尺度漂移。
+- dense gold 项直接补充“发现金币、走过去、吃掉金币”的短期信号，并通过 clip 限制偶发大金币造成的 advantage 方差。
 
-`beta=0` smoke 的验收目标不是胜率提升，而是 loss 有限、无 NaN、GAE/terminal 处理正确、KL/clip fraction/value 输出可解释。
+`beta_margin=0, beta_gold_gain=0` smoke 的验收目标不是胜率提升，而是 loss 有限、无 NaN、GAE/terminal 处理正确、KL/clip fraction/value 输出可解释。
 
 ## 终局胜负 Reward
 
@@ -101,10 +109,12 @@ r_win_T =
 
 ## 后续 Reward 备选
 
-若 `terminal_win_plus_margin_potential_v1` 过弱或过强，优先做小范围 ablation：
+若 `terminal_win_margin_gold_gain_v1` 过弱或过强，优先做小范围 ablation：
 
 - `s_M = 300 / 500 / 800`。
-- `beta = 0.1 / 0.2 / 0.3`。
+- `beta_margin = 0.1 / 0.2 / 0.3`。
+- `beta_gold_gain = 0.5 / 1.0 / 2.0`。
+- `gold_gain_scale = 50 / 100 / 200`。
 - 关闭 shaping，回到纯终局胜负。
 
 不建议第一版直接使用 `DeltaM_t` dense reward。若后续需要，可考虑：

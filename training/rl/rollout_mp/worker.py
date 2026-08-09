@@ -226,13 +226,17 @@ def transition_info(step_info: dict[str, Any], *, done: bool, mode: str) -> dict
     if mode == "debug":
         return step_info
     if mode == "training":
+        reward_components = step_info.get("reward_components")
         if not done:
-            return {}
-        return {
+            return {} if reward_components is None else {"reward_components": reward_components}
+        payload = {
             "scores": step_info["scores"],
             "events": step_info["events"],
             "game_result": step_info["game_result"],
         }
+        if reward_components is not None:
+            payload["reward_components"] = reward_components
+        return payload
     raise SimulatorRuleError(f"unknown transition_info_mode: {mode!r}")
 
 
