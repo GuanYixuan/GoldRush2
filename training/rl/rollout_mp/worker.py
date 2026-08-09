@@ -119,6 +119,7 @@ def run_worker_episode(
     extractor = FeatureExtractor(player_id=task.agent_player_id)
     observation = reset.observation
     info_items: list[dict[str, Any]] = []
+    episode_events = _empty_event_counts()
     request_index = 0
     transition_slot = int(task.transition_slot)
     max_episode_length = int(transition_shared.done.shape[1])
@@ -181,6 +182,7 @@ def run_worker_episode(
         step = env.step(game_output)
         profile_stats["env_step_ns"] = profile_stats.get("env_step_ns", 0) + (time.perf_counter_ns() - env_step_start)
         done = bool(step.terminated)
+        _add_event_counts(episode_events, step.info["events"])
         transition_shared.actor_planes[transition_slot, request_index, ...] = actor_planes
         transition_shared.actor_scalars[transition_slot, request_index, ...] = actor_scalars
         transition_shared.critic_planes[transition_slot, request_index, ...] = critic_planes
@@ -194,7 +196,14 @@ def run_worker_episode(
         transition_shared.reward[transition_slot, request_index] = float(step.reward)
         transition_shared.done[transition_slot, request_index] = done
         transition_shared.round_index[transition_slot, request_index] = int(observation.round)
-        info_items.append(transition_info(step.info, done=done, mode=str(static_config["transition_info_mode"])))
+        info_items.append(
+            transition_info(
+                step.info,
+                done=done,
+                mode=str(static_config["transition_info_mode"]),
+                episode_events=episode_events,
+            )
+        )
         observation = step.observation
         request_index += 1
         profile_stats["steps"] = request_index
@@ -222,22 +231,54 @@ def run_worker_episode(
     )
 
 
-def transition_info(step_info: dict[str, Any], *, done: bool, mode: str) -> dict[str, Any]:
+def transition_info(
+    step_info: dict[str, Any],
+    *,
+    done: bool,
+    mode: str,
+    episode_events: dict[str, dict[int, int]] | None = None,
+) -> dict[str, Any]:
     if mode == "debug":
         return step_info
     if mode == "training":
         reward_components = step_info.get("reward_components")
         if not done:
             return {} if reward_components is None else {"reward_components": reward_components}
+        if episode_events is None:
+            raise SimulatorRuleError("training transition info requires episode event totals on terminal step")
         payload = {
             "scores": step_info["scores"],
-            "events": step_info["events"],
+            "events": _copy_event_counts(episode_events),
             "game_result": step_info["game_result"],
         }
         if reward_components is not None:
             payload["reward_components"] = reward_components
         return payload
     raise SimulatorRuleError(f"unknown transition_info_mode: {mode!r}")
+
+
+def _empty_event_counts() -> dict[str, dict[int, int]]:
+    return {
+        "pickups": {1: 0, 2: 0},
+        "pickup_gold": {1: 0, 2: 0},
+        "bomb_triggers": {1: 0, 2: 0},
+        "bomb_lost_gold": {1: 0, 2: 0},
+        "tramples": {1: 0, 2: 0},
+        "trample_penalty": {1: 0, 2: 0},
+    }
+
+
+def _add_event_counts(total: dict[str, dict[int, int]], step_events: dict[str, Any]) -> None:
+    for field, per_player_total in total.items():
+        per_player_step = step_events.get(field, {})
+        if not isinstance(per_player_step, dict):
+            continue
+        for player_id in (1, 2):
+            per_player_total[player_id] += int(per_player_step.get(player_id, per_player_step.get(str(player_id), 0)))
+
+
+def _copy_event_counts(events: dict[str, dict[int, int]]) -> dict[str, dict[int, int]]:
+    return {field: dict(per_player) for field, per_player in events.items()}
 
 
 def _extract_critic_features(env: SingleAgentGoldRushEnv, agent_player_id: int, round_count: int) -> dict[str, Any]:

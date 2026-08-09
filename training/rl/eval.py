@@ -199,7 +199,14 @@ def _score(trajectory: Trajectory, score_name: str, player_id: int) -> int:
 
 
 def _event_count(trajectory: Trajectory, event_name: str, player_id: int) -> int:
-    return trajectory.terminal_info["events"][event_name][player_id]
+    total = 0
+    for transition in trajectory.transitions:
+        events = transition.info.get("events", {})
+        per_player = events.get(event_name, {})
+        if not isinstance(per_player, dict):
+            continue
+        total += int(per_player.get(player_id, per_player.get(str(player_id), 0)))
+    return total
 
 
 def _opponent_player_id(trajectory: Trajectory) -> int:

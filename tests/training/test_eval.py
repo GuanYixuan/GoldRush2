@@ -12,6 +12,8 @@ from simulator.mechanisms.maps import SpawnConfig
 from simulator.types import Action, GameOutput, GoldGenerationEvent, Position
 from training.opponents import OpponentSpec
 from training.rl import EvaluationCase, EvaluationConfig, SingleAgentEnvConfig, evaluate_policy
+from training.rl.eval import _event_count
+from training.rl.rollout import Trajectory, Transition
 
 
 class EvaluationTests(unittest.TestCase):
@@ -48,6 +50,42 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(result.metrics["net_gold_margin_max"], 4)
         self.assertIn("mean_agent_vision_spent", result.metrics)
         self.assertIn("mean_agent_pickups", result.metrics)
+
+    def test_event_count_aggregates_all_trajectory_transitions(self) -> None:
+        trajectory = Trajectory(
+            episode_id="episode",
+            pair_id="pair",
+            pair_role="first",
+            seed=1,
+            map_id=1,
+            agent_player_id=1,
+            opponent_spec=_stay_opponent_spec(),
+            transitions=(
+                Transition(
+                    observation=None,
+                    action=_stay_output(),
+                    reward=0.0,
+                    next_observation=None,
+                    terminated=False,
+                    truncated=False,
+                    info={"events": {"pickups": {1: 1, 2: 0}, "bomb_triggers": {1: 0, 2: 1}}},
+                ),
+                Transition(
+                    observation=None,
+                    action=_stay_output(),
+                    reward=0.0,
+                    next_observation=None,
+                    terminated=True,
+                    truncated=False,
+                    info={"events": {"pickups": {1: 2, 2: 1}, "bomb_triggers": {1: 1, 2: 0}}},
+                ),
+            ),
+        )
+
+        self.assertEqual(_event_count(trajectory, "pickups", 1), 3)
+        self.assertEqual(_event_count(trajectory, "pickups", 2), 1)
+        self.assertEqual(_event_count(trajectory, "bomb_triggers", 1), 1)
+        self.assertEqual(_event_count(trajectory, "bomb_triggers", 2), 1)
 
     def test_eval_is_reproducible(self) -> None:
         config = EvaluationConfig(

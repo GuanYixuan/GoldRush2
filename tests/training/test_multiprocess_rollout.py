@@ -20,6 +20,7 @@ from training.rl import (
     collect_multiprocess_ppo_rollouts,
     ppo_update,
 )
+from training.rl.rollout_mp.worker import _add_event_counts, _empty_event_counts, transition_info
 
 
 class MultiprocessRolloutTests(unittest.TestCase):
@@ -152,6 +153,57 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertEqual(set(batch.infos[1]), {"scores", "events", "game_result"})
         self.assertEqual(batch.infos[2], {})
         self.assertEqual(set(batch.infos[3]), {"scores", "events", "game_result"})
+
+    def test_training_info_mode_reports_episode_event_totals_on_terminal_step(self) -> None:
+        episode_events = _empty_event_counts()
+        _add_event_counts(
+            episode_events,
+            {
+                "pickups": {1: 1, 2: 0},
+                "pickup_gold": {1: 4, 2: 0},
+                "bomb_triggers": {1: 0, 2: 1},
+                "bomb_lost_gold": {1: 0, 2: 3},
+                "tramples": {1: 0, 2: 0},
+                "trample_penalty": {1: 0, 2: 0},
+            },
+        )
+
+        non_terminal = transition_info(
+            {"events": {"pickups": {1: 999}}, "reward_components": {"total": 0.25}},
+            done=False,
+            mode="training",
+            episode_events=episode_events,
+        )
+
+        _add_event_counts(
+            episode_events,
+            {
+                "pickups": {1: 2, 2: 1},
+                "pickup_gold": {1: 7, 2: 5},
+                "bomb_triggers": {1: 1, 2: 0},
+                "bomb_lost_gold": {1: 6, 2: 0},
+                "tramples": {1: 1, 2: 0},
+                "trample_penalty": {1: 2, 2: 0},
+            },
+        )
+        terminal = transition_info(
+            {
+                "scores": {"net_gold": {1: 10, 2: 5}},
+                "events": {"pickups": {1: 2, 2: 1}},
+                "game_result": object(),
+            },
+            done=True,
+            mode="training",
+            episode_events=episode_events,
+        )
+
+        self.assertEqual(non_terminal, {"reward_components": {"total": 0.25}})
+        self.assertEqual(terminal["events"]["pickups"], {1: 3, 2: 1})
+        self.assertEqual(terminal["events"]["pickup_gold"], {1: 11, 2: 5})
+        self.assertEqual(terminal["events"]["bomb_triggers"], {1: 1, 2: 1})
+        self.assertEqual(terminal["events"]["bomb_lost_gold"], {1: 6, 2: 3})
+        self.assertEqual(terminal["events"]["tramples"], {1: 1, 2: 0})
+        self.assertEqual(terminal["events"]["trample_penalty"], {1: 2, 2: 0})
 
     def test_debug_info_mode_keeps_full_step_info(self) -> None:
         model = _small_model()
