@@ -33,6 +33,12 @@ class RLEnvTests(unittest.TestCase):
         self.assertEqual(step.info["first_player_id"], 2)
         self.assertEqual(step.info["game_result"].winner_id, 1)
         self.assertEqual(step.info["scores"]["net_gold"][1], 4)
+        self.assertEqual(step.info["events"]["pickups"][1], 1)
+        self.assertEqual(step.info["events"]["pickup_gold"][1], 4)
+        self.assertEqual(step.info["events"]["bomb_triggers"][1], 0)
+        self.assertEqual(step.info["events"]["bomb_lost_gold"][1], 0)
+        self.assertEqual(step.info["events"]["tramples"][1], 0)
+        self.assertEqual(step.info["events"]["trample_penalty"][1], 0)
 
     def test_non_terminal_step_reward_is_zero_and_returns_next_observation(self) -> None:
         env = SingleAgentGoldRushEnv(

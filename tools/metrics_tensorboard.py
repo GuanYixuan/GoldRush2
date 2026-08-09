@@ -32,6 +32,9 @@ DEFAULT_METRICS = (
     "return_mean",
     "return_std",
     "reward_sum",
+    "reward_clipped_net_gold_gain_mean",
+    "reward_net_gold_gain_mean",
+    "reward_net_gold_gain_reward_mean",
     "advantage_mean",
     "advantage_std",
     "value_mean",
@@ -43,6 +46,16 @@ DEFAULT_METRICS = (
     "train_agent_pickups_mean",
     "train_opponent_pickups_mean",
     "train_agent_vision_spent_mean",
+    "train_agent_bomb_lost_gold_per_episode",
+    "train_agent_bomb_triggers_per_episode",
+    "train_agent_pickup_gold_per_episode",
+    "train_agent_trample_penalty_per_episode",
+    "train_agent_tramples_per_episode",
+    "train_opponent_bomb_lost_gold_per_episode",
+    "train_opponent_bomb_triggers_per_episode",
+    "train_opponent_pickup_gold_per_episode",
+    "train_opponent_trample_penalty_per_episode",
+    "train_opponent_tramples_per_episode",
     "batch_assembly_ms",
     "inference_total_with_action_send_ms",
     "scheduler_ms",
@@ -58,7 +71,17 @@ POLICY_METRICS = {
     "grad_norm",
 }
 CRITIC_METRICS = {"value_loss", "explained_variance", "value_mean", "value_std"}
-RETURN_METRICS = {"mean_reward", "reward_sum", "return_mean", "return_std", "advantage_mean", "advantage_std"}
+RETURN_METRICS = {
+    "mean_reward",
+    "reward_sum",
+    "reward_clipped_net_gold_gain_mean",
+    "reward_net_gold_gain_mean",
+    "reward_net_gold_gain_reward_mean",
+    "return_mean",
+    "return_std",
+    "advantage_mean",
+    "advantage_std",
+}
 BEHAVIOR_PREFIXES = ("action_fraction_", "k_fraction_", "ko_fraction_", "order_fraction_", "vp_fraction_")
 BEHAVIOR_METRICS = {
     "stay_action_fraction",
@@ -333,8 +356,12 @@ def metric_tag(field: str) -> str:
         return f"critic/{field}"
     if field in RETURN_METRICS:
         return f"return/{field}"
+    if field.startswith("train_agent_"):
+        return f"agent_outcome/{field.removeprefix('train_agent_')}"
+    if field.startswith("train_opponent_"):
+        return f"opponent_outcome/{field.removeprefix('train_opponent_')}"
     if field.startswith("train_"):
-        return f"outcome/{field.removeprefix('train_')}"
+        return f"match_outcome/{field.removeprefix('train_')}"
     if field.startswith(BEHAVIOR_PREFIXES) or field in BEHAVIOR_METRICS:
         return f"behavior/{field}"
     if field.endswith("_ms") or field.startswith(PERFORMANCE_PREFIXES):

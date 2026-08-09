@@ -206,19 +206,25 @@ def _scores(result: RoundStepResult) -> dict[str, dict[int, int]]:
 def _event_counts(trace: RoundStepTrace) -> dict[str, dict[int, int]]:
     counts = {
         "pickups": {1: 0, 2: 0},
+        "pickup_gold": {1: 0, 2: 0},
         "bomb_triggers": {1: 0, 2: 0},
+        "bomb_lost_gold": {1: 0, 2: 0},
         "tramples": {1: 0, 2: 0},
+        "trample_penalty": {1: 0, 2: 0},
     }
     for interaction_events in trace.transition_result.interaction_events:
         for pickup in interaction_events.pickups:
             if pickup.actor.player_id in (1, 2):
                 counts["pickups"][pickup.actor.player_id] += 1
+                counts["pickup_gold"][pickup.actor.player_id] += int(pickup.picked_gold)
         for trigger in interaction_events.bomb_triggers:
             if trigger.actor.player_id in (1, 2):
                 counts["bomb_triggers"][trigger.actor.player_id] += 1
+                counts["bomb_lost_gold"][trigger.actor.player_id] += int(trigger.lost_gold)
         for trample in interaction_events.tramples:
             if trample.actor.player_id in (1, 2):
                 counts["tramples"][trample.actor.player_id] += 1
+                counts["trample_penalty"][trample.actor.player_id] += int(trample.penalty)
     return counts
 
 

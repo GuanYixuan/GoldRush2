@@ -583,6 +583,7 @@ def _training_diagnostics(batch) -> dict[str, float]:
 
     terminal_indices = [idx for idx, done in enumerate(batch.dones.detach().cpu().tolist()) if done]
     diagnostics.update(_terminal_diagnostics(batch, terminal_indices))
+    diagnostics.update(_per_episode_event_diagnostics(batch, episode_count=len(terminal_indices)))
 
     assert batch.returns is not None
     assert batch.advantages is not None
@@ -613,8 +614,6 @@ def _terminal_diagnostics(batch, terminal_indices: list[int]) -> dict[str, float
     margins: list[float] = []
     agent_net_gold: list[float] = []
     opponent_net_gold: list[float] = []
-    agent_pickups: list[float] = []
-    opponent_pickups: list[float] = []
     agent_vision_spent: list[float] = []
     agent_player_ids = batch.agent_player_ids.detach().cpu().tolist()
     for idx in terminal_indices:
@@ -622,15 +621,12 @@ def _terminal_diagnostics(batch, terminal_indices: list[int]) -> dict[str, float
         opponent_player_id = 2 if agent_player_id == 1 else 1
         info = batch.infos[idx]
         scores = info["scores"]
-        events = info["events"]
         wins.append(1.0 if info["game_result"].winner_id == agent_player_id else 0.0)
         agent_score = float(scores["net_gold"][agent_player_id])
         opponent_score = float(scores["net_gold"][opponent_player_id])
         agent_net_gold.append(agent_score)
         opponent_net_gold.append(opponent_score)
         margins.append(agent_score - opponent_score)
-        agent_pickups.append(float(events["pickups"][agent_player_id]))
-        opponent_pickups.append(float(events["pickups"][opponent_player_id]))
         agent_vision_spent.append(float(scores["vision_spent"][agent_player_id]))
 
     return {
@@ -641,10 +637,53 @@ def _terminal_diagnostics(batch, terminal_indices: list[int]) -> dict[str, float
         "train_agent_gross_gold_mean": _mean(
             [net + spent for net, spent in zip(agent_net_gold, agent_vision_spent, strict=True)]
         ),
-        "train_agent_pickups_mean": _mean(agent_pickups),
-        "train_opponent_pickups_mean": _mean(opponent_pickups),
         "train_agent_vision_spent_mean": _mean(agent_vision_spent),
     }
+
+
+def _per_episode_event_diagnostics(batch, *, episode_count: int) -> dict[str, float]:
+    fields = (
+        ("pickups", "pickups"),
+        ("pickup_gold", "pickup_gold"),
+        ("bomb_triggers", "bomb_triggers"),
+        ("bomb_lost_gold", "bomb_lost_gold"),
+        ("tramples", "tramples"),
+        ("trample_penalty", "trample_penalty"),
+    )
+    result: dict[str, float] = {}
+    for _event_field, metric_name in fields:
+        result[f"train_agent_{metric_name}_per_episode"] = 0.0
+        result[f"train_opponent_{metric_name}_per_episode"] = 0.0
+    result["train_agent_pickups_mean"] = 0.0
+    result["train_opponent_pickups_mean"] = 0.0
+    if episode_count <= 0:
+        return result
+
+    totals = {("agent", field): 0.0 for field, _name in fields}
+    totals.update({("opponent", field): 0.0 for field, _name in fields})
+    agent_player_ids = batch.agent_player_ids.detach().cpu().tolist()
+    for idx, info in enumerate(batch.infos):
+        agent_player_id = int(agent_player_ids[idx])
+        opponent_player_id = 2 if agent_player_id == 1 else 1
+        events = info.get("events", {})
+        for event_field, _metric_name in fields:
+            totals[("agent", event_field)] += _event_value(events, event_field, agent_player_id)
+            totals[("opponent", event_field)] += _event_value(events, event_field, opponent_player_id)
+
+    for event_field, metric_name in fields:
+        result[f"train_agent_{metric_name}_per_episode"] = totals[("agent", event_field)] / float(episode_count)
+        result[f"train_opponent_{metric_name}_per_episode"] = totals[("opponent", event_field)] / float(episode_count)
+    result["train_agent_pickups_mean"] = result["train_agent_pickups_per_episode"]
+    result["train_opponent_pickups_mean"] = result["train_opponent_pickups_per_episode"]
+    return result
+
+
+def _event_value(events: dict[str, Any], field: str, player_id: int) -> float:
+    per_player = events.get(field, {})
+    if not isinstance(per_player, dict):
+        return 0.0
+    value = per_player.get(player_id, per_player.get(str(player_id), 0))
+    return float(value)
 
 
 def _reward_component_diagnostics(infos: tuple[dict[str, Any], ...]) -> dict[str, float]:
