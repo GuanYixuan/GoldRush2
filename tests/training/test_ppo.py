@@ -93,6 +93,8 @@ class PpoTests(unittest.TestCase):
         self.assertEqual(batch.episode_ids[0], "pair-000000-seed-5-first")
         self.assertEqual(batch.episode_ids[1], "pair-000000-seed-5-second")
         self.assertEqual(tuple(batch.spatial_planes.shape), (2, 38, 17, 17))
+        self.assertEqual(tuple(batch.critic_planes.shape), (2, 26, 17, 17))
+        self.assertEqual(tuple(batch.critic_scalars.shape), (2, 17))
         self.assertEqual(stats.update_count, 1)
 
 
@@ -114,14 +116,17 @@ def _small_model() -> GoldRushPolicyNetwork:
 def _batch_from_model(model: GoldRushPolicyNetwork) -> PpoBatch:
     transitions: list[PpoTransition] = []
     spatial, scalars = _feature_tensors(batch_size=4)
+    critic_spatial, critic_scalars = _critic_feature_tensors(batch_size=4)
     with torch.no_grad():
-        action = model.act(spatial, scalars)
+        action = model.act(spatial, scalars, critic_spatial, critic_scalars)
     rewards = (1.0, -1.0, 0.5, -0.5)
     for idx, reward in enumerate(rewards):
         transitions.append(
             PpoTransition(
                 spatial_planes=spatial[idx],
                 scalars=scalars[idx],
+                critic_planes=critic_spatial[idx],
+                critic_scalars=critic_scalars[idx],
                 actions=action.actions[idx],
                 k=action.k[idx],
                 order=action.order[idx],
@@ -146,6 +151,16 @@ def _feature_tensors(*, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
     spatial[:, 24, 0, 0] = 1.0
     spatial[:, 25, 16, 16] = 1.0
     scalars[:, 0] = torch.linspace(-1.0, 1.0, batch_size)
+    return spatial, scalars
+
+
+def _critic_feature_tensors(*, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
+    spatial = torch.zeros(batch_size, 26, 17, 17)
+    scalars = torch.zeros(batch_size, 17)
+    spatial[:, 9, 0, 0] = 1.0
+    spatial[:, 10, 16, 16] = 1.0
+    spatial[:, 11, 0, 16] = 1.0
+    spatial[:, 12, 16, 0] = 1.0
     return spatial, scalars
 
 

@@ -16,6 +16,7 @@ from simulator.mechanisms.gold import (
     outer_static2_candidate_cells,
 )
 from simulator.mechanisms.maps import build_initial_state, built_in_public_map_pool
+from simulator.randomness import make_simulator_rng_streams
 from simulator.rules.snapshot import region_id
 from simulator.rules.transition import apply_gold_generation
 from simulator.types import GoldGenerationEvent, Position
@@ -107,22 +108,25 @@ class OuterGoldTests(unittest.TestCase):
     def test_default_initial_state_uses_provisional_eight_to_fourteen_offset(self) -> None:
         generator = OuterGoldGenerator()
 
-        offsets = {generator.initial_state(random.Random(seed)).next_static2_round for seed in range(200)}
+        initial_states = {seed: generator.initial_state(random.Random(seed)) for seed in range(200)}
+        offsets = {state.next_static2_round for state in initial_states.values()}
 
         self.assertTrue(offsets)
         self.assertTrue(all(8 <= offset <= 14 for offset in offsets))
         self.assertIn(8, offsets)
         self.assertIn(14, offsets)
+        self.assertTrue(all(state.next_static2_region in (2, 3, 4, 5) for state in initial_states.values()))
 
     def test_non_scheduled_round_does_not_generate(self) -> None:
         template = built_in_public_map_pool().get(1)
         state = build_initial_state(template)
-        outer_state = OuterGoldState(next_static2_round=3)
+        outer_state = OuterGoldState(next_static2_round=3, next_static2_region=2)
 
         events = OuterGoldGenerator().generate(state, template, outer_state, random.Random(1))
 
         self.assertEqual(events, ())
         self.assertEqual(outer_state.next_static2_round, 3)
+        self.assertEqual(outer_state.next_static2_region, 2)
 
     def test_missed_scheduled_round_fails_fast(self) -> None:
         template = built_in_public_map_pool().get(1)
@@ -130,7 +134,12 @@ class OuterGoldTests(unittest.TestCase):
         state.round_index = 4
 
         with self.assertRaises(SimulatorRuleError):
-            OuterGoldGenerator().generate(state, template, OuterGoldState(next_static2_round=3), random.Random(1))
+            OuterGoldGenerator().generate(
+                state,
+                template,
+                OuterGoldState(next_static2_round=3, next_static2_region=2),
+                random.Random(1),
+            )
 
     def test_static2_batch_is_split_evenly_and_outer_static0_excludes_high_region(self) -> None:
         template = built_in_public_map_pool().get(1)
@@ -144,11 +153,12 @@ class OuterGoldTests(unittest.TestCase):
                 outer_static0_amount_weights=((6, 1),),
             )
         )
-        outer_state = OuterGoldState(next_static2_round=0)
+        outer_state = OuterGoldState(next_static2_round=0, next_static2_region=2)
 
         events = generator.generate(state, template, outer_state, random.Random(11))
 
         self.assertEqual(outer_state.next_static2_round, 8)
+        self.assertEqual(outer_state.next_static2_region, 2)
         static2_positions = set(outer_static2_candidate_cells(template, 2))
         static2_events = [event for event in events if event.position in static2_positions]
         static0_events = [event for event in events if event.position not in static2_positions]
@@ -175,7 +185,12 @@ class OuterGoldTests(unittest.TestCase):
             )
         )
 
-        events = generator.generate(state, template, OuterGoldState(next_static2_round=0), random.Random(5))
+        events = generator.generate(
+            state,
+            template,
+            OuterGoldState(next_static2_round=0, next_static2_region=2),
+            random.Random(5),
+        )
         positions = {event.position for event in events}
         static2_positions = set(outer_static2_candidate_cells(template, 2))
         static2_events = [event for event in events if event.position in static2_positions]
@@ -199,7 +214,12 @@ class OuterGoldTests(unittest.TestCase):
             )
         )
 
-        events = generator.generate(state, template, OuterGoldState(next_static2_round=0), random.Random(5))
+        events = generator.generate(
+            state,
+            template,
+            OuterGoldState(next_static2_round=0, next_static2_region=2),
+            random.Random(5),
+        )
         static2_positions = set(outer_static2_candidate_cells(template, 2))
         static2_events = [event for event in events if event.position in static2_positions]
 
@@ -222,11 +242,41 @@ class OuterGoldTests(unittest.TestCase):
             )
         )
 
-        events = generator.generate(state, template, OuterGoldState(next_static2_round=0), random.Random(5))
+        events = generator.generate(
+            state,
+            template,
+            OuterGoldState(next_static2_round=0, next_static2_region=2),
+            random.Random(5),
+        )
         static2_positions = set(outer_static2_candidate_cells(template, 2))
         static0_events = [event for event in events if event.position not in static2_positions]
 
         self.assertIn(existing_gold_static0, {event.position for event in static0_events})
+
+    def test_scheduled_region_controls_current_batch_and_next_schedule_is_complete(self) -> None:
+        template = built_in_public_map_pool().get(1)
+        state = build_initial_state(template)
+        generator = OuterGoldGenerator(
+            OuterGoldConfig(
+                gap_weights=((8, 1),),
+                region_weights=((3, 1),),
+                static2_total_weights=((88, 1),),
+                outer_static0_count_weights=((0, 1),),
+            )
+        )
+        outer_state = OuterGoldState(next_static2_round=0, next_static2_region=2)
+
+        events = generator.generate(state, template, outer_state, random.Random(5))
+
+        self.assertEqual({event.position for event in events}, set(outer_static2_candidate_cells(template, 2)))
+        self.assertEqual(outer_state.next_static2_round, 8)
+        self.assertEqual(outer_state.next_static2_region, 3)
+
+    def test_invalid_outer_state_fails_fast(self) -> None:
+        with self.assertRaises(SimulatorRuleError):
+            OuterGoldState(next_static2_round=-1, next_static2_region=2)
+        with self.assertRaises(SimulatorRuleError):
+            OuterGoldState(next_static2_round=0, next_static2_region=1)
 
     def test_apply_gold_generation_stacks_on_existing_gold(self) -> None:
         template = built_in_public_map_pool().get(1)
@@ -240,7 +290,7 @@ class OuterGoldTests(unittest.TestCase):
 
     def test_invalid_outer_config_fails_fast(self) -> None:
         with self.assertRaises(SimulatorRuleError):
-            OuterGoldState(next_static2_round=-1)
+            OuterGoldState(next_static2_round=-1, next_static2_region=2)
         with self.assertRaises(SimulatorRuleError):
             OuterGoldConfig(gap_weights=())
         with self.assertRaises(SimulatorRuleError):
@@ -249,6 +299,24 @@ class OuterGoldTests(unittest.TestCase):
             OuterGoldConfig(static2_total_weights=((88, 0),))
         with self.assertRaises(SimulatorRuleError):
             outer_static2_candidate_cells(built_in_public_map_pool().get(1), 1)
+
+
+class SimulatorRngStreamTests(unittest.TestCase):
+    def test_named_streams_are_reproducible_and_isolated(self) -> None:
+        first = make_simulator_rng_streams(20260807)
+        second = make_simulator_rng_streams(20260807)
+
+        for _ in range(100):
+            first.outer_gold.random()
+
+        self.assertEqual(
+            [first.center_gold.random() for _ in range(10)],
+            [second.center_gold.random() for _ in range(10)],
+        )
+        self.assertEqual(
+            [first.npc.random() for _ in range(10)],
+            [second.npc.random() for _ in range(10)],
+        )
 
 
 if __name__ == "__main__":

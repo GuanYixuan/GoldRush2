@@ -34,6 +34,31 @@ class RoundStepEnvTests(unittest.TestCase):
         self.assertEqual(observations[1].grid[0][1], 5)
         self.assertEqual(observations[2].grid[0][15], 6)
 
+    def test_reset_reschedules_current_static2_batch_before_action_time(self) -> None:
+        mechanisms = _quiet_mechanisms()
+        mechanisms.outer_gold = OuterGoldGenerator(
+            OuterGoldConfig(
+                first_round_offset_weights=((0, 1),),
+                gap_weights=((8, 1),),
+                region_weights=((2, 1),),
+                static2_total_weights=((88, 1),),
+                outer_static0_count_weights=((0, 1),),
+            )
+        )
+        env = RoundStepEnv(
+            config=RoundStepConfig(_one_round_episode()),
+            mechanisms=mechanisms,
+            spawn=SpawnConfig(npc_ids=()),
+        )
+
+        env.reset()
+
+        assert env.state is not None
+        assert env.outer_state is not None
+        self.assertEqual(env.state.round_index, 0)
+        self.assertEqual(env.outer_state.next_static2_round, 8)
+        self.assertEqual(env.outer_state.next_static2_region, 2)
+
     def test_step_uses_explicit_first_player_id_and_player_outputs(self) -> None:
         env = RoundStepEnv(
             config=RoundStepConfig(_one_round_episode()),

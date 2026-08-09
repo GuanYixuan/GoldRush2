@@ -13,6 +13,9 @@ from simulator.types import Action, GameOutput
 FEATURE_SCHEMA = "goldrush2_feature_v1"
 SPATIAL_CHANNELS = 38
 SCALAR_FEATURES = 10
+CRITIC_FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v1"
+CRITIC_SPATIAL_CHANNELS = 26
+CRITIC_SCALAR_FEATURES = 17
 GRID_SIZE = 17
 MOVE_BUDGET = 6
 ACTION_COUNT = 5
@@ -21,12 +24,18 @@ OBSTACLE_KNOWN_CHANNEL = 20
 OBSTACLE_CHANNEL = 21
 OWN_UNIT0_CHANNEL = 24
 OWN_UNIT1_CHANNEL = 25
+CRITIC_OWN_UNIT0_CHANNEL = 9
+CRITIC_OWN_UNIT1_CHANNEL = 10
+CRITIC_ENEMY_UNIT0_CHANNEL = 11
+CRITIC_ENEMY_UNIT1_CHANNEL = 12
 
 
 @dataclass(frozen=True)
 class PolicyNetworkConfig:
-    spatial_channels: int = SPATIAL_CHANNELS
-    scalar_features: int = SCALAR_FEATURES
+    actor_spatial_channels: int = SPATIAL_CHANNELS
+    actor_scalar_features: int = SCALAR_FEATURES
+    critic_spatial_channels: int = CRITIC_SPATIAL_CHANNELS
+    critic_scalar_features: int = CRITIC_SCALAR_FEATURES
     width: int = 96
     residual_blocks: int = 8
     se_reduction: int = 4
@@ -36,6 +45,14 @@ class PolicyNetworkConfig:
     decoder_hidden: int = 128
     decoder_embedding: int = 16
     activation: str = "silu"
+
+    @property
+    def spatial_channels(self) -> int:
+        return self.actor_spatial_channels
+
+    @property
+    def scalar_features(self) -> int:
+        return self.actor_scalar_features
 
 
 @dataclass(frozen=True)
@@ -82,10 +99,32 @@ class PolicyBcEvaluation:
 class _EncodedState:
     spatial_features: Tensor
     actor_context: Tensor
-    value: Tensor
     known_obstacles: Tensor
     unit0_position: Tensor
     unit1_position: Tensor
+
+
+@dataclass(frozen=True)
+class _EncoderOutput:
+    spatial_features: Tensor
+    avg: Tensor
+    max_pool: Tensor
+    unit0: Tensor
+    unit1: Tensor
+    known_obstacles: Tensor
+    unit0_position: Tensor
+    unit1_position: Tensor
+
+
+@dataclass(frozen=True)
+class _CriticEncoderOutput:
+    spatial_features: Tensor
+    avg: Tensor
+    max_pool: Tensor
+    own_unit0: Tensor
+    own_unit1: Tensor
+    enemy_unit0: Tensor
+    enemy_unit1: Tensor
 
 
 @dataclass(frozen=True)
@@ -139,6 +178,92 @@ class AutoregressiveGRUCell(nn.Module):
         return candidate + update * (hidden - candidate)
 
 
+class GoldRushFeatureEncoder(nn.Module):
+    def __init__(self, config: PolicyNetworkConfig, *, spatial_channels: int, scalar_features: int) -> None:
+        super().__init__()
+        width = config.width
+        activation = config.activation
+        self.stem = nn.Sequential(
+            nn.Conv2d(spatial_channels, width, kernel_size=3, padding=1),
+            _activation(activation),
+            nn.Conv2d(width, width, kernel_size=3, padding=1),
+            _activation(activation),
+        )
+
+        scalar_layers: list[nn.Module] = []
+        input_dim = scalar_features
+        for hidden_dim in config.scalar_hidden:
+            scalar_layers.extend((nn.Linear(input_dim, hidden_dim), _activation(activation)))
+            input_dim = hidden_dim
+        scalar_layers.append(nn.Linear(input_dim, width * 2))
+        self.scalar_tower = nn.Sequential(*scalar_layers)
+
+        self.blocks = nn.ModuleList(
+            SEResidualBlock(width, config.se_reduction, activation)
+            for _ in range(config.residual_blocks)
+        )
+
+    def _encode_features(self, spatial_planes: Tensor, scalars: Tensor) -> Tensor:
+        h = self.stem(spatial_planes)
+        film = self.scalar_tower(scalars)
+        gamma, beta = film.chunk(2, dim=1)
+        h = h * (1.0 + gamma[:, :, None, None]) + beta[:, :, None, None]
+        for block in self.blocks:
+            h = block(h)
+        return h
+
+
+class GoldRushActorFeatureEncoder(GoldRushFeatureEncoder):
+    def __init__(self, config: PolicyNetworkConfig) -> None:
+        super().__init__(
+            config,
+            spatial_channels=config.actor_spatial_channels,
+            scalar_features=config.actor_scalar_features,
+        )
+
+    def forward(self, spatial_planes: Tensor, scalars: Tensor) -> _EncoderOutput:
+        h = self._encode_features(spatial_planes, scalars)
+        avg = h.mean(dim=(-2, -1))
+        max_pool = h.amax(dim=(-2, -1))
+        unit0 = _gather_unit(h, spatial_planes[:, OWN_UNIT0_CHANNEL])
+        unit1 = _gather_unit(h, spatial_planes[:, OWN_UNIT1_CHANNEL])
+        known_obstacles = (
+            (spatial_planes[:, OBSTACLE_KNOWN_CHANNEL] > 0.5)
+            & (spatial_planes[:, OBSTACLE_CHANNEL] > 0.5)
+        ).flatten(1)
+        return _EncoderOutput(
+            spatial_features=h,
+            avg=avg,
+            max_pool=max_pool,
+            unit0=unit0,
+            unit1=unit1,
+            known_obstacles=known_obstacles,
+            unit0_position=spatial_planes[:, OWN_UNIT0_CHANNEL].flatten(1).argmax(dim=1),
+            unit1_position=spatial_planes[:, OWN_UNIT1_CHANNEL].flatten(1).argmax(dim=1),
+        )
+
+
+class GoldRushPrivilegedCriticEncoder(GoldRushFeatureEncoder):
+    def __init__(self, config: PolicyNetworkConfig) -> None:
+        super().__init__(
+            config,
+            spatial_channels=config.critic_spatial_channels,
+            scalar_features=config.critic_scalar_features,
+        )
+
+    def forward(self, spatial_planes: Tensor, scalars: Tensor) -> _CriticEncoderOutput:
+        h = self._encode_features(spatial_planes, scalars)
+        return _CriticEncoderOutput(
+            spatial_features=h,
+            avg=h.mean(dim=(-2, -1)),
+            max_pool=h.amax(dim=(-2, -1)),
+            own_unit0=_gather_unit(h, spatial_planes[:, CRITIC_OWN_UNIT0_CHANNEL]),
+            own_unit1=_gather_unit(h, spatial_planes[:, CRITIC_OWN_UNIT1_CHANNEL]),
+            enemy_unit0=_gather_unit(h, spatial_planes[:, CRITIC_ENEMY_UNIT0_CHANNEL]),
+            enemy_unit1=_gather_unit(h, spatial_planes[:, CRITIC_ENEMY_UNIT1_CHANNEL]),
+        )
+
+
 class GoldRushPolicyNetwork(nn.Module):
     def __init__(self, config: PolicyNetworkConfig | None = None) -> None:
         super().__init__()
@@ -148,25 +273,8 @@ class GoldRushPolicyNetwork(nn.Module):
         width = self.config.width
         activation = self.config.activation
         embedding = self.config.decoder_embedding
-        self.stem = nn.Sequential(
-            nn.Conv2d(self.config.spatial_channels, width, kernel_size=3, padding=1),
-            _activation(activation),
-            nn.Conv2d(width, width, kernel_size=3, padding=1),
-            _activation(activation),
-        )
-
-        scalar_layers: list[nn.Module] = []
-        input_dim = self.config.scalar_features
-        for hidden_dim in self.config.scalar_hidden:
-            scalar_layers.extend((nn.Linear(input_dim, hidden_dim), _activation(activation)))
-            input_dim = hidden_dim
-        scalar_layers.append(nn.Linear(input_dim, width * 2))
-        self.scalar_tower = nn.Sequential(*scalar_layers)
-
-        self.blocks = nn.ModuleList(
-            SEResidualBlock(width, self.config.se_reduction, activation)
-            for _ in range(self.config.residual_blocks)
-        )
+        self.actor_encoder = GoldRushActorFeatureEncoder(self.config)
+        self.critic_encoder = GoldRushPrivilegedCriticEncoder(self.config)
 
         self.actor_mlp = nn.Sequential(
             nn.Linear(width * 4, self.config.actor_hidden),
@@ -187,7 +295,7 @@ class GoldRushPolicyNetwork(nn.Module):
         self.decoder_action_head = nn.Linear(self.config.decoder_hidden, ACTION_COUNT)
 
         self.critic_mlp = nn.Sequential(
-            nn.Linear(width * 2, self.config.critic_hidden[0]),
+            nn.Linear(width * 6, self.config.critic_hidden[0]),
             _activation(activation),
             nn.Linear(self.config.critic_hidden[0], self.config.critic_hidden[1]),
             _activation(activation),
@@ -209,17 +317,8 @@ class GoldRushPolicyNetwork(nn.Module):
             elif isinstance(module, nn.Embedding):
                 nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-        film_last = self.scalar_tower[-1]
-        if not isinstance(film_last, nn.Linear):
-            raise TypeError("scalar_tower final module must be nn.Linear")
-        nn.init.zeros_(film_last.weight)
-        nn.init.zeros_(film_last.bias)
-
-        for block in self.blocks:
-            nn.init.orthogonal_(block.conv2.weight, gain=0.1)
-            nn.init.zeros_(block.conv2.bias)
-            nn.init.zeros_(block.se_fc2.weight)
-            nn.init.zeros_(block.se_fc2.bias)
+        self._reset_encoder_specials(self.actor_encoder)
+        self._reset_encoder_specials(self.critic_encoder)
 
         nn.init.xavier_uniform_(self.decoder.input_linear.weight)
         nn.init.orthogonal_(self.decoder.hidden_linear.weight)
@@ -239,11 +338,74 @@ class GoldRushPolicyNetwork(nn.Module):
         nn.init.normal_(value_head.weight, mean=0.0, std=0.01)
         nn.init.zeros_(value_head.bias)
 
-    def forward(self, spatial_planes: Tensor, scalars: Tensor) -> PolicyAction:
-        return self.act(spatial_planes, scalars, deterministic=True)
+    @staticmethod
+    def _reset_encoder_specials(encoder: GoldRushFeatureEncoder) -> None:
+        film_last = encoder.scalar_tower[-1]
+        if not isinstance(film_last, nn.Linear):
+            raise TypeError("scalar_tower final module must be nn.Linear")
+        nn.init.zeros_(film_last.weight)
+        nn.init.zeros_(film_last.bias)
 
-    def act(self, spatial_planes: Tensor, scalars: Tensor, *, deterministic: bool = False) -> PolicyAction:
-        encoded = self._encode(spatial_planes, scalars)
+        for block in encoder.blocks:
+            nn.init.orthogonal_(block.conv2.weight, gain=0.1)
+            nn.init.zeros_(block.conv2.bias)
+            nn.init.zeros_(block.se_fc2.weight)
+            nn.init.zeros_(block.se_fc2.bias)
+
+    def actor_parameters(self) -> tuple[nn.Parameter, ...]:
+        modules = (
+            self.actor_encoder,
+            self.actor_mlp,
+            self.ko_head,
+            self.vp_head,
+            self.ko_embedding,
+            self.role_embedding,
+            self.previous_action_embedding,
+            self.step_embedding,
+            self.decoder_initial,
+            self.decoder,
+            self.decoder_action_head,
+        )
+        return tuple(parameter for module in modules for parameter in module.parameters())
+
+    def critic_parameters(self) -> tuple[nn.Parameter, ...]:
+        return tuple(self.critic_encoder.parameters()) + tuple(self.critic_mlp.parameters())
+
+    def copy_actor_encoder_to_critic(self) -> None:
+        raise RuntimeError("actor and privileged critic encoders use different feature schemas")
+
+    def forward(self, spatial_planes: Tensor, scalars: Tensor) -> PolicyAction:
+        return self.act_actor_only(spatial_planes, scalars, deterministic=True)
+
+    def act(
+        self,
+        spatial_planes: Tensor,
+        scalars: Tensor,
+        critic_planes: Tensor,
+        critic_scalars: Tensor,
+        *,
+        deterministic: bool = False,
+    ) -> PolicyAction:
+        self._validate_actor_inputs(spatial_planes, scalars)
+        self._validate_critic_inputs(critic_planes, critic_scalars)
+        self._validate_actor_critic_batch(spatial_planes, critic_planes)
+        spatial_planes = spatial_planes.float()
+        scalars = scalars.float()
+        critic_planes = critic_planes.float()
+        critic_scalars = critic_scalars.float()
+        encoded = self._encode_actor(spatial_planes, scalars)
+        value = self._critic_value(critic_planes, critic_scalars)
+        return self._act_from_encoded(encoded, value=value, deterministic=deterministic)
+
+    def act_actor_only(self, spatial_planes: Tensor, scalars: Tensor, *, deterministic: bool = False) -> PolicyAction:
+        self._validate_actor_inputs(spatial_planes, scalars)
+        spatial_planes = spatial_planes.float()
+        scalars = scalars.float()
+        encoded = self._encode_actor(spatial_planes, scalars)
+        value = torch.zeros(spatial_planes.shape[0], dtype=spatial_planes.dtype, device=spatial_planes.device)
+        return self._act_from_encoded(encoded, value=value, deterministic=deterministic)
+
+    def _act_from_encoded(self, encoded: _EncodedState, *, value: Tensor, deterministic: bool) -> PolicyAction:
         ko_logits = self.ko_head(encoded.actor_context)
         vp_logits = self.vp_head(encoded.actor_context)
         ko, ko_logprob = _select_logits(ko_logits, deterministic=deterministic)
@@ -258,7 +420,7 @@ class GoldRushPolicyNetwork(nn.Module):
             order=torch.remainder(ko, 2),
             vp=vp,
             logprob=ko_logprob + vp_logprob + decoded.logprob,
-            value=encoded.value,
+            value=value,
             normalized_entropy=0.0100 * decoded.entropy + 0.0040 * ko_entropy + 0.0003 * vp_entropy,
             action_entropy=decoded.entropy,
             ko_entropy=ko_entropy,
@@ -269,15 +431,25 @@ class GoldRushPolicyNetwork(nn.Module):
         self,
         spatial_planes: Tensor,
         scalars: Tensor,
+        critic_planes: Tensor,
+        critic_scalars: Tensor,
         actions: Tensor,
         k: Tensor,
         order: Tensor,
         vp: Tensor,
     ) -> PolicyEvaluation:
-        evaluation = self.evaluate_bc_actions(spatial_planes, scalars, actions, k, order, vp)
+        self._validate_action_inputs(spatial_planes, actions, k, order, vp)
+        self._validate_actor_inputs(spatial_planes, scalars)
+        self._validate_critic_inputs(critic_planes, critic_scalars)
+        self._validate_actor_critic_batch(spatial_planes, critic_planes)
+        spatial_planes = spatial_planes.float()
+        scalars = scalars.float()
+        critic_planes = critic_planes.float()
+        critic_scalars = critic_scalars.float()
+        evaluation = self._evaluate_actor_actions(spatial_planes, scalars, actions, k, order, vp)
         return PolicyEvaluation(
             logprob=evaluation.logprob,
-            value=evaluation.value,
+            value=self._critic_value(critic_planes, critic_scalars),
             normalized_entropy=evaluation.normalized_entropy,
             action_entropy=evaluation.action_entropy,
             ko_entropy=evaluation.ko_entropy,
@@ -294,7 +466,21 @@ class GoldRushPolicyNetwork(nn.Module):
         vp: Tensor,
     ) -> PolicyBcEvaluation:
         self._validate_action_inputs(spatial_planes, actions, k, order, vp)
-        encoded = self._encode(spatial_planes, scalars)
+        self._validate_actor_inputs(spatial_planes, scalars)
+        spatial_planes = spatial_planes.float()
+        scalars = scalars.float()
+        return self._evaluate_actor_actions(spatial_planes, scalars, actions, k, order, vp)
+
+    def _evaluate_actor_actions(
+        self,
+        spatial_planes: Tensor,
+        scalars: Tensor,
+        actions: Tensor,
+        k: Tensor,
+        order: Tensor,
+        vp: Tensor,
+    ) -> PolicyBcEvaluation:
+        encoded = self._encode_actor(spatial_planes, scalars)
         ko = 2 * k.long() + order.long()
         ko_logits = self.ko_head(encoded.actor_context)
         vp_logits = self.vp_head(encoded.actor_context)
@@ -310,7 +496,7 @@ class GoldRushPolicyNetwork(nn.Module):
             ko_logprob=ko_logprob,
             action_logprob=decoded.logprob,
             vp_logprob=vp_logprob,
-            value=encoded.value,
+            value=torch.zeros(spatial_planes.shape[0], dtype=spatial_planes.dtype, device=spatial_planes.device),
             normalized_entropy=0.0100 * decoded.entropy + 0.0040 * ko_entropy + 0.0003 * vp_entropy,
             action_entropy=decoded.entropy,
             ko_entropy=ko_entropy,
@@ -318,34 +504,39 @@ class GoldRushPolicyNetwork(nn.Module):
         )
 
     def _encode(self, spatial_planes: Tensor, scalars: Tensor) -> _EncodedState:
-        self._validate_inputs(spatial_planes, scalars)
+        self._validate_actor_inputs(spatial_planes, scalars)
         spatial_planes = spatial_planes.float()
         scalars = scalars.float()
+        return self._encode_actor(spatial_planes, scalars)
 
-        h = self.stem(spatial_planes)
-        film = self.scalar_tower(scalars)
-        gamma, beta = film.chunk(2, dim=1)
-        h = h * (1.0 + gamma[:, :, None, None]) + beta[:, :, None, None]
-        for block in self.blocks:
-            h = block(h)
-
-        avg = h.mean(dim=(-2, -1))
-        max_pool = h.amax(dim=(-2, -1))
-        unit0 = _gather_unit(h, spatial_planes[:, OWN_UNIT0_CHANNEL])
-        unit1 = _gather_unit(h, spatial_planes[:, OWN_UNIT1_CHANNEL])
-        actor_context = self.actor_mlp(torch.cat((avg, max_pool, unit0, unit1), dim=1))
-        known_obstacles = (
-            (spatial_planes[:, OBSTACLE_KNOWN_CHANNEL] > 0.5)
-            & (spatial_planes[:, OBSTACLE_CHANNEL] > 0.5)
-        ).flatten(1)
-        return _EncodedState(
-            spatial_features=h,
-            actor_context=actor_context,
-            value=self.critic_mlp(torch.cat((avg, max_pool), dim=1)).squeeze(-1),
-            known_obstacles=known_obstacles,
-            unit0_position=spatial_planes[:, OWN_UNIT0_CHANNEL].flatten(1).argmax(dim=1),
-            unit1_position=spatial_planes[:, OWN_UNIT1_CHANNEL].flatten(1).argmax(dim=1),
+    def _encode_actor(self, spatial_planes: Tensor, scalars: Tensor) -> _EncodedState:
+        encoded = self.actor_encoder(spatial_planes, scalars)
+        actor_context = self.actor_mlp(
+            torch.cat((encoded.avg, encoded.max_pool, encoded.unit0, encoded.unit1), dim=1)
         )
+        return _EncodedState(
+            spatial_features=encoded.spatial_features,
+            actor_context=actor_context,
+            known_obstacles=encoded.known_obstacles,
+            unit0_position=encoded.unit0_position,
+            unit1_position=encoded.unit1_position,
+        )
+
+    def _critic_value(self, critic_planes: Tensor, critic_scalars: Tensor) -> Tensor:
+        encoded = self.critic_encoder(critic_planes, critic_scalars)
+        return self.critic_mlp(
+            torch.cat(
+                (
+                    encoded.avg,
+                    encoded.max_pool,
+                    encoded.own_unit0,
+                    encoded.own_unit1,
+                    encoded.enemy_unit0,
+                    encoded.enemy_unit1,
+                ),
+                dim=1,
+            )
+        ).squeeze(-1)
 
     def _decode(
         self,
@@ -452,21 +643,63 @@ class GoldRushPolicyNetwork(nn.Module):
         valid = in_bounds & ~obstacle & ~blocked_by_unit
         return valid, candidate_position
 
-    def _validate_inputs(self, spatial_planes: Tensor, scalars: Tensor) -> None:
+    def _validate_actor_inputs(self, spatial_planes: Tensor, scalars: Tensor) -> None:
         if spatial_planes.ndim != 4:
             raise ValueError(f"spatial_planes must have shape BxCx17x17, got {tuple(spatial_planes.shape)}")
         if scalars.ndim != 2:
             raise ValueError(f"scalars must have shape Bx10, got {tuple(scalars.shape)}")
-        if spatial_planes.shape[1:] != (self.config.spatial_channels, GRID_SIZE, GRID_SIZE):
+        if spatial_planes.shape[1:] != (self.config.actor_spatial_channels, GRID_SIZE, GRID_SIZE):
             raise ValueError(
                 "spatial_planes must have shape "
-                f"Bx{self.config.spatial_channels}x{GRID_SIZE}x{GRID_SIZE}, got {tuple(spatial_planes.shape)}"
+                f"Bx{self.config.actor_spatial_channels}x{GRID_SIZE}x{GRID_SIZE}, got {tuple(spatial_planes.shape)}"
             )
-        if scalars.shape[1] != self.config.scalar_features:
-            raise ValueError(f"scalars must have {self.config.scalar_features} features, got {tuple(scalars.shape)}")
+        if scalars.shape[1] != self.config.actor_scalar_features:
+            raise ValueError(f"scalars must have {self.config.actor_scalar_features} features, got {tuple(scalars.shape)}")
         if spatial_planes.shape[0] != scalars.shape[0]:
             raise ValueError(
                 f"batch size mismatch: spatial_planes has {spatial_planes.shape[0]}, scalars has {scalars.shape[0]}"
+            )
+        if spatial_planes.device != scalars.device:
+            raise ValueError(
+                f"device mismatch: spatial_planes is on {spatial_planes.device}, scalars is on {scalars.device}"
+            )
+
+    def _validate_critic_inputs(self, critic_planes: Tensor, critic_scalars: Tensor) -> None:
+        if critic_planes.ndim != 4:
+            raise ValueError(f"critic_planes must have shape BxCx17x17, got {tuple(critic_planes.shape)}")
+        if critic_scalars.ndim != 2:
+            raise ValueError(f"critic_scalars must have shape Bx17, got {tuple(critic_scalars.shape)}")
+        if critic_planes.shape[1:] != (self.config.critic_spatial_channels, GRID_SIZE, GRID_SIZE):
+            raise ValueError(
+                "critic_planes must have shape "
+                f"Bx{self.config.critic_spatial_channels}x{GRID_SIZE}x{GRID_SIZE}, got {tuple(critic_planes.shape)}"
+            )
+        if critic_scalars.shape[1] != self.config.critic_scalar_features:
+            raise ValueError(
+                f"critic_scalars must have {self.config.critic_scalar_features} features, got {tuple(critic_scalars.shape)}"
+            )
+        if critic_planes.shape[0] != critic_scalars.shape[0]:
+            raise ValueError(
+                f"batch size mismatch: critic_planes has {critic_planes.shape[0]}, "
+                f"critic_scalars has {critic_scalars.shape[0]}"
+            )
+        if critic_planes.device != critic_scalars.device:
+            raise ValueError(
+                f"device mismatch: critic_planes is on {critic_planes.device}, "
+                f"critic_scalars is on {critic_scalars.device}"
+            )
+
+    @staticmethod
+    def _validate_actor_critic_batch(spatial_planes: Tensor, critic_planes: Tensor) -> None:
+        if spatial_planes.shape[0] != critic_planes.shape[0]:
+            raise ValueError(
+                f"actor/critic batch size mismatch: actor has {spatial_planes.shape[0]}, "
+                f"critic has {critic_planes.shape[0]}"
+            )
+        if spatial_planes.device != critic_planes.device:
+            raise ValueError(
+                f"actor/critic device mismatch: actor is on {spatial_planes.device}, "
+                f"critic is on {critic_planes.device}"
             )
 
     @staticmethod
@@ -514,7 +747,7 @@ class TorchFeaturePolicy:
             scalars = torch.as_tensor(features["scalars"], dtype=torch.float32, device=self.device).unsqueeze(0)
             self.model.eval()
             with torch.no_grad():
-                action = self.model.act(spatial_planes, scalars, deterministic=self.deterministic)
+                action = self.model.act_actor_only(spatial_planes, scalars, deterministic=self.deterministic)
                 if not policy_action_is_finite(action):
                     raise ValueError("policy network produced NaN or Inf")
             self.last_action = action
@@ -612,10 +845,18 @@ def _gather_position(h: Tensor, position: Tensor) -> Tensor:
 
 
 def _validate_config(config: PolicyNetworkConfig) -> None:
-    if config.spatial_channels != SPATIAL_CHANNELS:
-        raise ValueError(f"spatial_channels must be {SPATIAL_CHANNELS}, got {config.spatial_channels}")
-    if config.scalar_features != SCALAR_FEATURES:
-        raise ValueError(f"scalar_features must be {SCALAR_FEATURES}, got {config.scalar_features}")
+    if config.actor_spatial_channels != SPATIAL_CHANNELS:
+        raise ValueError(f"actor_spatial_channels must be {SPATIAL_CHANNELS}, got {config.actor_spatial_channels}")
+    if config.actor_scalar_features != SCALAR_FEATURES:
+        raise ValueError(f"actor_scalar_features must be {SCALAR_FEATURES}, got {config.actor_scalar_features}")
+    if config.critic_spatial_channels != CRITIC_SPATIAL_CHANNELS:
+        raise ValueError(
+            f"critic_spatial_channels must be {CRITIC_SPATIAL_CHANNELS}, got {config.critic_spatial_channels}"
+        )
+    if config.critic_scalar_features != CRITIC_SCALAR_FEATURES:
+        raise ValueError(
+            f"critic_scalar_features must be {CRITIC_SCALAR_FEATURES}, got {config.critic_scalar_features}"
+        )
     if config.width <= 0:
         raise ValueError(f"width must be positive, got {config.width}")
     if config.residual_blocks <= 0:

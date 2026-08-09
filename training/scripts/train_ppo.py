@@ -24,7 +24,7 @@ from training.rl import (
     PpoConfig,
     RuntimePolicyWrapper,
     SingleAgentEnvConfig,
-    TerminalWinPlusMarginPotentialReward,
+    TerminalWinMarginGoldGainReward,
     collect_ppo_rollouts,
     evaluate_policy,
     ppo_update,
@@ -43,8 +43,11 @@ class TrainPpoConfig:
     save_interval: int = 1
     eval_interval: int | None = None
     eval_cases: tuple[EvaluationCase, ...] = ()
-    reward_beta: float = 0.2
-    reward_margin_scale: float = 500.0
+    beta_win: float = 1.0
+    beta_margin: float = 0.2
+    beta_gold_gain: float = 0.0
+    margin_scale: float = 500.0
+    gold_gain_scale: float = 100.0
     learning_rate: float = 2.0e-4
     adam_eps: float = 1.0e-5
     rollout_mode: str = "serial"
@@ -115,6 +118,11 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "transition_count": batch.transition_count,
                 "mean_reward": float(batch.rewards.mean().detach().cpu().item()),
                 "reward_sum": float(batch.rewards.sum().detach().cpu().item()),
+                "beta_win": config.beta_win,
+                "beta_margin": config.beta_margin,
+                "beta_gold_gain": config.beta_gold_gain,
+                "margin_scale": config.margin_scale,
+                "gold_gain_scale": config.gold_gain_scale,
                 "policy_loss": stats.policy_loss,
                 "value_loss": stats.value_loss,
                 "entropy_bonus": stats.entropy_bonus,
@@ -216,8 +224,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-interval", type=int, default=1)
     parser.add_argument("--eval-interval", type=int, default=None)
     parser.add_argument("--eval-seed", type=int, default=2026080401)
-    parser.add_argument("--reward-beta", type=float, default=0.2)
-    parser.add_argument("--reward-margin-scale", type=float, default=500.0)
+    parser.add_argument("--beta-win", type=float, default=1.0)
+    parser.add_argument("--beta-margin", type=float, default=0.2)
+    parser.add_argument("--beta-gold-gain", type=float, default=0.0)
+    parser.add_argument("--margin-scale", type=float, default=500.0)
+    parser.add_argument("--gold-gain-scale", type=float, default=100.0)
     parser.add_argument("--learning-rate", type=float, default=2.0e-4)
     parser.add_argument("--adam-eps", type=float, default=1.0e-5)
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
@@ -275,8 +286,11 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         save_interval=int(args.save_interval),
         eval_interval=None if args.eval_interval is None else int(args.eval_interval),
         eval_cases=eval_cases,
-        reward_beta=float(args.reward_beta),
-        reward_margin_scale=float(args.reward_margin_scale),
+        beta_win=float(args.beta_win),
+        beta_margin=float(args.beta_margin),
+        beta_gold_gain=float(args.beta_gold_gain),
+        margin_scale=float(args.margin_scale),
+        gold_gain_scale=float(args.gold_gain_scale),
         learning_rate=float(args.learning_rate),
         adam_eps=float(args.adam_eps),
         rollout_mode=str(args.rollout_mode),
@@ -301,9 +315,12 @@ def _sampler(config: TrainPpoConfig) -> BatchRolloutSampler:
         env_config=SingleAgentEnvConfig(episode=config.episode, opponent_spec=config.opponent_specs[0]),
         mechanisms=RoundStepMechanisms(),
         spawn=SpawnConfig(),
-        reward_fn=TerminalWinPlusMarginPotentialReward(
-            beta=config.reward_beta,
-            margin_scale=config.reward_margin_scale,
+        reward_fn=TerminalWinMarginGoldGainReward(
+            beta_win=config.beta_win,
+            beta_margin=config.beta_margin,
+            beta_gold_gain=config.beta_gold_gain,
+            margin_scale=config.margin_scale,
+            gold_gain_scale=config.gold_gain_scale,
             gamma=config.ppo.gamma,
         ),
     )
@@ -423,22 +440,68 @@ def _load_init_model_checkpoint(
     raw_model_config = checkpoint.get("model_config")
     if raw_model_config is None:
         raise SimulatorRuleError("BC checkpoint missing model_config")
-    expected_config = asdict(model.config)
-    if dict(raw_model_config) != expected_config:
+    expected_config = _actor_init_config(model.config)
+    if _actor_init_config(raw_model_config) != expected_config:
         raise SimulatorRuleError("BC checkpoint model_config does not match PPO model config")
 
     current = model.state_dict()
     loaded = checkpoint["model_state_dict"]
-    filtered = {
-        key: value
-        for key, value in loaded.items()
-        if key in current and not key.startswith("critic_mlp.")
-    }
-    missing = sorted(key for key in current if key not in filtered and not key.startswith("critic_mlp."))
+    filtered = _actor_init_state_from_bc(current, loaded)
+    missing = sorted(
+        key
+        for key in current
+        if _is_actor_state_key(key) and key not in filtered
+    )
     if missing:
-        raise SimulatorRuleError(f"BC checkpoint missing non-critic model keys: {missing[:5]}")
+        raise SimulatorRuleError(f"BC checkpoint missing actor model keys: {missing[:5]}")
     current.update(filtered)
     model.load_state_dict(current)
+
+
+def _actor_init_config(config: PolicyNetworkConfig | dict[str, Any]) -> dict[str, Any]:
+    raw = asdict(config) if isinstance(config, PolicyNetworkConfig) else dict(config)
+    aliases = {
+        "actor_spatial_channels": raw.get("actor_spatial_channels", raw.get("spatial_channels")),
+        "actor_scalar_features": raw.get("actor_scalar_features", raw.get("scalar_features")),
+    }
+    return {
+        "actor_spatial_channels": aliases["actor_spatial_channels"],
+        "actor_scalar_features": aliases["actor_scalar_features"],
+        "width": raw.get("width"),
+        "residual_blocks": raw.get("residual_blocks"),
+        "se_reduction": raw.get("se_reduction"),
+        "scalar_hidden": tuple(raw.get("scalar_hidden", ())),
+        "actor_hidden": raw.get("actor_hidden"),
+        "decoder_hidden": raw.get("decoder_hidden"),
+        "decoder_embedding": raw.get("decoder_embedding"),
+        "activation": raw.get("activation"),
+    }
+
+
+def _actor_init_state_from_bc(
+    current: dict[str, torch.Tensor],
+    loaded: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    filtered: dict[str, torch.Tensor] = {}
+    for key, value in loaded.items():
+        mapped_key = _map_bc_actor_key(key)
+        if mapped_key is not None and mapped_key in current:
+            filtered[mapped_key] = value
+    return filtered
+
+
+def _map_bc_actor_key(key: str) -> str | None:
+    if key.startswith("critic_encoder.") or key.startswith("critic_mlp."):
+        return None
+    if key.startswith("actor_encoder."):
+        return key
+    if key.startswith("stem.") or key.startswith("scalar_tower.") or key.startswith("blocks."):
+        return f"actor_encoder.{key}"
+    return key
+
+
+def _is_actor_state_key(key: str) -> bool:
+    return not (key.startswith("critic_encoder.") or key.startswith("critic_mlp."))
 
 
 def _model_config_from_checkpoint(checkpoint: dict[str, Any]) -> PolicyNetworkConfig:
@@ -519,6 +582,7 @@ def _training_diagnostics(batch) -> dict[str, float]:
     diagnostics["value_std"] = _tensor_std(batch.old_values)
     diagnostics["advantage_mean"] = _tensor_mean(batch.advantages)
     diagnostics["advantage_std"] = _tensor_std(batch.advantages)
+    diagnostics.update(_reward_component_diagnostics(batch.infos))
     return diagnostics
 
 
@@ -529,6 +593,7 @@ def _terminal_diagnostics(batch, terminal_indices: list[int]) -> dict[str, float
             "train_net_gold_margin_mean": 0.0,
             "train_agent_net_gold_mean": 0.0,
             "train_opponent_net_gold_mean": 0.0,
+            "train_agent_gross_gold_mean": 0.0,
             "train_agent_pickups_mean": 0.0,
             "train_opponent_pickups_mean": 0.0,
             "train_agent_vision_spent_mean": 0.0,
@@ -563,10 +628,42 @@ def _terminal_diagnostics(batch, terminal_indices: list[int]) -> dict[str, float
         "train_net_gold_margin_mean": _mean(margins),
         "train_agent_net_gold_mean": _mean(agent_net_gold),
         "train_opponent_net_gold_mean": _mean(opponent_net_gold),
+        "train_agent_gross_gold_mean": _mean(
+            [net + spent for net, spent in zip(agent_net_gold, agent_vision_spent, strict=True)]
+        ),
         "train_agent_pickups_mean": _mean(agent_pickups),
         "train_opponent_pickups_mean": _mean(opponent_pickups),
         "train_agent_vision_spent_mean": _mean(agent_vision_spent),
     }
+
+
+def _reward_component_diagnostics(infos: tuple[dict[str, Any], ...]) -> dict[str, float]:
+    components = [info.get("reward_components") for info in infos if info.get("reward_components") is not None]
+    if not components:
+        return {
+            "reward_terminal_mean": 0.0,
+            "reward_terminal_reward_mean": 0.0,
+            "reward_margin_shaping_mean": 0.0,
+            "reward_margin_reward_mean": 0.0,
+            "reward_gold_gain_mean": 0.0,
+            "reward_clipped_gold_gain_mean": 0.0,
+            "reward_gold_gain_reward_mean": 0.0,
+            "reward_component_total_mean": 0.0,
+        }
+    return {
+        "reward_terminal_mean": _component_mean(components, "terminal"),
+        "reward_terminal_reward_mean": _component_mean(components, "terminal_reward"),
+        "reward_margin_shaping_mean": _component_mean(components, "margin_shaping"),
+        "reward_margin_reward_mean": _component_mean(components, "margin_reward"),
+        "reward_gold_gain_mean": _component_mean(components, "gold_gain"),
+        "reward_clipped_gold_gain_mean": _component_mean(components, "clipped_gold_gain"),
+        "reward_gold_gain_reward_mean": _component_mean(components, "gold_gain_reward"),
+        "reward_component_total_mean": _component_mean(components, "total"),
+    }
+
+
+def _component_mean(components: list[dict[str, float]], field: str) -> float:
+    return _mean([float(item[field]) for item in components])
 
 
 def _fraction(values: torch.Tensor, target: int) -> float:

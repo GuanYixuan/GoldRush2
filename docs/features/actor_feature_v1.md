@@ -1,10 +1,10 @@
-# Feature Extractor v1 设计
+# Actor Feature v1 设计
 
-本文冻结 GoldRush2.0 初版 feature extractor 的网络输入语义。v1 按 CNN 主线设计，只输出 spatial planes 与 scalars，不引入 tokens。RL 栈总览见 `docs/rl_architecture.md`，运行时工程入口见 `policy_runtime/README.md`。
+本文冻结 GoldRush2.0 actor 可提交路径的网络输入语义。v1 按 CNN 主线设计，只输出 spatial planes 与 scalars，不引入 tokens。feature 总览见 `docs/features/README.md`，RL 栈总览见 `docs/rl_architecture.md`，运行时工程入口见 `policy_runtime/README.md`。
 
 ## 定位
 
-feature extractor 属于 `policy_runtime/`，由 C++ 单实现承担，Python 训练侧通过 binding 调用同一套状态机。它负责把官方形状 `GameInput` 转换为网络输入，同时维护 agent 自身在部分可观测环境中的记忆。
+actor feature extractor 属于 `policy_runtime/`，由 C++ 单实现承担，Python 训练侧通过 binding 调用同一套状态机。它负责把官方形状 `GameInput` 转换为 actor 网络输入，同时维护 agent 自身在部分可观测环境中的记忆。
 
 它不负责：
 
@@ -250,7 +250,7 @@ scalar_keys = [
 - `own_gold_scaled`：己方两个角色当前毛金币总和，取值为 `clip((my_units_gold[0]+my_units_gold[1]) / 2000, 0, 3)`。
 - `opp_gold_scaled`：对手当前毛金币总和，取值为 `clip(gold_opp / 2000, 0, 3)`。
 - `gold_margin_scaled`：己方毛金币减对手毛金币，取值为 `clip((own_gold-gold_opp) / 500, -3, 3)`。
-- `outer_gold_phase_sin` / `outer_gold_phase_cos`：外围金币生成机制近似的 20 回合相位。`phase=(round % 20)/20`，分别取 `sin(2*pi*phase)` 与 `cos(2*pi*phase)`。
+- `outer_gold_phase_sin` / `outer_gold_phase_cos`：历史命名字段，实际表达 `round % 20` 的周期相位。机制建模显示 static2 high batch 没有固定 20 回合相位；该相位主要对应炸弹刷新。`phase=(round % 20)/20`，分别取 `sin(2*pi*phase)` 与 `cos(2*pi*phase)`。
 - `snapshot_sin` / `snapshot_cos`：官方 `D=5` snapshot 周期相位。`phase=(round % 5)/5`，分别取 `sin(2*pi*phase)` 与 `cos(2*pi*phase)`。
 - `last_snapshot_valid`：是否已经收到过至少一次有效 snapshot。
 
@@ -258,7 +258,7 @@ scalar_keys = [
 
 - 金币相关 scalar 均使用毛金币口径；对手视野花费在局中不可知，因此不尝试构造净金币差。
 - `game_phase_sin` 在整局中近似单调从 `-1` 到 `1`，承担进度信号；`game_phase_cos` 在中局最高，表达中期资源争夺窗口。
-- `outer_gold_phase_*` 来自当前机制近似，不是官方直接公开的精确生成周期；如果正式赛外围金币机制变化，该特征可能失真。
+- `outer_gold_phase_*` 是 `goldrush2_feature_v1` 中保留的 legacy 字段名；未来若迁移到 actor feature v2，应重命名为 `bomb_refresh_phase_*`，并用新 schema 名称避免与当前 checkpoint / ONNX 导出混淆。
 
 v1 不加入当前/上一轮视野购买、上一轮 `k/order/actions/vp` 或 player id / 出生侧编码。这些项留作后续策略结构或数据增强方案确定后再评估。
 

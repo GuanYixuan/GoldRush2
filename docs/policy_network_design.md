@@ -1,15 +1,23 @@
 # Policy Network 设计
 
-本文冻结当前训练与部署共享的网络结构和动作概率语义。Feature 输入见 `docs/feature_extractor_design.md`，PPO 栈见 `docs/rl_architecture.md`，游戏动作规则以 `gamerules/gamerules.md` 为准。
+本文冻结当前训练与部署共享的网络结构和动作概率语义。Actor feature 输入见 `docs/features/actor_feature_v1.md`，PPO 栈见 `docs/rl_architecture.md`，游戏动作规则以 `gamerules/gamerules.md` 为准。
 
 ## 定位
 
-固定输入保持 feature v1 不变：
+网络使用 actor/critic 双输入。actor 输入保持可提交路径 feature v1 不变：
 
 ```text
-spatial_planes: B x 38 x 17 x 17
-scalars: B x 10
-feature_schema: goldrush2_feature_v1
+actor_spatial_planes: B x 38 x 17 x 17
+actor_scalars: B x 10
+actor_feature_schema: goldrush2_feature_v1
+```
+
+critic 输入使用训练期 privileged critic feature：
+
+```text
+critic_spatial_planes: B x 26 x 17 x 17
+critic_scalars: B x 17
+critic_feature_schema: goldrush2_privileged_critic_feature_v1
 ```
 
 网络输出官方动作字段和 value：
@@ -22,20 +30,20 @@ vp: B，取值 0..2
 logprob/value/entropy diagnostics: B
 ```
 
-网络不维护 observation memory，不访问 replay/full-state privileged 信息，不模拟敌方或 NPC 行动，也不执行金币、炸弹和终局结算。
+网络不维护 observation memory，不执行金币、炸弹和终局结算。actor 路径不访问 replay/full-state privileged 信息，也不模拟敌方或 NPC 行动。critic 路径只在训练期读取 privileged critic feature，部署、BC、ONNX/C++ 提交路径不得依赖 critic 输入。
 
-## Backbone
+## Encoder
 
-当前默认结构：
+actor 和 critic 使用两套参数独立的 encoder。第一版两套 encoder 主体结构相同，但输入 channel/scalar 数量和 schema 不同，不共享任何可训练参数：
 
 ```text
-Stem:
+Actor stem:
     Conv3x3(38 -> 96)
     SiLU
     Conv3x3(96 -> 96)
     SiLU
 
-Scalar tower:
+Actor scalar tower:
     Linear(10 -> 96)
     SiLU
     Linear(96 -> 96)
@@ -49,16 +57,61 @@ Backbone:
     8 x SE-ResidualBlock(width=96, reduction=4)
 ```
 
+critic encoder 使用同型结构，但 stem 输入为 `26`，scalar tower 输入为 `17`：
+
+```text
+Critic stem:
+    Conv3x3(26 -> 96)
+    SiLU
+    Conv3x3(96 -> 96)
+    SiLU
+
+Critic scalar tower:
+    Linear(17 -> 96)
+    SiLU
+    Linear(96 -> 96)
+    SiLU
+    Linear(96 -> 192)  # FiLM gamma/beta
+```
+
 SE residual block 不使用 normalization。FiLM 最后一层零初始化；residual branch 第二个卷积使用小 gain；SE gate 最后一层零初始化。默认激活为 SiLU，ReLU 只保留为部署实验配置。
 
-Backbone 输出 `H: B x 96 x 17 x 17`。actor 使用全局 average/max pooling 和两个己方角色初始位置处的 feature gather：
+第一版 FiLM 只在 stem 后、进入 residual blocks 前作用一次。多层 FiLM/per-block FiLM 暂缓，不进入本版默认结构；如后续 critic EV 仍不足，可作为独立网络消融项加入配置。
+
+actor encoder 输出 `H_actor: B x 96 x 17 x 17`。actor 使用全局 average/max pooling 和两个己方角色初始位置处的 feature gather：
 
 ```text
 actor_context = MLP(concat(avg, max, unit0_local, unit1_local))
 actor_hidden = 256
 ```
 
-critic 只使用 `concat(avg, max)`，经 `256,128` MLP 输出标量 value，不依赖采样动作或 decoder hidden。
+critic encoder 输出 `H_critic: B x 96 x 17 x 17`。critic 使用全局 average/max pooling，以及四个真实角色位置处的 feature gather：
+
+```text
+critic_context = MLP(concat(
+    avg,
+    max,
+    own_unit0_local,
+    own_unit1_local,
+    enemy_unit0_local,
+    enemy_unit1_local,
+))
+critic_mlp_input = width * 6
+critic_hidden = (256, 128)
+```
+
+critic gather 使用 privileged critic schema 中的角色位置 channel：
+
+```text
+own_unit0_mask:   critic channel 9
+own_unit1_mask:   critic channel 10
+enemy_unit0_mask: critic channel 11
+enemy_unit1_mask: critic channel 12
+```
+
+critic value 不依赖采样动作、actor local gather 或 decoder hidden。critic 的四角色 gather 只服务 value function，不能进入 actor action/logprob 路径。
+
+PPO 中 `policy_loss` 和 entropy 只更新 actor encoder、actor heads、embedding 和 decoder；`value_loss` 只更新 critic encoder 和 `critic_mlp`。启动时会 fail-fast 检查 actor/critic 参数集合不重叠且覆盖全部模型参数。
 
 ## 动作概率模型
 
@@ -132,15 +185,22 @@ NPC 不阻挡玩家。可见敌人的执行时位置不确定，不进入 hard m
 公共训练接口：
 
 ```text
-act(spatial_planes, scalars, deterministic=False) -> PolicyAction
+act(
+    actor_spatial_planes, actor_scalars,
+    critic_spatial_planes, critic_scalars,
+    deterministic=False,
+) -> PolicyAction
 
 evaluate_actions(
-    spatial_planes, scalars,
+    actor_spatial_planes, actor_scalars,
+    critic_spatial_planes, critic_scalars,
     actions, k, order, vp,
 ) -> PolicyEvaluation
 ```
 
-`act()` 采样或逐步 argmax `ko/vp/actions`。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder。两者共用 encoder、执行表、位置转移和 mask。
+`act()` 使用 actor feature 采样或逐步 argmax `ko/vp/actions`，并使用 critic feature 通过 critic encoder 输出 value。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder，并用 critic feature 重算 value。
+
+部署/BC/ONNX 路径应保留 actor-only 入口。该入口只能返回 action/logprob/entropy 或使用占位 value，不得要求 privileged critic feature。PPO 训练路径必须使用双输入接口。
 
 `forward()` 是部署友好的 deterministic `act()` 包装，不用于 PPO 更新。
 
@@ -156,13 +216,17 @@ log p(ko | state)
 + sum_t log p(a_exec[t] | prefix_t, simulated_positions[t])
 ```
 
-PPO buffer 和 multiprocess shared memory 继续只保存：
+PPO buffer 和 multiprocess shared memory 保存：
 
 ```text
-spatial_planes/scalars/actions/k/order/vp/old_logprob/value
+actor_spatial_planes/actor_scalars
+critic_spatial_planes/critic_scalars
+actions/k/order/vp/old_logprob/value
 ```
 
 decoder hidden、执行顺序动作和 `ko` 均可由现有字段确定，不进入 buffer。PPO 更新必须 teacher force buffer 动作，禁止重新采样或用当前 argmax 作为 prefix。模型参数不变时，rollout logprob 与重算 logprob 必须在浮点误差内一致。
+
+policy loss、KL 和 entropy 只读取 actor feature；value loss、old value 对齐和 explained variance 只读取 critic feature。`old_logprob` 仍来自 actor 路径，`old_value` 来自 critic 路径。
 
 当前 entropy 权重保持旧量级：
 
@@ -181,7 +245,21 @@ action entropy 暂以完整五类 `log(5)` 归一化；mask 后只有少量合�
 
 ## Rollout 与性能
 
-serial 和 multiprocess rollout 均直接调用 `model.act()`。一次 feature request 仍只返回完整 `GameOutput`、logprob 和 value；六步 decoder 不与 worker 中途通信。
+serial 和 multiprocess rollout 均应在 action-time state 下同时构造 actor feature 和 critic feature，再调用 PPO 双输入 `model.act()`。一次 feature request 仍只返回完整 `GameOutput`、logprob 和 value；六步 decoder 不与 worker 中途通信。
+
+multiprocess rollout 的 worker 负责提取两套 feature：
+
+```text
+policy_runtime.FeatureExtractor.observe(GameInput) -> actor feature
+extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent_player_id) -> critic feature
+```
+
+主进程/GPU 只负责批量推理。shared memory 与 PPO batch 保存两套 feature，shape 固定为：
+
+```text
+actor:  38 x 17 x 17, scalars 10
+critic: 26 x 17 x 17, scalars 17
+```
 
 自回归前的完整模型双实例基线约为：
 
@@ -201,8 +279,9 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - GRU input weight 使用 Xavier，hidden weight 使用 orthogonal，bias 为 0。
 - embedding 使用小正态初始化。
 - value 输出层使用小初始化，使初始 value 接近 0。
+- BC 训练只优化 actor 参数。PPO 从 BC checkpoint 初始化时，只加载 actor 路径；critic encoder 与 critic head 按 privileged critic schema 随机初始化或从专门 critic checkpoint 加载，不能默认拷贝 actor encoder，因为 actor/critic 输入 channel 与语义不同。
 
-旧 factorized checkpoint 不兼容当前动作头。主线不维护隐式部分加载；需要迁移 backbone/value 时必须使用显式转换实验并记录缺失字段。
+旧 factorized checkpoint 和旧 shared-encoder PPO checkpoint 不兼容当前模型。主线不维护隐式部分加载；需要迁移 actor 或 critic 时必须使用显式转换实验并记录缺失字段。
 
 ## 部署与验证
 
@@ -214,6 +293,8 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - `k=0/6`、两种 order、边界、障碍和己方碰撞。
 - 非法动作不更新位置的规则参考对照。
 - rollout 与 teacher forcing logprob 等价。
+- PPO 双输入中 actor feature 只影响 policy/logprob，critic feature 只影响 value。
+- critic 四角色 gather 的 channel index、shape 和 P1/P2 视角。
 - masked entropy、前向和反向 finite。
 - serial/multiprocess rollout、checkpoint resume 和 CUDA smoke。
 - 动作连续性 diagnostics：无效移动、相邻反向、有效位移和己方角色冲突。

@@ -1,6 +1,6 @@
 # Policy Runtime
 
-`policy_runtime/` 承载训练和最终 C++ 提交策略共享的确定性运行时逻辑。当前实现冻结为 `goldrush2_feature_v1`，具体 feature 语义见 `docs/feature_extractor_design.md`。
+`policy_runtime/` 承载训练和最终 C++ 提交策略共享的确定性运行时逻辑。当前实现冻结为 `goldrush2_feature_v1`，具体 feature 语义见 `docs/features/actor_feature_v1.md`。
 
 ## 边界
 

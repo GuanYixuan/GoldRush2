@@ -125,6 +125,7 @@ class SingleAgentGoldRushEnv:
             first_player_id=self.opponent_player_id,
         )
         reward = self.reward_fn(result, agent_player_id=self.agent_player_id)
+        reward_components = getattr(self.reward_fn, "last_components", None)
         self.terminated = result.terminated
         self.observations = result.observations
         next_observation = None if result.terminated else result.observations[self.agent_player_id]
@@ -140,6 +141,7 @@ class SingleAgentGoldRushEnv:
                 agent_output=agent_output,
                 opponent_output=opponent_output,
                 opponent_spec=self.opponent_spec,
+                reward_components=reward_components,
             ),
         )
 
@@ -174,6 +176,7 @@ def _step_info(
     agent_output: GameOutput | Sequence[int],
     opponent_output: GameOutput,
     opponent_spec: OpponentSpec,
+    reward_components: dict[str, float] | None,
 ) -> dict[str, Any]:
     return {
         "round_index": result.trace.round_index,
@@ -185,6 +188,7 @@ def _step_info(
         "opponent_spec": opponent_spec,
         "scores": _scores(result),
         "events": _event_counts(result.trace),
+        "reward_components": reward_components,
         "trace": result.trace,
         "game_result": result.game_result,
         "replay": result.replay,

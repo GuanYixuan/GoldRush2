@@ -21,6 +21,7 @@ from training.opponents import OpponentSpec
 
 from .env import SingleAgentGoldRushEnv
 from .ppo_buffer import PpoBatch, PpoMiniBatch, PpoTransition
+from .privileged_critic_features import extract_privileged_critic_features
 from .sampler import BatchRolloutSampler
 
 
@@ -119,6 +120,8 @@ def evaluate_actions(model: GoldRushPolicyNetwork, batch: PpoBatch | PpoMiniBatc
     return model.evaluate_actions(
         batch.spatial_planes,
         batch.scalars,
+        batch.critic_planes,
+        batch.critic_scalars,
         batch.actions,
         batch.k,
         batch.order,
@@ -134,6 +137,7 @@ def ppo_update(
 ) -> PpoUpdateStats:
     config = PpoConfig() if config is None else config
     _validate_config(config)
+    _validate_actor_critic_parameter_split(model)
     batch.require_gae()
 
     policy_losses: list[float] = []
@@ -171,11 +175,15 @@ def ppo_update(
             )
             value_loss = torch.maximum(unclipped_value_loss, clipped_value_loss).mean()
             entropy_bonus = evaluation.normalized_entropy.mean()
-            loss = policy_loss + config.value_coef * value_loss - entropy_bonus
+            actor_loss = policy_loss - entropy_bonus
+            critic_loss = config.value_coef * value_loss
+            loss = actor_loss + critic_loss
 
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+            actor_loss.backward()
+            critic_loss.backward()
+            actor_grad_norm = nn.utils.clip_grad_norm_(model.actor_parameters(), config.max_grad_norm)
+            critic_grad_norm = nn.utils.clip_grad_norm_(model.critic_parameters(), config.max_grad_norm)
             optimizer.step()
 
             with torch.no_grad():
@@ -188,7 +196,12 @@ def ppo_update(
             losses.append(float(loss.detach().cpu().item()))
             kls.append(float(approx_joint_kl.detach().cpu().item()))
             clip_fractions.append(float(clip_fraction.detach().cpu().item()))
-            grad_norms.append(float(torch.as_tensor(grad_norm).detach().cpu().item()))
+            grad_norms.append(
+                max(
+                    float(torch.as_tensor(actor_grad_norm).detach().cpu().item()),
+                    float(torch.as_tensor(critic_grad_norm).detach().cpu().item()),
+                )
+            )
 
             if config.target_joint_kl is not None and float(approx_joint_kl.item()) > config.target_joint_kl:
                 early_stopped = True
@@ -218,6 +231,18 @@ def explained_variance(values: Tensor, returns: Tensor | None) -> float:
         return 0.0
     residual_var = torch.var(returns - values, unbiased=False)
     return float((1.0 - residual_var / returns_var).detach().cpu().item())
+
+
+def _validate_actor_critic_parameter_split(model: GoldRushPolicyNetwork) -> None:
+    actor_ids = {id(parameter) for parameter in model.actor_parameters()}
+    critic_ids = {id(parameter) for parameter in model.critic_parameters()}
+    overlap = actor_ids & critic_ids
+    if overlap:
+        raise SimulatorRuleError(f"actor and critic parameters overlap: {len(overlap)}")
+    all_ids = {id(parameter) for parameter in model.parameters()}
+    missing = all_ids - actor_ids - critic_ids
+    if missing:
+        raise SimulatorRuleError(f"model parameters missing from actor/critic split: {len(missing)}")
 
 
 def _collect_one_ppo_episode(
@@ -251,8 +276,11 @@ def _collect_one_ppo_episode(
             raise SimulatorRuleError(f"unexpected feature schema: {features['feature_schema']!r}")
         spatial_planes = torch.as_tensor(features["planes"], dtype=torch.float32, device=device).unsqueeze(0)
         scalars = torch.as_tensor(features["scalars"], dtype=torch.float32, device=device).unsqueeze(0)
+        critic_features = _extract_critic_features(env, agent_player_id)
+        critic_planes = torch.as_tensor(critic_features["planes"], dtype=torch.float32, device=device).unsqueeze(0)
+        critic_scalars = torch.as_tensor(critic_features["scalars"], dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
-            policy_action = model.act(spatial_planes, scalars)
+            policy_action = model.act(spatial_planes, scalars, critic_planes, critic_scalars)
             if not policy_action_is_finite(policy_action):
                 raise SimulatorRuleError("PPO rollout model produced NaN or Inf")
         game_output = policy_action_to_game_output(policy_action)
@@ -262,6 +290,8 @@ def _collect_one_ppo_episode(
             PpoTransition(
                 spatial_planes=spatial_planes.squeeze(0).detach().cpu(),
                 scalars=scalars.squeeze(0).detach().cpu(),
+                critic_planes=critic_planes.squeeze(0).detach().cpu(),
+                critic_scalars=critic_scalars.squeeze(0).detach().cpu(),
                 actions=policy_action.actions.squeeze(0).detach().cpu(),
                 k=policy_action.k.squeeze(0).detach().cpu(),
                 order=policy_action.order.squeeze(0).detach().cpu(),
@@ -280,6 +310,20 @@ def _collect_one_ppo_episode(
         observation = step.observation
 
     return int(reset.info["map_id"]), reset.info["opponent_spec"]
+
+
+def _extract_critic_features(env: SingleAgentGoldRushEnv, agent_player_id: int) -> dict[str, object]:
+    if env.round_env is None:
+        raise SimulatorRuleError("single-agent env has no round_env while extracting critic features")
+    if env.round_env.state is None or env.round_env.template is None or env.round_env.outer_state is None:
+        raise SimulatorRuleError("round_env missing state/template/outer_state while extracting critic features")
+    return extract_privileged_critic_features(
+        state=env.round_env.state,
+        template=env.round_env.template,
+        outer_state=env.round_env.outer_state,
+        agent_player_id=agent_player_id,
+        round_count=env.round_env.config.episode.rules.round_count,
+    )
 
 
 def _validate_config(config: PpoConfig) -> None:
