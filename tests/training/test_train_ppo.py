@@ -49,6 +49,12 @@ class TrainPpoTests(unittest.TestCase):
             for key in _diagnostic_keys():
                 self.assertIn(key, records[0])
                 self.assertTrue(math.isfinite(float(records[0][key])))
+            self.assertEqual(records[0]["optimizer_phase"], "full")
+            self.assertEqual(records[0]["phase"], "ppo")
+            self.assertEqual(records[0]["rollout_seed"], config.seed)
+            self.assertFalse(records[0]["fixed_rollout_seeds"])
+            self.assertAlmostEqual(float(records[0]["critic_lr"]), config.critic_learning_rate)
+            self.assertAlmostEqual(float(records[0]["actor_lr"]), config.actor_learning_rate / config.actor_lr_ramp_updates)
 
     def test_checkpoint_can_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -67,6 +73,59 @@ class TrainPpoTests(unittest.TestCase):
             self.assertEqual(checkpoint["update_index"], 2)
             records = _read_jsonl(output_dir / "metrics.jsonl")
             self.assertEqual([record["update"] for record in records if record["kind"] == "train"], [1, 2])
+
+    def test_critic_warmup_and_actor_ramp_are_ppo_phase_relative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                total_updates=3,
+                critic_warmup_updates=1,
+                actor_lr_ramp_updates=2,
+            )
+
+            result = run_training(config)
+
+            self.assertEqual(result.final_update, 3)
+            records = _read_jsonl(Path(tmpdir) / "metrics.jsonl")
+            train_records = [record for record in records if record["kind"] == "train"]
+            self.assertEqual([record["optimizer_phase"] for record in train_records], ["critic", "full", "full"])
+            self.assertIsNone(train_records[0]["actor_lr"])
+            self.assertAlmostEqual(float(train_records[0]["critic_lr"]), config.critic_learning_rate)
+            self.assertAlmostEqual(float(train_records[1]["actor_lr"]), config.actor_learning_rate * 0.5)
+            self.assertAlmostEqual(float(train_records[2]["actor_lr"]), config.actor_learning_rate)
+
+    def test_fork_ppo_checkpoint_loads_model_without_resuming_update(self) -> None:
+        with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as fork_tmp:
+            first = run_training(_smoke_config(output_dir=Path(first_tmp), total_updates=2))
+
+            forked = run_training(
+                _smoke_config(
+                    output_dir=Path(fork_tmp),
+                    total_updates=1,
+                    fork_ppo_checkpoint=first.latest_checkpoint,
+                )
+            )
+
+            self.assertEqual(forked.final_update, 1)
+            records = _read_jsonl(Path(fork_tmp) / "metrics.jsonl")
+            self.assertEqual(records[0]["init_source"], "ppo_fork")
+            self.assertEqual(records[0]["fork_checkpoint_update"], 2)
+
+    def test_rollout_seed_base_can_be_fixed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                total_updates=2,
+                rollout_seed_base=500,
+                advance_rollout_seed=False,
+            )
+
+            run_training(config)
+
+            records = _read_jsonl(Path(tmpdir) / "metrics.jsonl")
+            train_records = [record for record in records if record["kind"] == "train"]
+            self.assertEqual([record["rollout_seed"] for record in train_records], [500, 500])
+            self.assertTrue(train_records[0]["fixed_rollout_seeds"])
 
     def test_eval_interval_runs_tiny_eval(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -176,9 +235,16 @@ def _smoke_config(
     eval_cases: tuple[EvaluationCase, ...] = (),
     rollout_mode: str = "serial",
     multiprocess_rollout: MultiprocessRolloutConfig | None = None,
+    critic_warmup_updates: int = 0,
+    actor_lr_ramp_updates: int = 100,
+    fork_ppo_checkpoint: Path | None = None,
+    rollout_seed_base: int | None = None,
+    advance_rollout_seed: bool = True,
 ) -> TrainPpoConfig:
     return TrainPpoConfig(
         seed=77,
+        rollout_seed_base=rollout_seed_base,
+        advance_rollout_seed=advance_rollout_seed,
         total_updates=total_updates,
         pair_count=1,
         map_ids=(1,),
@@ -190,10 +256,13 @@ def _smoke_config(
         rollout_mode=rollout_mode,
         multiprocess_rollout=multiprocess_rollout or MultiprocessRolloutConfig(),
         beta_margin=0.0,
+        critic_warmup_updates=critic_warmup_updates,
+        actor_lr_ramp_updates=actor_lr_ramp_updates,
         model=_small_model_config(),
         ppo=PpoConfig(update_epochs=1, minibatch_size=2, target_joint_kl=None),
         episode=EpisodeConfig(rules=RulesConfig(round_count=1, snapshot_period=1), seed=7, map_id=1),
         resume_checkpoint=resume_checkpoint,
+        fork_ppo_checkpoint=fork_ppo_checkpoint,
     )
 
 

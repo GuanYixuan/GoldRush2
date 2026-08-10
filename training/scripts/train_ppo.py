@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from training.rl import (
     SingleAgentEnvConfig,
     TerminalWinMarginGoldGainReward,
     collect_ppo_rollouts,
+    critic_only_update,
     evaluate_policy,
     ppo_update,
 )
@@ -34,6 +37,8 @@ from training.rl import (
 @dataclass(frozen=True)
 class TrainPpoConfig:
     seed: int = 20260804
+    rollout_seed_base: int | None = None
+    advance_rollout_seed: bool = True
     total_updates: int = 1
     pair_count: int = 1
     map_ids: tuple[int, ...] = (1,)
@@ -41,16 +46,20 @@ class TrainPpoConfig:
     device: str = "cpu"
     output_dir: Path = Path("temp/ppo_runs/smoke")
     save_interval: int = 1
+    save_updates: tuple[int, ...] = ()
     eval_interval: int | None = None
     eval_cases: tuple[EvaluationCase, ...] = ()
-    beta_win: float = 1.0
-    beta_margin: float = 0.2
+    beta_win: float = 0.0
+    beta_margin: float = 0.0
     beta_gold_gain: float = 0.0
     beta_net_gold_gain: float = 0.1
-    margin_scale: float = 500.0
+    margin_scale: float = 200.0
     gold_gain_scale: float = 100.0
     net_gold_gain_scale: float = 50.0
-    learning_rate: float = 2.0e-4
+    actor_learning_rate: float = 5.0e-5
+    critic_learning_rate: float = 5.0e-4
+    critic_warmup_updates: int = 0
+    actor_lr_ramp_updates: int = 100
     adam_eps: float = 1.0e-5
     rollout_mode: str = "serial"
     multiprocess_rollout: MultiprocessRolloutConfig = field(default_factory=MultiprocessRolloutConfig)
@@ -59,6 +68,7 @@ class TrainPpoConfig:
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
     resume_checkpoint: Path | None = None
     init_model_checkpoint: Path | None = None
+    fork_ppo_checkpoint: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -80,17 +90,33 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
     _write_json(output_dir / "config.json", _config_to_jsonable(config))
 
     model = GoldRushPolicyNetwork(config.model).to(device)
-    if config.init_model_checkpoint is not None:
-        _load_init_model_checkpoint(Path(config.init_model_checkpoint), model=model, device=device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate, eps=config.adam_eps)
+    init_source = "random"
+    fork_metadata: dict[str, Any] | None = None
     start_update = 0
+    if config.resume_checkpoint is None and config.fork_ppo_checkpoint is not None:
+        fork_metadata = _load_fork_ppo_checkpoint(Path(config.fork_ppo_checkpoint), model=model, config=config, device=device)
+        init_source = "ppo_fork"
+    elif config.resume_checkpoint is None and config.init_model_checkpoint is not None:
+        _load_init_model_checkpoint(Path(config.init_model_checkpoint), model=model, device=device)
+        init_source = "bc"
+
     if config.resume_checkpoint is not None:
+        optimizer_phase = _checkpoint_optimizer_phase(Path(config.resume_checkpoint), device=device)
+        _set_trainable(model, optimizer_phase)
+        optimizer = _make_optimizer(model, optimizer_phase=optimizer_phase, config=config)
         start_update = _load_checkpoint(
             Path(config.resume_checkpoint),
             model=model,
             optimizer=optimizer,
             device=device,
+            expected_optimizer_phase=optimizer_phase,
         )
+        init_source = _checkpoint_init_source(Path(config.resume_checkpoint), device=device)
+        fork_metadata = _checkpoint_fork_metadata(Path(config.resume_checkpoint), device=device)
+    else:
+        optimizer_phase = _phase_for_update(1, config)
+        _set_trainable(model, optimizer_phase)
+        optimizer = _make_optimizer(model, optimizer_phase=optimizer_phase, config=config)
 
     train_metrics: list[dict[str, Any]] = []
     eval_metrics: list[dict[str, Any]] = []
@@ -100,6 +126,13 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
 
     try:
         for update_index in range(start_update + 1, config.total_updates + 1):
+            update_started = time.perf_counter()
+            desired_phase = _phase_for_update(update_index, config)
+            if desired_phase != optimizer_phase:
+                optimizer_phase = desired_phase
+                _set_trainable(model, optimizer_phase)
+                optimizer = _make_optimizer(model, optimizer_phase=optimizer_phase, config=config)
+            learning_rates = _set_learning_rates_for_update(optimizer, config=config, optimizer_phase=optimizer_phase, update_index=update_index)
             batch, rollout_stats = _collect_training_rollouts(
                 model,
                 sampler,
@@ -113,10 +146,27 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 gae_lambda=config.ppo.gae_lambda,
                 normalize_advantage=config.ppo.normalize_advantage,
             )
-            stats = ppo_update(model, optimizer, batch, config.ppo)
+            stats = (
+                critic_only_update(model, optimizer, batch, config.ppo)
+                if optimizer_phase == "critic"
+                else ppo_update(model, optimizer, batch, config.ppo)
+            )
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
             train_record = {
                 "kind": "train",
                 "update": update_index,
+                "rollout_seed": _rollout_seed(config, update_index),
+                "fixed_rollout_seeds": not config.advance_rollout_seed,
+                "phase": "critic_warmup" if optimizer_phase == "critic" else "ppo",
+                "optimizer_phase": optimizer_phase,
+                "init_source": init_source,
+                "fork_checkpoint_update": None if fork_metadata is None else fork_metadata["fork_checkpoint_update"],
+                "fork_checkpoint_tag": None if fork_metadata is None else fork_metadata["fork_checkpoint_tag"],
+                "actor_lr": learning_rates["actor_lr"],
+                "critic_lr": learning_rates["critic_lr"],
+                "actor_lr_ramp_updates": config.actor_lr_ramp_updates,
+                "critic_warmup_updates": config.critic_warmup_updates,
                 "transition_count": batch.transition_count,
                 "mean_reward": float(batch.rewards.mean().detach().cpu().item()),
                 "reward_sum": float(batch.rewards.sum().detach().cpu().item()),
@@ -139,6 +189,8 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "critic_grad_norm": stats.critic_grad_norm,
                 "ppo_update_count": stats.update_count,
                 "early_stopped": stats.early_stopped,
+                "trainable_param_count": _trainable_param_count(model),
+                "update_wall_ms": (time.perf_counter() - update_started) * 1000.0,
                 **rollout_stats,
                 **_training_diagnostics(batch),
             }
@@ -151,15 +203,21 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 optimizer=optimizer,
                 config=config,
                 update_index=update_index,
+                optimizer_phase=optimizer_phase,
+                init_source=init_source,
+                fork_metadata=fork_metadata,
                 last_metrics=train_record,
             )
-            if config.save_interval > 0 and update_index % config.save_interval == 0:
+            if _should_save_update(config, update_index):
                 _save_checkpoint(
                     checkpoint_dir / f"update_{update_index:06d}.pt",
                     model=model,
                     optimizer=optimizer,
                     config=config,
                     update_index=update_index,
+                    optimizer_phase=optimizer_phase,
+                    init_source=init_source,
+                    fork_metadata=fork_metadata,
                     last_metrics=train_record,
                 )
 
@@ -220,6 +278,8 @@ def load_checkpoint(
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a minimal GoldRush2 PPO training loop.")
     parser.add_argument("--seed", type=int, default=20260804)
+    parser.add_argument("--rollout-seed-base", type=int, default=None)
+    parser.add_argument("--advance-rollout-seed", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--total-updates", type=int, default=1)
     parser.add_argument("--pair-count", type=int, default=1)
     parser.add_argument("--map-ids", type=int, nargs="+", default=[1])
@@ -228,23 +288,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--save-interval", type=int, default=1)
+    parser.add_argument("--save-updates", type=int, nargs="*", default=[])
     parser.add_argument("--eval-interval", type=int, default=None)
     parser.add_argument("--eval-seed", type=int, default=2026080401)
-    parser.add_argument("--beta-win", type=float, default=1.0)
-    parser.add_argument("--beta-margin", type=float, default=0.2)
+    parser.add_argument("--beta-win", type=float, default=0.0)
+    parser.add_argument("--beta-margin", type=float, default=0.0)
     parser.add_argument("--beta-gold-gain", type=float, default=0.0)
     parser.add_argument("--beta-net-gold-gain", type=float, default=0.1)
-    parser.add_argument("--margin-scale", type=float, default=500.0)
+    parser.add_argument("--margin-scale", type=float, default=200.0)
     parser.add_argument("--gold-gain-scale", type=float, default=100.0)
     parser.add_argument("--net-gold-gain-scale", type=float, default=50.0)
-    parser.add_argument("--learning-rate", type=float, default=2.0e-4)
+    parser.add_argument("--actor-learning-rate", type=float, default=5.0e-5)
+    parser.add_argument("--critic-learning-rate", type=float, default=5.0e-4)
+    parser.add_argument("--critic-warmup-updates", type=int, default=0)
+    parser.add_argument("--actor-lr-ramp-updates", type=int, default=100)
     parser.add_argument("--adam-eps", type=float, default=1.0e-5)
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
     parser.add_argument("--init-model-checkpoint", type=Path, default=None)
+    parser.add_argument("--fork-ppo-checkpoint", type=Path, default=None)
     parser.add_argument("--rollout-mode", choices=["serial", "multiprocess"], default="serial")
     parser.add_argument("--rollout-workers", type=int, default=8)
     parser.add_argument("--rollout-max-inference-batch-size", type=int, default=64)
     parser.add_argument("--rollout-inference-timeout-ms", type=float, default=2.0)
+    parser.add_argument("--worker-join-timeout-s", type=float, default=5.0)
     parser.add_argument("--model-width", type=int, default=96)
     parser.add_argument("--model-blocks", type=int, default=8)
     parser.add_argument("--scalar-hidden", type=int, nargs=2, default=[96, 96])
@@ -252,7 +318,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--critic-hidden", type=int, nargs=2, default=[256, 128])
     parser.add_argument("--decoder-hidden", type=int, default=128)
     parser.add_argument("--decoder-embedding", type=int, default=16)
-    parser.add_argument("--ppo-minibatch-size", type=int, default=1024)
+    parser.add_argument("--ppo-gamma", type=float, default=0.97)
+    parser.add_argument("--ppo-gae-lambda", type=float, default=0.995)
+    parser.add_argument("--ppo-clip-range", type=float, default=0.20)
+    parser.add_argument("--ppo-value-clip-range", type=float, default=0.20)
+    parser.add_argument("--ppo-value-coef", type=float, default=0.50)
+    parser.add_argument("--ppo-huber-delta", type=float, default=1.0)
+    parser.add_argument("--ppo-max-grad-norm", type=float, default=0.5)
+    parser.add_argument("--ppo-minibatch-size", type=int, default=512)
     parser.add_argument("--ppo-update-epochs", type=int, default=2)
     parser.add_argument("--ppo-target-kl", type=float, default=0.05)
     return parser
@@ -270,6 +343,13 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         decoder_embedding=int(args.decoder_embedding),
     )
     ppo = PpoConfig(
+        gamma=float(args.ppo_gamma),
+        gae_lambda=float(args.ppo_gae_lambda),
+        clip_range=float(args.ppo_clip_range),
+        value_clip_range=float(args.ppo_value_clip_range),
+        value_coef=float(args.ppo_value_coef),
+        huber_delta=float(args.ppo_huber_delta),
+        max_grad_norm=float(args.ppo_max_grad_norm),
         minibatch_size=int(args.ppo_minibatch_size),
         update_epochs=int(args.ppo_update_epochs),
         target_joint_kl=None if args.ppo_target_kl < 0 else float(args.ppo_target_kl),
@@ -278,6 +358,7 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         num_workers=int(args.rollout_workers),
         max_inference_batch_size=int(args.rollout_max_inference_batch_size),
         inference_timeout_ms=float(args.rollout_inference_timeout_ms),
+        worker_join_timeout_s=float(args.worker_join_timeout_s),
     )
     opponent_specs = tuple(opponent_spec_from_name(name) for name in args.opponents)
     eval_cases: tuple[EvaluationCase, ...] = ()
@@ -285,6 +366,8 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         eval_cases = (EvaluationCase(seed=int(args.eval_seed), map_id=int(args.map_ids[0]), opponent_spec=opponent_specs[0], tag="train_eval"),)
     return TrainPpoConfig(
         seed=int(args.seed),
+        rollout_seed_base=None if args.rollout_seed_base is None else int(args.rollout_seed_base),
+        advance_rollout_seed=bool(args.advance_rollout_seed),
         total_updates=int(args.total_updates),
         pair_count=int(args.pair_count),
         map_ids=tuple(int(map_id) for map_id in args.map_ids),
@@ -292,6 +375,7 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         device=str(args.device),
         output_dir=Path(args.output_dir),
         save_interval=int(args.save_interval),
+        save_updates=tuple(sorted({int(value) for value in args.save_updates})),
         eval_interval=None if args.eval_interval is None else int(args.eval_interval),
         eval_cases=eval_cases,
         beta_win=float(args.beta_win),
@@ -301,7 +385,10 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         margin_scale=float(args.margin_scale),
         gold_gain_scale=float(args.gold_gain_scale),
         net_gold_gain_scale=float(args.net_gold_gain_scale),
-        learning_rate=float(args.learning_rate),
+        actor_learning_rate=float(args.actor_learning_rate),
+        critic_learning_rate=float(args.critic_learning_rate),
+        critic_warmup_updates=int(args.critic_warmup_updates),
+        actor_lr_ramp_updates=int(args.actor_lr_ramp_updates),
         adam_eps=float(args.adam_eps),
         rollout_mode=str(args.rollout_mode),
         multiprocess_rollout=multiprocess_rollout,
@@ -310,6 +397,7 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         episode=episode,
         resume_checkpoint=None if args.resume_checkpoint is None else Path(args.resume_checkpoint),
         init_model_checkpoint=None if args.init_model_checkpoint is None else Path(args.init_model_checkpoint),
+        fork_ppo_checkpoint=None if args.fork_ppo_checkpoint is None else Path(args.fork_ppo_checkpoint),
     )
 
 
@@ -347,7 +435,7 @@ def _collect_training_rollouts(
     device: torch.device,
     rollout_pool: MultiprocessRolloutPool | None = None,
 ):
-    seed = config.seed + (update_index - 1) * config.pair_count
+    seed = _rollout_seed(config, update_index)
     if config.rollout_mode == "serial":
         batch = collect_ppo_rollouts(
             model,
@@ -371,6 +459,88 @@ def _collect_training_rollouts(
             device=device,
         )
     raise ValueError(f"unknown rollout_mode: {config.rollout_mode!r}")
+
+
+def _rollout_seed(config: TrainPpoConfig, update_index: int) -> int:
+    base = config.seed if config.rollout_seed_base is None else config.rollout_seed_base
+    if not config.advance_rollout_seed:
+        return int(base)
+    return int(base) + (update_index - 1) * config.pair_count
+
+
+def _phase_for_update(update_index: int, config: TrainPpoConfig) -> str:
+    return "critic" if update_index <= config.critic_warmup_updates else "full"
+
+
+def _set_trainable(model: GoldRushPolicyNetwork, optimizer_phase: str) -> None:
+    if optimizer_phase == "critic":
+        for parameter in model.parameters():
+            parameter.requires_grad_(False)
+        for parameter in model.critic_parameters():
+            parameter.requires_grad_(True)
+        return
+    if optimizer_phase == "full":
+        for parameter in model.parameters():
+            parameter.requires_grad_(True)
+        return
+    raise ValueError(f"unknown optimizer_phase: {optimizer_phase!r}")
+
+
+def _make_optimizer(
+    model: GoldRushPolicyNetwork,
+    *,
+    optimizer_phase: str,
+    config: TrainPpoConfig,
+) -> torch.optim.Optimizer:
+    if optimizer_phase == "critic":
+        params: Any = [{"params": list(model.critic_parameters()), "lr": config.critic_learning_rate, "name": "critic"}]
+    elif optimizer_phase == "full":
+        params = [
+            {"params": list(model.actor_parameters()), "lr": config.actor_learning_rate, "name": "actor"},
+            {"params": list(model.critic_parameters()), "lr": config.critic_learning_rate, "name": "critic"},
+        ]
+    else:
+        raise ValueError(f"unknown optimizer_phase: {optimizer_phase!r}")
+    return torch.optim.Adam(params, lr=config.critic_learning_rate, eps=config.adam_eps)
+
+
+def _set_learning_rates_for_update(
+    optimizer: torch.optim.Optimizer,
+    *,
+    config: TrainPpoConfig,
+    optimizer_phase: str,
+    update_index: int,
+) -> dict[str, float | None]:
+    if optimizer_phase == "critic":
+        for group in optimizer.param_groups:
+            group["lr"] = config.critic_learning_rate
+        return {"actor_lr": None, "critic_lr": config.critic_learning_rate}
+    if optimizer_phase != "full":
+        raise ValueError(f"unknown optimizer_phase: {optimizer_phase!r}")
+
+    ppo_phase_update = update_index - config.critic_warmup_updates
+    ramp_updates = int(config.actor_lr_ramp_updates)
+    actor_lr = (
+        config.actor_learning_rate
+        if ramp_updates <= 0
+        else config.actor_learning_rate * min(1.0, float(ppo_phase_update) / float(ramp_updates))
+    )
+    if len(optimizer.param_groups) != 2:
+        raise RuntimeError("full PPO phase requires separate actor/critic optimizer groups")
+    actor_group, critic_group = optimizer.param_groups
+    if actor_group.get("name") != "actor" or critic_group.get("name") != "critic":
+        raise RuntimeError("full PPO optimizer groups must be ordered actor, critic")
+    actor_group["lr"] = actor_lr
+    critic_group["lr"] = config.critic_learning_rate
+    return {"actor_lr": actor_lr, "critic_lr": config.critic_learning_rate}
+
+
+def _should_save_update(config: TrainPpoConfig, update_index: int) -> bool:
+    return (config.save_interval > 0 and update_index % config.save_interval == 0) or update_index in config.save_updates
+
+
+def _trainable_param_count(model: GoldRushPolicyNetwork) -> int:
+    return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
 
 
 def _run_eval(
@@ -406,20 +576,31 @@ def _save_checkpoint(
     optimizer: torch.optim.Optimizer,
     config: TrainPpoConfig,
     update_index: int,
+    optimizer_phase: str,
+    init_source: str,
+    fork_metadata: dict[str, Any] | None,
     last_metrics: dict[str, Any],
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "schema": "ppo_train_v1",
-            "update_index": update_index,
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "train_config": _config_to_jsonable(config),
-            "last_metrics": _jsonable(last_metrics),
-        },
-        path,
-    )
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    payload = {
+        "schema": "ppo_train_v1",
+        "update_index": update_index,
+        "optimizer_phase": optimizer_phase,
+        "init_source": init_source,
+        "fork_metadata": None if fork_metadata is None else _jsonable(fork_metadata),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "train_config": _config_to_jsonable(config),
+        "last_metrics": _jsonable(last_metrics),
+    }
+    try:
+        torch.save(payload, temporary)
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return path
 
 
@@ -429,10 +610,16 @@ def _load_checkpoint(
     model: GoldRushPolicyNetwork,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    expected_optimizer_phase: str,
 ) -> int:
     checkpoint = torch.load(checkpoint_path, map_location=device)
     if checkpoint.get("schema") != "ppo_train_v1":
         raise SimulatorRuleError(f"unsupported checkpoint schema: {checkpoint.get('schema')!r}")
+    if checkpoint.get("optimizer_phase") != expected_optimizer_phase:
+        raise SimulatorRuleError(
+            f"checkpoint optimizer_phase {checkpoint.get('optimizer_phase')!r} does not match "
+            f"expected {expected_optimizer_phase!r}"
+        )
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     return int(checkpoint["update_index"])
@@ -468,6 +655,63 @@ def _load_init_model_checkpoint(
         raise SimulatorRuleError(f"BC checkpoint missing actor model keys: {missing[:5]}")
     current.update(filtered)
     model.load_state_dict(current)
+
+
+def _load_fork_ppo_checkpoint(
+    checkpoint_path: Path,
+    *,
+    model: GoldRushPolicyNetwork,
+    config: TrainPpoConfig,
+    device: torch.device,
+) -> dict[str, Any]:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    if checkpoint.get("schema") != "ppo_train_v1":
+        raise SimulatorRuleError(f"fork PPO checkpoint must be schema ppo_train_v1, got {checkpoint.get('schema')!r}")
+    train_config = checkpoint.get("train_config")
+    if not isinstance(train_config, dict) or "model" not in train_config:
+        raise SimulatorRuleError("fork PPO checkpoint missing train_config.model")
+    if _canonical_jsonable(train_config["model"]) != _canonical_jsonable(_config_to_jsonable(config)["model"]):
+        raise SimulatorRuleError("fork PPO checkpoint model config does not match current PPO model config")
+    model.load_state_dict(checkpoint["model_state_dict"])
+    return {
+        "fork_ppo_checkpoint": str(checkpoint_path),
+        "fork_checkpoint_update": int(checkpoint["update_index"]),
+        "fork_checkpoint_tag": _checkpoint_tag(checkpoint.get("experiment"), checkpoint.get("last_metrics")),
+        "fork_checkpoint_schema": str(checkpoint.get("schema")),
+        "fork_checkpoint_calibration_schema": checkpoint.get("calibration_schema"),
+    }
+
+
+def _checkpoint_optimizer_phase(checkpoint_path: Path, *, device: torch.device) -> str:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    phase = checkpoint.get("optimizer_phase")
+    if phase not in ("critic", "full"):
+        raise SimulatorRuleError(f"checkpoint missing optimizer_phase: {checkpoint_path}")
+    return str(phase)
+
+
+def _checkpoint_init_source(checkpoint_path: Path, *, device: torch.device) -> str:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    value = checkpoint.get("init_source", "unknown")
+    return str(value)
+
+
+def _checkpoint_fork_metadata(checkpoint_path: Path, *, device: torch.device) -> dict[str, Any] | None:
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    metadata = checkpoint.get("fork_metadata")
+    return metadata if isinstance(metadata, dict) else None
+
+
+def _checkpoint_tag(experiment: Any, last_metrics: Any) -> str | None:
+    if isinstance(experiment, dict) and experiment.get("tag") is not None:
+        return str(experiment["tag"])
+    if isinstance(last_metrics, dict) and last_metrics.get("tag") is not None:
+        return str(last_metrics["tag"])
+    return None
+
+
+def _canonical_jsonable(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=True, sort_keys=True))
 
 
 def _actor_init_config(config: PolicyNetworkConfig | dict[str, Any]) -> dict[str, Any]:
@@ -548,12 +792,26 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError("opponent_specs cannot be empty")
     if config.save_interval < 0:
         raise ValueError(f"save_interval must be non-negative, got {config.save_interval}")
+    if any(update < 0 for update in config.save_updates):
+        raise ValueError(f"save_updates must be non-negative, got {config.save_updates}")
     if config.eval_interval is not None and config.eval_interval <= 0:
         raise ValueError(f"eval_interval must be positive when set, got {config.eval_interval}")
     if config.rollout_mode not in ("serial", "multiprocess"):
         raise ValueError(f"rollout_mode must be serial or multiprocess, got {config.rollout_mode!r}")
-    if config.resume_checkpoint is not None and config.init_model_checkpoint is not None:
-        raise ValueError("resume_checkpoint and init_model_checkpoint cannot both be set")
+    if config.actor_learning_rate <= 0.0:
+        raise ValueError(f"actor_learning_rate must be positive, got {config.actor_learning_rate}")
+    if config.critic_learning_rate <= 0.0:
+        raise ValueError(f"critic_learning_rate must be positive, got {config.critic_learning_rate}")
+    if config.critic_warmup_updates < 0:
+        raise ValueError(f"critic_warmup_updates must be non-negative, got {config.critic_warmup_updates}")
+    if config.actor_lr_ramp_updates < 0:
+        raise ValueError(f"actor_lr_ramp_updates must be non-negative, got {config.actor_lr_ramp_updates}")
+    init_modes = sum(
+        item is not None
+        for item in (config.resume_checkpoint, config.init_model_checkpoint, config.fork_ppo_checkpoint)
+    )
+    if init_modes > 1:
+        raise ValueError("resume_checkpoint, init_model_checkpoint, and fork_ppo_checkpoint are mutually exclusive")
 
 
 def _training_diagnostics(batch) -> dict[str, float]:
@@ -760,6 +1018,7 @@ def _config_to_jsonable(config: TrainPpoConfig) -> dict[str, Any]:
     payload["output_dir"] = str(config.output_dir)
     payload["resume_checkpoint"] = None if config.resume_checkpoint is None else str(config.resume_checkpoint)
     payload["init_model_checkpoint"] = None if config.init_model_checkpoint is None else str(config.init_model_checkpoint)
+    payload["fork_ppo_checkpoint"] = None if config.fork_ppo_checkpoint is None else str(config.fork_ppo_checkpoint)
     payload["opponent_specs"] = [_opponent_to_jsonable(spec) for spec in config.opponent_specs]
     payload["eval_cases"] = [_eval_case_to_jsonable(case) for case in config.eval_cases]
     return _jsonable(payload)

@@ -32,7 +32,7 @@ class WinLossReward:
 
 @dataclass
 class TerminalWinMarginGoldGainReward:
-    gamma: float = 0.9999
+    gamma: float = 0.97
     beta_win: float = 1.0
     beta_margin: float = 0.2
     beta_gold_gain: float = 0.0

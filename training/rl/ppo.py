@@ -27,7 +27,7 @@ from .sampler import BatchRolloutSampler
 
 @dataclass(frozen=True)
 class PpoConfig:
-    gamma: float = 0.9999
+    gamma: float = 0.97
     gae_lambda: float = 0.995
     clip_range: float = 0.20
     value_clip_range: float = 0.20
@@ -36,7 +36,7 @@ class PpoConfig:
     max_grad_norm: float = 0.5
     target_joint_kl: float | None = 0.05
     update_epochs: int = 2
-    minibatch_size: int = 1024
+    minibatch_size: int = 512
     normalize_advantage: bool = True
 
 
@@ -231,6 +231,59 @@ def ppo_update(
     )
 
 
+def critic_only_update(
+    model: GoldRushPolicyNetwork,
+    optimizer: torch.optim.Optimizer,
+    batch: PpoBatch,
+    config: PpoConfig | None = None,
+) -> PpoUpdateStats:
+    config = PpoConfig() if config is None else config
+    _validate_config(config)
+    batch.require_gae()
+
+    value_losses: list[float] = []
+    losses: list[float] = []
+    grad_norms: list[float] = []
+
+    for _epoch in range(config.update_epochs):
+        for minibatch in batch.iter_minibatches(minibatch_size=config.minibatch_size, shuffle=True):
+            evaluation = evaluate_actions(model, minibatch)
+            value_loss = F.huber_loss(
+                evaluation.value,
+                minibatch.returns,
+                reduction="mean",
+                delta=config.huber_delta,
+            )
+            loss = config.value_coef * value_loss
+
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            grad_norm = nn.utils.clip_grad_norm_(
+                [parameter for parameter in model.critic_parameters() if parameter.requires_grad],
+                config.max_grad_norm,
+            )
+            optimizer.step()
+
+            value_losses.append(float(value_loss.detach().cpu().item()))
+            losses.append(float(loss.detach().cpu().item()))
+            grad_norms.append(float(torch.as_tensor(grad_norm).detach().cpu().item()))
+
+    return PpoUpdateStats(
+        policy_loss=0.0,
+        value_loss=mean(value_losses),
+        entropy_bonus=0.0,
+        loss=mean(losses),
+        approx_joint_kl=0.0,
+        clip_fraction=0.0,
+        explained_variance=_current_explained_variance(model, batch, config.minibatch_size),
+        grad_norm=mean(grad_norms),
+        actor_grad_norm=None,
+        critic_grad_norm=mean(grad_norms),
+        update_count=len(losses),
+        early_stopped=False,
+    )
+
+
 def explained_variance(values: Tensor, returns: Tensor | None) -> float:
     if returns is None:
         raise SimulatorRuleError("explained_variance requires returns")
@@ -239,6 +292,15 @@ def explained_variance(values: Tensor, returns: Tensor | None) -> float:
         return 0.0
     residual_var = torch.var(returns - values, unbiased=False)
     return float((1.0 - residual_var / returns_var).detach().cpu().item())
+
+
+@torch.no_grad()
+def _current_explained_variance(model: GoldRushPolicyNetwork, batch: PpoBatch, minibatch_size: int) -> float:
+    values: list[Tensor] = []
+    for minibatch in batch.iter_minibatches(minibatch_size=minibatch_size, shuffle=False):
+        values.append(evaluate_actions(model, minibatch).value)
+    assert batch.returns is not None
+    return explained_variance(torch.cat(values, dim=0), batch.returns)
 
 
 def _validate_actor_critic_parameter_split(model: GoldRushPolicyNetwork) -> None:

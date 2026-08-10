@@ -3,7 +3,15 @@
 from .env import SingleAgentEnvConfig, SingleAgentGoldRushEnv
 from .eval import EvaluationCase, EvaluationConfig, EvaluationResult, EvaluationSuite, evaluate_policy
 from .multiprocess_rollout import MultiprocessRolloutConfig, MultiprocessRolloutPool, collect_multiprocess_ppo_rollouts
-from .ppo import PpoConfig, PpoEvaluation, PpoUpdateStats, collect_ppo_rollouts, evaluate_actions, ppo_update
+from .ppo import (
+    PpoConfig,
+    PpoEvaluation,
+    PpoUpdateStats,
+    collect_ppo_rollouts,
+    critic_only_update,
+    evaluate_actions,
+    ppo_update,
+)
 from .ppo_buffer import PpoBatch, PpoMiniBatch, PpoTransition
 from .privileged_critic_features import (
     extract_privileged_critic_features,
@@ -44,6 +52,7 @@ __all__ = [
     "WinLossReward",
     "collect_multiprocess_ppo_rollouts",
     "collect_ppo_rollouts",
+    "critic_only_update",
     "evaluate_actions",
     "evaluate_policy",
     "extract_privileged_critic_features",
