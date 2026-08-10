@@ -252,6 +252,8 @@ def _diagnostic_keys() -> tuple[str, ...]:
         "train_agent_trample_penalty_per_episode",
         "train_opponent_trample_penalty_per_episode",
         "train_agent_vision_spent_mean",
+        "actor_grad_norm",
+        "critic_grad_norm",
         "reward_net_gold_gain_mean",
         "reward_clipped_net_gold_gain_mean",
         "reward_net_gold_gain_reward_mean",

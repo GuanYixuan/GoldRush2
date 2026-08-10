@@ -110,7 +110,7 @@ conda run --no-capture-output -n goldrush python tools/metrics_tensorboard.py \
 工具为每条标量写入稳定的 tag 前缀，TensorBoard 的 Scalars 页可按此折叠或筛选：
 
 - `optimization`：actor/critic 学习率。
-- `policy`：KL、clip fraction、policy loss、熵项、梯度范数。
+- `policy`：KL、clip fraction、policy loss、熵项，以及 actor/critic/联合梯度范数。
 - `critic`：value loss、explained variance、value 统计。
 - `return`：reward、return、advantage 统计。
 - `match_outcome`：rollout 内训练对局的胜率、净金币差等双方对局结果。

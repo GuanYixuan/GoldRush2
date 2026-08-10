@@ -135,6 +135,8 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "clip_fraction": stats.clip_fraction,
                 "explained_variance": stats.explained_variance,
                 "grad_norm": stats.grad_norm,
+                "actor_grad_norm": stats.actor_grad_norm,
+                "critic_grad_norm": stats.critic_grad_norm,
                 "ppo_update_count": stats.update_count,
                 "early_stopped": stats.early_stopped,
                 **rollout_stats,

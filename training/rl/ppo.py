@@ -53,6 +53,8 @@ class PpoUpdateStats:
     clip_fraction: float
     explained_variance: float
     grad_norm: float
+    actor_grad_norm: float | None
+    critic_grad_norm: float | None
     update_count: int
     early_stopped: bool
 
@@ -147,6 +149,8 @@ def ppo_update(
     kls: list[float] = []
     clip_fractions: list[float] = []
     grad_norms: list[float] = []
+    actor_grad_norms: list[float] = []
+    critic_grad_norms: list[float] = []
     early_stopped = False
 
     for _epoch in range(config.update_epochs):
@@ -202,6 +206,8 @@ def ppo_update(
                     float(torch.as_tensor(critic_grad_norm).detach().cpu().item()),
                 )
             )
+            actor_grad_norms.append(float(torch.as_tensor(actor_grad_norm).detach().cpu().item()))
+            critic_grad_norms.append(float(torch.as_tensor(critic_grad_norm).detach().cpu().item()))
 
             if config.target_joint_kl is not None and float(approx_joint_kl.item()) > config.target_joint_kl:
                 early_stopped = True
@@ -218,6 +224,8 @@ def ppo_update(
         clip_fraction=mean(clip_fractions),
         explained_variance=explained_variance(batch.old_values, batch.returns),
         grad_norm=mean(grad_norms),
+        actor_grad_norm=mean(actor_grad_norms),
+        critic_grad_norm=mean(critic_grad_norms),
         update_count=len(losses),
         early_stopped=early_stopped,
     )

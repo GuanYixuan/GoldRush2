@@ -26,6 +26,8 @@ DEFAULT_METRICS = (
     "explained_variance",
     "entropy_bonus",
     "grad_norm",
+    "actor_grad_norm",
+    "critic_grad_norm",
     "early_stopped",
     "loss",
     "mean_reward",
@@ -69,6 +71,8 @@ POLICY_METRICS = {
     "policy_loss",
     "entropy_bonus",
     "grad_norm",
+    "actor_grad_norm",
+    "critic_grad_norm",
 }
 CRITIC_METRICS = {"value_loss", "explained_variance", "value_mean", "value_std"}
 RETURN_METRICS = {
