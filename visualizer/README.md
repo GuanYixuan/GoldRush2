@@ -1,8 +1,8 @@
 # GoldRush2 Replay Visualizer
 
-`visualizer/` 是 GoldRush2.0 的本地 replay 可视化器工作区。第一版只面向回放文件，不接入策略输入、不运行选手代码、不访问评测平台。
+`visualizer/` 是 GoldRush2.0 的本地 replay 可视化器工作区。它只面向本地回放文件，不接入策略输入、不运行选手代码、不访问评测平台。
 
-当前已实现一个 PySide6 MVP，可打开本地 official NDJSON、merged JSON 或 simulator full JSON replay。
+当前已实现 PySide6 GUI，可打开本地 official NDJSON、merged JSON 或 simulator full JSON replay。
 
 ## 输入范围
 
@@ -21,7 +21,7 @@
 
 ## 分层
 
-第一版压缩为三层：
+当前实现分为三层：
 
 ```text
 replay_io/  # 读取 official NDJSON / merged JSON / simulator JSON，并规范化为 ReplayDocument
@@ -37,7 +37,7 @@ ui/         # 播放状态、窗口、scene 图层和用户交互
 
 ## 动画与标注口径
 
-第一版采用静态可解释标注，而不是连续补间动画：
+当前采用静态可解释标注，而不是连续补间动画：
 
 - 行动路径可逐格还原：画实线折线箭头。
 - 只有起终点或路径不完整：画虚线箭头连接起终点。
@@ -45,25 +45,8 @@ ui/         # 播放状态、窗口、scene 图层和用户交互
 - 拾取金币：实体头顶显示 `+n`。
 - 炸弹或踩踏损失：实体头顶显示 `-n`，并在事件面板说明来源。
 - 炸弹触发格：地图格叠加红色感叹号。
-- 合并 replay 的联合视野：必须区分未知格与已观察空地；`visible_by` 保留在详情数据中，第一版不做来源 mask 视图切换。
+- 合并 replay 的联合视野：必须区分未知格与已观察空地；`visible_by` 保留在详情数据中，当前不做来源 mask 视图切换。
 - simulator replay 使用上帝视角，不显示迷雾；移动、拾金、炸弹和踩踏优先使用 `events` 中的确定事件。
-
-## 当前文件
-
-```text
-visualizer/
-  main.py
-  app.py
-  replay_open.py
-  replay_io/replay_types.py
-  replay_io/replay_loader.py
-  model/annotations.py
-  model/derived_state.py
-  ui/playback.py
-  ui/main_window.py
-  ui/board_view.py
-  docs/ARCHITECTURE_PLAN.md
-```
 
 ## 运行
 
@@ -72,30 +55,33 @@ visualizer/
 打开官方样本：
 
 ```bash
-conda run -n goldrush python -m visualizer.main official_sdk/data/user/g3.txt
+conda run --no-capture-output -n goldrush \
+  python -m visualizer.main official_sdk/data/user/g3.txt
 ```
 
 打开合并 replay：
 
 ```bash
-conda run -n goldrush python -m visualizer.main mechanism/data/processed/merged_replays/symobs-a-map1-100-20260727-231446/36300.json
+conda run --no-capture-output -n goldrush \
+  python -m visualizer.main mechanism/data/processed/merged_replays/symobs-a-map1-100-20260727-231446/36300.json
 ```
 
 打开 simulator replay：
 
 ```bash
-conda run -n goldrush python -m visualizer.main temp/simulator_smoke_replays/stay_players_default_mechanisms_map1_seed2026073101.json
+conda run --no-capture-output -n goldrush \
+  python -m visualizer.main temp/simulator_smoke_replays/stay_players_default_mechanisms_map1_seed2026073101.json
 ```
 
 运行最小测试：
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 conda run -n goldrush python -m unittest tests.visualizer.test_replay_visualizer -v
+PYTHONDONTWRITEBYTECODE=1 conda run --no-capture-output -n goldrush \
+  python -m unittest tests.visualizer.test_replay_visualizer -v
 ```
 
-## 后续实现顺序
+## 维护注意
 
-1. 改进实体选择与右侧详情联动。
-2. 增加 snapshot 区域表格。
-3. 优化同格多实体、长路径箭头和文字避让。
-4. 为真实 merged/simulator replay 样本补固定测试资产或更稳定的测试构造。
+- 新增 replay 输入格式时，先扩展 `replay_io/` 的规范化层，再让 `model/` 和 `ui/` 消费统一结构。
+- 显示语义应先在 `model/` 中形成 annotation，不要在 scene 绘制代码里重新推导游戏规则。
+- 若 simulator replay schema 或 merged replay schema 改动，需要同步检查本 README 和对应 loader 测试。

@@ -17,25 +17,29 @@
 列出某模型相关对局：
 
 ```bash
-python3 tools/platform_games.py list --since '2026-07-26 18:58:48' --model player142
+conda run --no-capture-output -n goldrush \
+  python tools/platform_games.py list --since '2026-07-26 18:58:48' --model player142
 ```
 
 统计指定对局双方指标：
 
 ```bash
-python3 tools/platform_games.py stats 31240 31276 32590
+conda run --no-capture-output -n goldrush \
+  python tools/platform_games.py stats 31240 31276 32590
 ```
 
 只显示某个模型的指标：
 
 ```bash
-python3 tools/platform_games.py stats 32586 31535 32431 --focus player142
+conda run --no-capture-output -n goldrush \
+  python tools/platform_games.py stats 32586 31535 32431 --focus player142
 ```
 
 强制重新下载日志：
 
 ```bash
-python3 tools/platform_games.py stats 31240 --refresh
+conda run --no-capture-output -n goldrush \
+  python tools/platform_games.py stats 31240 --refresh
 ```
 
 ### 输出指标

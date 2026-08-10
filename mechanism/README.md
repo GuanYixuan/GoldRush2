@@ -1,8 +1,8 @@
 # 机理建模
 
-本目录是 GoldRush2.0 机理建模工作区，重点服务于金币/炸弹生成的主动数据采集与离线分析。
+本目录是 GoldRush2.0 机理建模工作区，重点服务于金币、炸弹、NPC 与地图相关隐藏机制的主动数据采集、双视角合并和离线分析。
 
-仓库内规则文档仍是事实来源，具体路径参见`AGENTS.md`
+仓库内规则文档仍是事实来源，具体路径见根目录 `README.md` 和 `AGENTS.md`。机制分析结论用于 simulator approximation 和训练配置，但不得覆盖已确认的官方规则。
 
 ## 目录结构
 
@@ -11,7 +11,7 @@ mechanism/
   scripts/
     observer/   # 观测账号专用平台脚本与代理检查
     probes/     # 用于受控数据采集的 probe 策略
-    analysis/   # 离线 replay 解析、反推与统计汇总
+    analysis/   # 离线 replay 解析、反推与统计汇总，详见 scripts/analysis/README.md
   data/
     raw/        # 下载的 replay/log 原始数据，尽量保持平台返回原样
     processed/  # 派生表、特征与可供建模使用的输出
@@ -20,7 +20,8 @@ mechanism/
       gold_generation_observation.md  # 金币生成机理主结果文档
     bomb/
       bomb_generation_observation.md  # 炸弹生成机理主结果文档
-    npc/                              # 还没有明确主结果文档
+    npc/
+      npc_behavior_modeling_overview.md  # NPC 默认建模口径与推荐 profile
 ```
 
 ## 边界约定
@@ -31,3 +32,10 @@ mechanism/
 - `mechanism/data/raw/` 存放不可变的输入资产（主要是官方log）。清洗后或反推得到的输出优先写入 `mechanism/data/processed/`。
 
 大量下载数据和生成产物默认被 git 忽略。
+
+## 主要结论入口
+
+- 金币生成：`mechanism/results/gold/gold_generation_observation.md`
+- 炸弹生成：`mechanism/results/bomb/bomb_generation_observation.md`
+- NPC 行为：`mechanism/results/npc/npc_behavior_modeling_overview.md`
+- 双视角合并格式：`docs/merged_replay_schema.md`
