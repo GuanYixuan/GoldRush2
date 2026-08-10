@@ -1,6 +1,6 @@
 # Privileged Critic Feature v1 设计
 
-本文用于冻结下一阶段 PPO privileged critic 的训练期输入语义。当前文件先冻结已确认的 full-state plane 子集；未确认的 plane 和 scalar 后续继续补齐。
+本文冻结当前 PPO privileged critic 的训练期输入语义。对应实现位于 `training/rl/privileged_critic_features.py`，网络消费语义见 `docs/policy_network_design.md`。
 
 ## 定位
 
@@ -17,7 +17,7 @@ critic_feature_schema: goldrush2_privileged_critic_feature_v1
 
 ## 输出形态
 
-第一版不强行绑定 actor feature 的 `38` plane 数量。critic plane 数量由本文最终确认的 channel 列表决定：
+critic feature 不绑定 actor feature 的 `38` plane 数量。当前 v1 固定为：
 
 ```text
 critic_planes: Cc x 17 x 17

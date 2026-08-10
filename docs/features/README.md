@@ -5,7 +5,7 @@
 ## 文档入口
 
 - `actor_feature_v1.md`：当前可提交 actor feature，schema 为 `goldrush2_feature_v1`，输入来源是官方 `GameInput`。该路径可以进入 ONNX/C++ 提交模型。
-- `privileged_critic_feature_v1.md`：下一阶段训练期 critic feature，schema 暂定为 `goldrush2_privileged_critic_feature_v1`，输入来源是 simulator full state。该路径禁止进入提交模型。
+- `privileged_critic_feature_v1.md`：当前训练期 critic feature，schema 为 `goldrush2_privileged_critic_feature_v1`，输入来源是 simulator full state。该路径禁止进入提交模型。
 
 ## 边界
 

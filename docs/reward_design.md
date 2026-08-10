@@ -11,7 +11,7 @@
 
 `SingleAgentGoldRushEnv` 默认仍使用 `WinLossReward`，用于保持基础环境、rollout、evaluation 和 paired sampling 的测试语义稳定。PPO 训练入口应显式传入 `TerminalWinMarginGoldGainReward`。
 
-PPO smoke/debug 时将 `beta_margin=0`、`beta_gold_gain=0` 且 `beta_net_gold_gain=0`，同一个 reward 类会退化为纯终局胜负 reward，用于验证 PPO 代码链路、GAE、logprob、KL、checkpoint 和 evaluation。
+当前主线 PPO 默认使用 `beta_win=0.0, beta_margin=0.0, beta_gold_gain=0.0, beta_net_gold_gain=0.1`，先以己方净金币 dense reward 稳定“找金币、吃金币、控制风险和视野成本”的基础行为。需要做纯终局胜负 smoke/debug 时，可显式设 `beta_win=1, beta_margin=0, beta_gold_gain=0, beta_net_gold_gain=0`。
 
 ## 核心原则
 
@@ -62,7 +62,7 @@ DeltaM_t = M_{t+1} - M_t
 ```text
 reward_schema = "terminal_win_margin_gold_gain_v1"
 
-Phi_t = tanh(M_t / 500)
+Phi_t = tanh(M_t / margin_scale)
 shaping_t = gamma * Phi_{t+1} - Phi_t
 gold_gain_t = max(0, G_agent(t+1) - G_agent(t))
 gold_gain_reward_t = clip(gold_gain_t / gold_gain_scale, 0, 1)
@@ -82,20 +82,20 @@ r_t =
 - `W_i(t) = G_i(t) - C_i^vp(t)`，即毛金币减累计视野花费。
 - `G_agent(t)` 使用己方 gross gold，不扣视野费用；该 ablation 项只奖励“吃到金币”，但不会惩罚视野花费。
 - `net_gold_gain_t` 使用己方净金币增量，包含拾取金币、炸弹/踩踏损失和己方视野成本，不受对手当回合得失直接影响，噪声低于 margin delta。
-- `gamma` 使用 PPO 配置中的 `0.9999`。
-- 默认 `beta_win=1.0`、`beta_margin=0.2`、`beta_gold_gain=0.0`、`beta_net_gold_gain=0.1`，因此默认行为是终局胜负、margin potential shaping 与己方净金币 dense reward。
+- `gamma` 使用 PPO 配置中的默认 `0.97`。
+- 默认 `beta_win=0.0`、`beta_margin=0.0`、`beta_gold_gain=0.0`、`beta_net_gold_gain=0.1`，因此默认行为是己方净金币 dense reward；终局胜负和 margin shaping 是显式可调项。
 - 终止状态的 potential 置为 `0`，避免终局 margin 被重复计入。
-- `margin_scale=500` 是人工固定尺度：`M=500` 时 `tanh(1)≈0.76`，`M=1000` 时 `tanh(2)≈0.96`，表示 500 金币已是很大差距，1000 金币基本饱和。
+- `margin_scale=200` 是当前默认尺度；该项只在 `beta_margin > 0` 时影响 reward。
 - `gold_gain_scale=100` 是第一版 dense gold 尺度，单回合吃到 100 金币即达到该项上限。
 - `net_gold_gain_scale=50` 是默认净金币 dense 尺度；单回合净赚 50 金币达到正向上限，单回合净亏 50 金币达到负向下限。
 - 实现上该 reward 在 `env.reset()` 后用初始 `GameState` 初始化 `Phi_t`；如果未 reset 就调用，会 fail-fast。
 
 设计理由：
 
-- 最终优化目标仍是胜负，终局 `+1/-1` 保持主目标地位。
-- potential shaping 给 500 回合长时任务提供更稳定的中间学习信号。
+- 最终优化目标仍是胜负；当前默认先关闭终局项，是为了在校准阶段降低长时信用分配难度，优先恢复可学习的基础经济行为。
+- potential shaping 可以给长时任务提供中间学习信号，但当前默认关闭，避免在基础吃金币行为尚不稳定时引入对手相关噪声。
 - `tanh` 有界，避免大额金币事件造成 reward 尺度失控。
-- 固定 `s_M=500` 能保持不同训练 run 的 reward 语义一致，避免每次用 rollout 分位数估计导致尺度漂移。
+- 固定 `margin_scale` 能保持不同训练 run 的 reward 语义一致，避免每次用 rollout 分位数估计导致尺度漂移。
 - net dense gold 项直接补充“发现金币、走过去、吃掉金币、控制视野成本”的短期信号，并通过双向 clip 限制偶发大额变化造成的 advantage 方差。
 
 `beta_margin=0, beta_gold_gain=0, beta_net_gold_gain=0` smoke 的验收目标不是胜率提升，而是 loss 有限、无 NaN、GAE/terminal 处理正确、KL/clip fraction/value 输出可解释。
@@ -112,82 +112,24 @@ r_win_T =
 
 在当前训练假设下，agent 慢、opponent 快；若金币完全相同，tie-break 应判 opponent 胜。若后续做不含真实耗时假设的反事实实验，可以单独改为同分 `0`。
 
-## 后续 Reward 备选
-
-若 `terminal_win_margin_gold_gain_v1` 过弱或过强，优先做小范围 ablation：
-
-- `s_M = 300 / 500 / 800`。
-- `beta_margin = 0.1 / 0.2 / 0.3`。
-- `beta_net_gold_gain = 0.05 / 0.1 / 0.2`。
-- `net_gold_gain_scale = 25 / 50 / 100`。
-- `beta_gold_gain = 0.5 / 1.0 / 2.0`，仅用于复查 gross gold 行为先验；默认关闭。
-- `gold_gain_scale = 50 / 100 / 200`。
-- 关闭 shaping，回到纯终局胜负。
-
-不建议第一版直接使用 `DeltaM_t` dense reward。若后续需要，可考虑：
-
-```text
-r_margin_t = asinh(DeltaM_t / s_delta)
-r_t = r_win_t + alpha * r_margin_t
-```
-
-其中 `s_delta` 应从 rollout 或 replay 的 `|DeltaM_t|` 分布中固定估计。该方案更直接，但噪声更大，也更容易让策略过度追逐短期金币流，因此不作为第一版主线。
-
-注意：GoldRush 是部分可观测问题；如果 shaping 使用完整 simulator state，严格的 potential-based 最优策略不变性结论不能直接照搬，应把它视为训练启发式。
-
-## Critic 多头
-
-Value function 不建议只用一个 head 同时拟合胜率、最终金币差和短期金币流。推荐共享 backbone 后使用多头：
-
-1. `win_value`
-   预测最终胜负，范围 `[-1, 1]`，作为 PPO 主 value。
-
-2. `margin_value`
-   预测压缩后的最终净金币差，例如：
-
-   ```text
-   asinh(M_T / s)
-   ```
-
-   作为辅助监督，帮助网络理解经济优势。
-
-3. `cashflow_value`
-   预测未来短窗口净金币差变化：
-
-   ```text
-   sum_{k=1..H} DeltaM_{t+k}
-   ```
-
-   用于学习近期金币、NPC、路径和风险模式。
-
-critic 可以在训练中使用全局状态、真实对手金币、真实视野费用等 privileged 信息；部署时只需要 actor。
-
-## 评估约束
-
-训练可以使用 dense margin，但评估必须以官方目标为准：
-
-- 终局胜负。
-- 最终净金币差。
-- 己方毛金币与累计 `vision_spent`。
-- 分 opponent / 分机制参数的胜率和净金币差。
-
-dense reward 只能用于优化，不应替代官方评估。
-
 ## BC Warm Start 与行为先验
 
-训练框架应支持可配置的行为克隆辅助损失，用于新网络结构初始化、策略迁移和早期训练稳定。
+当前 BC 已进入主线训练工作流，但口径是简化的 actor-only warm start：
 
-第一版 PPO 不使用 BC warm start，先跑通 `feature -> network -> PPO -> eval` 主链路。BC 作为后续扩展加入。
+- `training/bc/` 负责采集 teacher 数据、审计数据集、训练 actor-only BC checkpoint。
+- `training.scripts.train_ppo --init-model-checkpoint` 从 BC checkpoint 加载 actor 路径权重。
+- critic encoder 和 value head 不从 BC checkpoint 初始化，因为 privileged critic feature 的 channel/scalar 语义与 actor feature 不同。
+- BC loss 不进入 PPO update；PPO 阶段只优化 RL loss 和 value loss。
 
-BC 不作为环境 reward，不进入 `env.step()` 返回的 reward。它是训练算法侧的 auxiliary loss：
+BC 不作为环境 reward，不进入 `env.step()` 返回的 reward。它的当前作用是给 actor 提供“往中心走、吃金币、基础动作合法性和经济行为”的初始化先验，减少 PPO 从随机策略探索时的冷启动噪声。
+
+未来如果需要继续保护 BC 行为，可在 PPO 算法侧增加可退火的 BC auxiliary loss。但这应作为新训练配置显式引入，不能混入 reward：
 
 ```text
 loss = rl_loss
      + lambda_bc * bc_loss
      + lambda_aux_value * aux_value_loss
 ```
-
-`lambda_bc` 必须可配置，并支持按训练阶段退火。
 
 ### 数据来源
 
@@ -227,12 +169,13 @@ bc_loss =
 
 如果某些 teacher 只提供部分动作标签，loss 应支持 mask；不要为了补齐标签引入伪监督。
 
-### 使用阶段
+### 当前使用阶段
 
-推荐用法：
+当前推荐用法：
 
-1. 新网络结构上线时，先做纯 BC 或高 `lambda_bc` 预热，学习合法动作和基础经济行为。
-2. 进入 against-league RL 后继续保留小权重 BC，减少策略早期漂移。
-3. 后期逐步降低 `lambda_bc`，让终局胜负和 dense margin 主导优化。
+1. 用 `fast_probe_v3_like` self-play 的后手方采集 BC 数据。
+2. 训练 actor-only BC checkpoint。
+3. PPO 使用 `--init-model-checkpoint` 初始化 actor。
+4. PPO 通过 `--critic-warmup-updates`、`--actor-lr-ramp-updates`、dense net gold reward 和分离 actor/critic lr 控制早期漂移。
 
-BC loss 只用于优化和迁移，不作为评估指标。策略是否变强仍以终局胜负、净金币差和 opponent/机制 holdout 表现为准。
+BC loss 只用于 BC 训练和迁移，不作为 PPO reward 或最终评估指标。策略是否变强仍以终局胜负、净金币差和 opponent/机制 holdout 表现为准。
