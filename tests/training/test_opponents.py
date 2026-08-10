@@ -12,7 +12,12 @@ from simulator.observation.sdk import GameInput
 from simulator.types import Action, GameOutput
 from training.opponents import EpisodeContext, LeagueEntry, OpponentLeague, OpponentSpec, build_runner
 from training.opponents.params import ParamSpace, categorical, choice, int_uniform, uniform
-from training.opponents.scripted import FastProbeV3LikeOpponent, GreedyVisibleGoldOpponent, RandomOpponent
+from training.opponents.scripted import (
+    FastProbeV3BfsOpponent,
+    FastProbeV3LikeOpponent,
+    GreedyVisibleGoldOpponent,
+    RandomOpponent,
+)
 
 
 class OpponentTests(unittest.TestCase):
@@ -116,6 +121,56 @@ class OpponentTests(unittest.TestCase):
 
     def test_fast_probe_v3_like_buys_vision_after_bad_rounds(self) -> None:
         opponent = FastProbeV3LikeOpponent()
+        opponent.reset(1, EpisodeContext())
+
+        first = opponent.act(_basic_input())
+        second_input = _basic_input()
+        second_input.round = 1
+        second = opponent.act(second_input)
+
+        self.assertEqual(first.vp, 0)
+        self.assertEqual(second.vp, 2)
+
+    def test_fast_probe_v3_bfs_follows_reachable_path_around_obstacle(self) -> None:
+        opponent = FastProbeV3BfsOpponent(enable_vision=False)
+        opponent.reset(1, EpisodeContext())
+        game_input = _basic_input()
+        game_input.grid[0][1] = -1
+        game_input.grid[0][2] = 10
+
+        output = opponent.act(game_input)
+
+        self.assertEqual(output.order, 0)
+        self.assertEqual(output.k, 6)
+        self.assertEqual(
+            output.actions,
+            (
+                int(Action.DOWN),
+                int(Action.RIGHT),
+                int(Action.RIGHT),
+                int(Action.UP),
+                int(Action.DOWN),
+                int(Action.UP),
+            ),
+        )
+
+    def test_fast_probe_v3_bfs_ignores_unreachable_larger_gold(self) -> None:
+        opponent = FastProbeV3BfsOpponent(enable_vision=False)
+        opponent.reset(1, EpisodeContext())
+        game_input = _basic_input()
+        game_input.grid[0][1] = -1
+        game_input.grid[1][0] = -1
+        game_input.grid[0][2] = 20
+        game_input.grid[16][14] = 5
+
+        output = opponent.act(game_input)
+
+        self.assertEqual(output.order, 1)
+        self.assertEqual(output.k, 0)
+        self.assertEqual(output.actions[:2], (int(Action.LEFT), int(Action.LEFT)))
+
+    def test_fast_probe_v3_bfs_buys_vision_after_bad_rounds(self) -> None:
+        opponent = FastProbeV3BfsOpponent()
         opponent.reset(1, EpisodeContext())
 
         first = opponent.act(_basic_input())
