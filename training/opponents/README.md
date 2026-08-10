@@ -24,6 +24,7 @@ runner 也实现 `__call__(game_input)`，因此可以直接传给 `simulator.en
 - `greedy_visible_gold`：只基于当前可见 `grid` 贪心抢金币，支持 `target_score`、`avoid_bombs`、`risk_weight` 和 `vp_policy`。
 - `fast_probe_v3_like`：复刻 `fast_probing/v3` 的轻量行为骨架；扫描两个角色视野内最大可达金币，主角色贪心抢金币，副角色用剩余步数向中心移动，连续坏轮后购买 `9x9` 视野。
 - `fast_probe_v3_bfs`：在 `fast_probe_v3_like` 基础上恢复 depth-6 BFS；只选择 BFS 可达的最大可见金币堆，并沿 BFS path 行动，到达后复用有限 bounce。该对手保留中心 fallback，定位为较强的中心经济型 scripted opponent。
+- `fast_probe_outer_static2_mapaware`：训练侧 map-aware 外围对手；继承 `fast_probe_v3_bfs`，但当 snapshot 显示某外围 region 金币明显偏多时，会 commit 到该 region 的 `static_map=2` 候选格。该对手使用 `EpisodeContext.map_id` 背 built-in map，不代表可提交策略能力。
 
 这些策略是训练/评估基础件，不追求平台强度。需要新增对手时，优先通过独立 runner 或 scripted 文件扩展 league，而不是把游戏规则、feature extractor 或 reward 逻辑放进 opponent 层。
 

@@ -9,10 +9,11 @@ from simulator.mechanisms.bombs import BernoulliBombRefresher, BombConfig
 from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, OuterGoldConfig, OuterGoldGenerator
 from simulator.mechanisms.maps import SpawnConfig
 from simulator.observation.sdk import GameInput
-from simulator.types import Action, GameOutput
+from simulator.types import Action, GameOutput, RegionStat, Snapshot
 from training.opponents import EpisodeContext, LeagueEntry, OpponentLeague, OpponentSpec, build_runner
 from training.opponents.params import ParamSpace, categorical, choice, int_uniform, uniform
 from training.opponents.scripted import (
+    FastProbeOuterStatic2MapAwareOpponent,
     FastProbeV3BfsOpponent,
     FastProbeV3LikeOpponent,
     GreedyVisibleGoldOpponent,
@@ -181,6 +182,42 @@ class OpponentTests(unittest.TestCase):
         self.assertEqual(first.vp, 0)
         self.assertEqual(second.vp, 2)
 
+    def test_outer_static2_mapaware_commits_to_snapshot_region_then_buys_vision_once(self) -> None:
+        opponent = FastProbeOuterStatic2MapAwareOpponent()
+        opponent.reset(1, EpisodeContext(map_id=2))
+        game_input = _basic_input()
+        game_input.snapshot_valid = True
+        game_input.snapshot = _snapshot_with_region_gold(region_id=2, generated=80, remaining=80)
+
+        output = opponent.act(game_input)
+
+        self.assertEqual(output.order, 0)
+        self.assertEqual(output.k, 4)
+        self.assertEqual(output.actions[:4], (int(Action.RIGHT),) * 4)
+        self.assertEqual(output.vp, 2)
+        self.assertIsNone(opponent._commit_region)
+
+    def test_outer_static2_mapaware_visible_big_gold_overrides_snapshot(self) -> None:
+        opponent = FastProbeOuterStatic2MapAwareOpponent(enable_vision=False)
+        opponent.reset(1, EpisodeContext(map_id=2))
+        game_input = _basic_input()
+        game_input.my_units = [(5, 5), (16, 16)]
+        game_input.grid[5][7] = 12
+        game_input.snapshot_valid = True
+        game_input.snapshot = _snapshot_with_region_gold(region_id=2, generated=80, remaining=80)
+
+        output = opponent.act(game_input)
+
+        self.assertEqual(output.order, 0)
+        self.assertEqual(output.k, 6)
+        self.assertEqual(output.actions[:2], (int(Action.RIGHT), int(Action.RIGHT)))
+
+    def test_build_runner_accepts_outer_static2_mapaware(self) -> None:
+        runner = build_runner(OpponentSpec(kind="python", name="fast_probe_outer_static2_mapaware"))
+
+        runner.reset(1, EpisodeContext(map_id=2))
+        self.assertIsInstance(runner.opponent, FastProbeOuterStatic2MapAwareOpponent)
+
     def test_build_runner_rejects_unknown_python_params(self) -> None:
         with self.assertRaises(ValueError):
             build_runner(OpponentSpec(kind="python", name="stay", params={"unexpected": 1}))
@@ -203,6 +240,18 @@ def _basic_input() -> GameInput:
 
 def _stay_policy(_game_input) -> GameOutput:
     return GameOutput(actions=(int(Action.STAY),) * 6, k=3, order=0, vp=0)
+
+
+def _snapshot_with_region_gold(region_id: int, generated: int, remaining: int) -> Snapshot:
+    regions = [
+        RegionStat(
+            id=id_,
+            gold_generated=generated if id_ == region_id else 0,
+            gold_remaining=remaining if id_ == region_id else 0,
+        )
+        for id_ in range(1, 6)
+    ]
+    return Snapshot(window_begin=0, window_end=4, regions=regions)
 
 
 def _quiet_mechanisms() -> DuelMechanisms:

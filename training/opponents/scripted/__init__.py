@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .common import reject_unknown_params
+from .fast_probe_outer_static2_mapaware import FastProbeOuterStatic2MapAwareOpponent
 from .fast_probe_v3_bfs import FastProbeV3BfsOpponent
 from .fast_probe_v3_like import FastProbeV3LikeOpponent
 from .greedy_visible_gold import GreedyVisibleGoldOpponent
@@ -27,6 +28,7 @@ def build_scripted_opponent(
     | GreedyVisibleGoldOpponent
     | FastProbeV3LikeOpponent
     | FastProbeV3BfsOpponent
+    | FastProbeOuterStatic2MapAwareOpponent
 ):
     if name == "stay":
         reject_unknown_params(name, params, ())
@@ -61,10 +63,19 @@ def build_scripted_opponent(
             max_target_distance=int(params.get("max_target_distance", 6)),
             good_gold_threshold=int(params.get("good_gold_threshold", 2)),
         )
+    if name == "fast_probe_outer_static2_mapaware":
+        reject_unknown_params(name, params, _FAST_PROBE_PARAMS)
+        return FastProbeOuterStatic2MapAwareOpponent(
+            bad_rounds_before_vp=int(params.get("bad_rounds_before_vp", 2)),
+            enable_vision=bool(params.get("enable_vision", True)),
+            max_target_distance=int(params.get("max_target_distance", 6)),
+            good_gold_threshold=int(params.get("good_gold_threshold", 2)),
+        )
     raise ValueError(f"unknown python opponent: {name!r}")
 
 
 __all__ = [
+    "FastProbeOuterStatic2MapAwareOpponent",
     "FastProbeV3BfsOpponent",
     "FastProbeV3LikeOpponent",
     "GreedyVisibleGoldOpponent",

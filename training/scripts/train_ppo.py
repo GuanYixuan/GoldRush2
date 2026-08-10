@@ -248,6 +248,8 @@ def opponent_spec_from_name(name: str) -> OpponentSpec:
         return OpponentSpec(kind="python", name="fast_probe_v3_like")
     if name == "fast_probe_v3_bfs":
         return OpponentSpec(kind="python", name="fast_probe_v3_bfs")
+    if name == "fast_probe_outer_static2_mapaware":
+        return OpponentSpec(kind="python", name="fast_probe_outer_static2_mapaware")
     if name == "greedy_visible_gold":
         return OpponentSpec(
             kind="python",
