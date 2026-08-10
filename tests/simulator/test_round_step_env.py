@@ -118,6 +118,27 @@ class RoundStepEnvTests(unittest.TestCase):
         self.assertTrue(result.observations[1].snapshot_valid)
         self.assertIsNone(result.game_result)
 
+    def test_step_reports_gold_generated_for_next_round_observation(self) -> None:
+        mechanisms = _quiet_mechanisms()
+        mechanisms.center_gold = _QueuedGoldGenerator(
+            (
+                (GoldGenerationEvent(Position(0, 1), 5),),
+                (GoldGenerationEvent(Position(0, 2), 6),),
+            )
+        )
+        env = RoundStepEnv(
+            config=RoundStepConfig(EpisodeConfig(rules=RulesConfig(round_count=2, snapshot_period=1), seed=7, map_id=1)),
+            mechanisms=mechanisms,
+            spawn=SpawnConfig(npc_ids=()),
+            p90_latency_ns={1: 1, 2: 2},
+        )
+        env.reset()
+
+        result = env.step({1: _stay_output(), 2: _stay_output()}, first_player_id=1)
+
+        self.assertEqual(result.next_round_gold_generated, (GoldGenerationEvent(Position(0, 2), 6),))
+        self.assertEqual(result.observations[1].grid[0][2], 6)
+
     def test_replay_records_rounds_without_policy_or_reward_fields(self) -> None:
         env = RoundStepEnv(
             config=RoundStepConfig(EpisodeConfig(rules=RulesConfig(round_count=2), seed=7, map_id=1)),
@@ -200,6 +221,19 @@ class _FixedGoldGenerator:
 
     def generate(self, *_args) -> tuple[GoldGenerationEvent, ...]:
         return self.events
+
+
+@dataclass
+class _QueuedGoldGenerator:
+    batches: tuple[tuple[GoldGenerationEvent, ...], ...]
+    call_count: int = 0
+
+    def generate(self, *_args) -> tuple[GoldGenerationEvent, ...]:
+        if self.call_count >= len(self.batches):
+            return ()
+        events = self.batches[self.call_count]
+        self.call_count += 1
+        return events
 
 
 class _RecordingNpcPolicy:

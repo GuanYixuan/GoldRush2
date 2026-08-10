@@ -55,6 +55,7 @@ class RoundStepResult:
     state: GameState
     game_result: GameResult | None = None
     replay: dict[str, Any] | None = None
+    next_round_gold_generated: tuple[GoldGenerationEvent, ...] = ()
 
 
 class RoundStepEnv:
@@ -201,8 +202,9 @@ class RoundStepEnv:
         self.terminated = self.state.round_index >= self.config.episode.rules.round_count
         game_result = _determine_result_if_possible(self.state, self.p90_latency_ns) if self.terminated else None
         observations: dict[int, GameInput] = {}
+        next_round_gold_generated: tuple[GoldGenerationEvent, ...] = ()
         if not self.terminated:
-            self._prepare_round()
+            next_round_gold_generated = self._prepare_round()
             observations = self._observations()
 
         return RoundStepResult(
@@ -212,9 +214,10 @@ class RoundStepEnv:
             state=self.state,
             game_result=game_result,
             replay=copy.deepcopy(self.recorder.to_json()) if self.recorder is not None else None,
+            next_round_gold_generated=next_round_gold_generated,
         )
 
-    def _prepare_round(self) -> None:
+    def _prepare_round(self) -> tuple[GoldGenerationEvent, ...]:
         assert self.state is not None
         assert self.template is not None
         assert self.outer_state is not None
@@ -228,6 +231,7 @@ class RoundStepEnv:
             self.outer_gold_rng,
         )
         apply_gold_generation(self.state, self.pending_gold_generated)
+        return self.pending_gold_generated
 
     def _observations(self) -> dict[int, GameInput]:
         assert self.state is not None

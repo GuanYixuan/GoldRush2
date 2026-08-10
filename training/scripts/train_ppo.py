@@ -56,6 +56,10 @@ class TrainPpoConfig:
     margin_scale: float = 200.0
     gold_gain_scale: float = 100.0
     net_gold_gain_scale: float = 50.0
+    beta_vision_info: float = 0.0
+    vision_info_scale: float = 100.0
+    vision_info_reward_cap: float = 0.03
+    vision_info_recent_window: int = 5
     actor_learning_rate: float = 5.0e-5
     critic_learning_rate: float = 5.0e-4
     critic_warmup_updates: int = 0
@@ -177,6 +181,10 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "margin_scale": config.margin_scale,
                 "gold_gain_scale": config.gold_gain_scale,
                 "net_gold_gain_scale": config.net_gold_gain_scale,
+                "beta_vision_info": config.beta_vision_info,
+                "vision_info_scale": config.vision_info_scale,
+                "vision_info_reward_cap": config.vision_info_reward_cap,
+                "vision_info_recent_window": config.vision_info_recent_window,
                 "policy_loss": stats.policy_loss,
                 "value_loss": stats.value_loss,
                 "entropy_bonus": stats.entropy_bonus,
@@ -302,6 +310,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--margin-scale", type=float, default=200.0)
     parser.add_argument("--gold-gain-scale", type=float, default=100.0)
     parser.add_argument("--net-gold-gain-scale", type=float, default=50.0)
+    parser.add_argument("--beta-vision-info", type=float, default=0.0)
+    parser.add_argument("--vision-info-scale", type=float, default=100.0)
+    parser.add_argument("--vision-info-reward-cap", type=float, default=0.03)
+    parser.add_argument("--vision-info-recent-window", type=int, default=5)
     parser.add_argument("--actor-learning-rate", type=float, default=5.0e-5)
     parser.add_argument("--critic-learning-rate", type=float, default=5.0e-4)
     parser.add_argument("--critic-warmup-updates", type=int, default=0)
@@ -389,6 +401,10 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         margin_scale=float(args.margin_scale),
         gold_gain_scale=float(args.gold_gain_scale),
         net_gold_gain_scale=float(args.net_gold_gain_scale),
+        beta_vision_info=float(args.beta_vision_info),
+        vision_info_scale=float(args.vision_info_scale),
+        vision_info_reward_cap=float(args.vision_info_reward_cap),
+        vision_info_recent_window=int(args.vision_info_recent_window),
         actor_learning_rate=float(args.actor_learning_rate),
         critic_learning_rate=float(args.critic_learning_rate),
         critic_warmup_updates=int(args.critic_warmup_updates),
@@ -425,6 +441,10 @@ def _sampler(config: TrainPpoConfig) -> BatchRolloutSampler:
             margin_scale=config.margin_scale,
             gold_gain_scale=config.gold_gain_scale,
             net_gold_gain_scale=config.net_gold_gain_scale,
+            beta_vision_info=config.beta_vision_info,
+            vision_info_scale=config.vision_info_scale,
+            vision_info_reward_cap=config.vision_info_reward_cap,
+            vision_info_recent_window=config.vision_info_recent_window,
             gamma=config.ppo.gamma,
         ),
     )
@@ -806,6 +826,14 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError(f"actor_learning_rate must be positive, got {config.actor_learning_rate}")
     if config.critic_learning_rate <= 0.0:
         raise ValueError(f"critic_learning_rate must be positive, got {config.critic_learning_rate}")
+    if config.beta_vision_info < 0.0:
+        raise ValueError(f"beta_vision_info must be non-negative, got {config.beta_vision_info}")
+    if config.vision_info_scale <= 0.0:
+        raise ValueError(f"vision_info_scale must be positive, got {config.vision_info_scale}")
+    if config.vision_info_reward_cap < 0.0:
+        raise ValueError(f"vision_info_reward_cap must be non-negative, got {config.vision_info_reward_cap}")
+    if config.vision_info_recent_window < 0:
+        raise ValueError(f"vision_info_recent_window must be non-negative, got {config.vision_info_recent_window}")
     if config.critic_warmup_updates < 0:
         raise ValueError(f"critic_warmup_updates must be non-negative, got {config.critic_warmup_updates}")
     if config.actor_lr_ramp_updates < 0:
@@ -964,6 +992,9 @@ def _reward_component_diagnostics(infos: tuple[dict[str, Any], ...]) -> dict[str
             "reward_net_gold_gain_mean": 0.0,
             "reward_clipped_net_gold_gain_mean": 0.0,
             "reward_net_gold_gain_reward_mean": 0.0,
+            "reward_vision_info_gold_mean": 0.0,
+            "reward_vision_info_cells_mean": 0.0,
+            "reward_vision_info_reward_mean": 0.0,
             "reward_component_total_mean": 0.0,
         }
     return {
@@ -977,6 +1008,9 @@ def _reward_component_diagnostics(infos: tuple[dict[str, Any], ...]) -> dict[str
         "reward_net_gold_gain_mean": _component_mean(components, "net_gold_gain"),
         "reward_clipped_net_gold_gain_mean": _component_mean(components, "clipped_net_gold_gain"),
         "reward_net_gold_gain_reward_mean": _component_mean(components, "net_gold_gain_reward"),
+        "reward_vision_info_gold_mean": _component_mean(components, "vision_info_gold"),
+        "reward_vision_info_cells_mean": _component_mean(components, "vision_info_cells"),
+        "reward_vision_info_reward_mean": _component_mean(components, "vision_info_reward"),
         "reward_component_total_mean": _component_mean(components, "total"),
     }
 

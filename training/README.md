@@ -53,6 +53,7 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 - `--actor-lr-ramp-updates`：PPO phase 内 actor lr 线性 ramp。
 - `--rollout-seed-base` / `--advance-rollout-seed`：显式控制 rollout seed。
 - `--save-updates`：保存指定 update checkpoint。
+- `--beta-vision-info` 及 `--vision-info-*`：启用购买视野后的“新鲜额外可见金币”辅助 reward；默认关闭，设计细节见 `docs/reward_design.md`。
 
 ## 最小测试
 
