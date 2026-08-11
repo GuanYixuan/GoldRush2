@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import json
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+from visualizer.app import VisualizerBootstrapError, _ensure_display_available
 from visualizer.model import FramePhase
 from visualizer.replay_io import ReplayKind, ReplayLoader
 from visualizer.replay_open import open_replay
@@ -105,6 +107,12 @@ class ReplayVisualizerTests(unittest.TestCase):
             _, bundles = open_replay(path)
 
         self.assertTrue(any(annotation.marker == "!" for annotation in bundles[0].end.cell_annotations))
+
+    def test_missing_display_reports_bootstrap_error(self) -> None:
+        with mock.patch("visualizer.app.sys.platform", "linux"):
+            with mock.patch.dict("visualizer.app.os.environ", {}, clear=True):
+                with self.assertRaisesRegex(VisualizerBootstrapError, "DISPLAY"):
+                    _ensure_display_available()
 
 
 def _merged_payload() -> dict:

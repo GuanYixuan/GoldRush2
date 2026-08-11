@@ -50,7 +50,16 @@ ui/         # 播放状态、窗口、scene 图层和用户交互
 
 ## 运行
 
-需要在 `goldrush` conda 环境中运行。当前 GUI 依赖为 PySide6。
+需要在 `goldrush` conda 环境中运行。当前 GUI Python 依赖为 PySide6；在 Ubuntu/Debian 容器中还需要 Qt/PySide6 的系统运行库：
+
+```bash
+apt-get update && apt-get install -y \
+  libgl1 libegl1 \
+  libxkbcommon0 libxkbcommon-x11-0 \
+  libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xkb1
+```
+
+可视化器需要图形显示端。若在容器中运行，请先配置桌面、X11 forwarding 或 VNC；仅做无界面加载检查时可临时使用 `QT_QPA_PLATFORM=offscreen`。
 
 打开官方样本：
 
