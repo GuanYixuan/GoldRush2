@@ -188,6 +188,15 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "policy_loss": stats.policy_loss,
                 "value_loss": stats.value_loss,
                 "entropy_bonus": stats.entropy_bonus,
+                "action_entropy_mean": stats.action_entropy_mean,
+                "ko_entropy_mean": stats.ko_entropy_mean,
+                "vp_entropy_mean": stats.vp_entropy_mean,
+                "action_entropy_bonus": stats.action_entropy_bonus,
+                "ko_entropy_bonus": stats.ko_entropy_bonus,
+                "vp_entropy_bonus": stats.vp_entropy_bonus,
+                "ppo_entropy_action_coef": config.ppo.entropy_action_coef,
+                "ppo_entropy_ko_coef": config.ppo.entropy_ko_coef,
+                "ppo_entropy_vp_coef": config.ppo.entropy_vp_coef,
                 "loss": stats.loss,
                 "approx_joint_kl": stats.approx_joint_kl,
                 "clip_fraction": stats.clip_fraction,
@@ -339,6 +348,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ppo-clip-range", type=float, default=0.20)
     parser.add_argument("--ppo-value-clip-range", type=float, default=0.20)
     parser.add_argument("--ppo-value-coef", type=float, default=0.50)
+    parser.add_argument("--ppo-entropy-action-coef", type=float, default=0.0100)
+    parser.add_argument("--ppo-entropy-ko-coef", type=float, default=0.0040)
+    parser.add_argument("--ppo-entropy-vp-coef", type=float, default=0.0003)
     parser.add_argument("--ppo-huber-delta", type=float, default=1.0)
     parser.add_argument("--ppo-max-grad-norm", type=float, default=0.5)
     parser.add_argument("--ppo-minibatch-size", type=int, default=512)
@@ -364,6 +376,9 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         clip_range=float(args.ppo_clip_range),
         value_clip_range=float(args.ppo_value_clip_range),
         value_coef=float(args.ppo_value_coef),
+        entropy_action_coef=float(args.ppo_entropy_action_coef),
+        entropy_ko_coef=float(args.ppo_entropy_ko_coef),
+        entropy_vp_coef=float(args.ppo_entropy_vp_coef),
         huber_delta=float(args.ppo_huber_delta),
         max_grad_norm=float(args.ppo_max_grad_norm),
         minibatch_size=int(args.ppo_minibatch_size),
@@ -834,6 +849,12 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError(f"vision_info_reward_cap must be non-negative, got {config.vision_info_reward_cap}")
     if config.vision_info_recent_window < 0:
         raise ValueError(f"vision_info_recent_window must be non-negative, got {config.vision_info_recent_window}")
+    if config.ppo.entropy_action_coef < 0.0:
+        raise ValueError(f"ppo.entropy_action_coef must be non-negative, got {config.ppo.entropy_action_coef}")
+    if config.ppo.entropy_ko_coef < 0.0:
+        raise ValueError(f"ppo.entropy_ko_coef must be non-negative, got {config.ppo.entropy_ko_coef}")
+    if config.ppo.entropy_vp_coef < 0.0:
+        raise ValueError(f"ppo.entropy_vp_coef must be non-negative, got {config.ppo.entropy_vp_coef}")
     if config.critic_warmup_updates < 0:
         raise ValueError(f"critic_warmup_updates must be non-negative, got {config.critic_warmup_updates}")
     if config.actor_lr_ramp_updates < 0:

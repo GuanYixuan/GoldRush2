@@ -51,6 +51,7 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 - `--actor-learning-rate` / `--critic-learning-rate`：actor 和 critic 分离学习率。
 - `--critic-warmup-updates`：前若干 update 只训练 critic。
 - `--actor-lr-ramp-updates`：PPO phase 内 actor lr 线性 ramp。
+- `--ppo-entropy-action-coef` / `--ppo-entropy-ko-coef` / `--ppo-entropy-vp-coef`：分别控制移动动作、`k/order` 和视野购买头的 entropy bonus；旧默认值为 `0.01/0.004/0.0003`。
 - `--rollout-seed-base` / `--advance-rollout-seed`：显式控制 rollout seed。
 - `--save-updates`：保存指定 update checkpoint。
 - `--beta-vision-info` 及 `--vision-info-*`：启用购买视野后的“新鲜额外可见金币”辅助 reward；默认关闭，设计细节见 `docs/reward_design.md`。

@@ -143,6 +143,17 @@ vision_info_reward_t =
 
 当前训练入口参数为 `--beta-vision-info`、`--vision-info-scale`、`--vision-info-reward-cap`、`--vision-info-recent-window`。开实验时应同时关注 `vp_fraction_1/2`、`vp_nonzero_fraction`、`reward_vision_info_*`、`train_agent_vision_spent_mean` 和固定 seed eval，避免策略学成无条件买视野。
 
+`PpoConfig` 中的 entropy bonus 按头拆分配置：
+
+```text
+entropy_bonus_t =
+    entropy_action_coef * action_entropy_t
+    + entropy_ko_coef * ko_entropy_t
+    + entropy_vp_coef * vp_entropy_t
+```
+
+默认值 `0.01/0.004/0.0003` 复刻旧训练行为。若只想唤醒视野探索，应优先单独提高 `--ppo-entropy-vp-coef`，保持移动动作和 `k/order` 探索强度不变。
+
 ## 终局胜负 Reward
 
 终局主 reward 定义为：

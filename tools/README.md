@@ -132,7 +132,7 @@ conda run --no-capture-output -n goldrush python tools/metrics_tensorboard.py \
   --watch-seconds 10
 ```
 
-每个 `metrics.jsonl` 是一个 TensorBoard run，名称为 `实验目录名/相对日志目录`。未传 `--logdir` 时，工具会相对仓库根目录新建 `temp/tensorboards_logs/YYYYMMDD_HHMMSS`；无论从仓库根目录还是 `tools/` 启动，位置都一致。同秒发生冲突时自动添加序号。需要固定 event 目录时可显式传入 `--logdir`，覆盖旧 event 文件时才传入 `--overwrite`。默认集包含核心 PPO 指标、advantage/value 诊断、净金币 reward 分解、双方经济/交互事件，以及 batch assembly、总推理、总 scheduler、每 transition worker wall 四项性能汇总。`--metric FIELD` 可重复传入以选择特定字段；`--all-metrics` 用于专项排查全部有限数值与布尔字段。
+每个 `metrics.jsonl` 是一个 TensorBoard run，名称为 `实验目录名/相对日志目录`。未传 `--logdir` 时，工具会相对仓库根目录新建 `temp/tensorboards_logs/YYYYMMDD_HHMMSS`；无论从仓库根目录还是 `tools/` 启动，位置都一致。同秒发生冲突时自动添加序号。需要固定 event 目录时可显式传入 `--logdir`，覆盖旧 event 文件时才传入 `--overwrite`。默认集包含核心 PPO 指标、advantage/value 诊断、净金币与 vision-info reward 分解、双方经济/交互事件，以及 batch assembly、总推理、总 scheduler、每 transition worker wall 四项性能汇总。`--metric FIELD` 可重复传入以选择特定字段；`--all-metrics` 用于专项排查全部有限数值与布尔字段。
 
 传入 `--watch-seconds` 时，工具除跟随已发现文件的追加行外，还会在每轮轮询递归扫描指定实验目录。训练中新出现的 `metrics.jsonl` 会自动注册为新的 TensorBoard run；已有文件保持读取 offset，不会被重复导出。输入实验目录在启动时必须已经存在，但可以暂时不含 `metrics.jsonl`。
 

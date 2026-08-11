@@ -228,7 +228,7 @@ decoder hidden、执行顺序动作和 `ko` 均可由现有字段确定，不进
 
 policy loss、KL 和 entropy 只读取 actor feature；value loss、old value 对齐和 explained variance 只读取 critic feature。`old_logprob` 仍来自 actor 路径，`old_value` 来自 critic 路径。
 
-当前 entropy 权重保持旧量级：
+当前 entropy 指标由模型返回，PPO 侧用 `PpoConfig` 中的系数加权，默认保持旧量级：
 
 ```text
 action_entropy = mean_t H(action_t | prefix_t) / log(5)
@@ -236,10 +236,12 @@ ko_entropy = H(ko) / log(14)
 vp_entropy = H(vp) / log(3)
 
 entropy_bonus =
-    0.0100 * action_entropy
-  + 0.0040 * ko_entropy
-  + 0.0003 * vp_entropy
+    entropy_action_coef * action_entropy
+  + entropy_ko_coef * ko_entropy
+  + entropy_vp_coef * vp_entropy
 ```
+
+默认 `entropy_action_coef=0.01`、`entropy_ko_coef=0.004`、`entropy_vp_coef=0.0003`。调视野购买探索时优先只提高 `entropy_vp_coef`，避免重新扰动移动动作和 `k/order`。
 
 action entropy 暂以完整五类 `log(5)` 归一化；mask 后只有少量合法动作时指标会自然下降。masked logits 使用 dtype 有限最小值，避免 `0 * -inf` 产生 NaN。
 
