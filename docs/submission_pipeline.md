@@ -23,6 +23,7 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 
 - 检查 checkpoint schema 为 `ppo_train_v1`。
 - 检查 actor feature shape 与当前 `goldrush2_feature_v2` 一致。
+- 检查 action head schema 与当前 `candidate_cell_residual_v1` 一致。
 - 校验 PyTorch 输出与 ONNXRuntime 输出完全一致。
 - 检查 ONNX 图中没有平台不稳定随机算子。
 - 写出 `actor.metadata.json`，包含 checkpoint update、模型配置、输入输出 shape 和算子类型。

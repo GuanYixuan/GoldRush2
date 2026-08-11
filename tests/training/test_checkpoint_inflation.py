@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import torch
 
+from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
+from training.scripts.inflate_candidate_cell_residual_head_checkpoint import (
+    inflate_checkpoint_payload as inflate_action_head_checkpoint_payload,
+)
 from training.scripts.inflate_actor_feature_v2_checkpoint import inflate_checkpoint_payload
 
 
@@ -72,3 +76,91 @@ def test_inflate_rejects_non_v1_feature_schema() -> None:
         assert "feature_schema" in str(exc)
     else:
         raise AssertionError("expected ValueError")
+
+
+def test_inflate_candidate_residual_head_checkpoint_loads_and_is_noop() -> None:
+    old_model = GoldRushPolicyNetwork(_small_config())
+    old_state = old_model.state_dict()
+    legacy_state = {
+        key: value
+        for key, value in old_state.items()
+        if not (key.startswith("action_candidate_embedding.") or key.startswith("candidate_action_head."))
+    }
+    checkpoint = {
+        "schema": "ppo_train_v1",
+        "train_config": {"model": _legacy_model_config()},
+        "model_state_dict": legacy_state,
+        "optimizer_state_dict": {"state": {"stale": True}},
+    }
+
+    inflated = inflate_action_head_checkpoint_payload(checkpoint)
+    model = GoldRushPolicyNetwork(_small_config())
+    model.load_state_dict(inflated["model_state_dict"])
+
+    hidden = torch.randn(3, model.config.decoder_hidden)
+    spatial_features = torch.randn(3, model.config.width, 17, 17)
+    candidate_positions = torch.tensor(
+        [
+            [0, 1, 2, 3, 4],
+            [17, 18, 19, 20, 21],
+            [34, 35, 36, 37, 38],
+        ],
+        dtype=torch.long,
+    )
+
+    assert inflated["train_config"]["model"]["action_head_schema"] == "candidate_cell_residual_v1"
+    assert "optimizer_state_dict" not in inflated
+    assert inflated["optimizer_state_dict_dropped_for_action_head_inflation"] is True
+    assert "action_candidate_embedding.weight" in inflated["model_state_dict"]
+    assert "candidate_action_head.2.weight" in inflated["model_state_dict"]
+    assert torch.count_nonzero(inflated["model_state_dict"]["candidate_action_head.2.weight"]).item() == 0
+    assert torch.count_nonzero(inflated["model_state_dict"]["candidate_action_head.2.bias"]).item() == 0
+    assert torch.allclose(model._action_logits(hidden, spatial_features, candidate_positions), model.decoder_action_head(hidden))
+
+
+def test_inflate_candidate_residual_head_rejects_non_v2_feature_shape() -> None:
+    checkpoint = {
+        "schema": "ppo_train_v1",
+        "train_config": {"model": {**_legacy_model_config(), "actor_spatial_channels": 38}},
+        "model_state_dict": {},
+    }
+
+    try:
+        inflate_action_head_checkpoint_payload(checkpoint)
+    except ValueError as exc:
+        assert "actor feature shape" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def _small_config() -> PolicyNetworkConfig:
+    return PolicyNetworkConfig(
+        width=16,
+        residual_blocks=1,
+        se_reduction=4,
+        scalar_hidden=(16, 16),
+        actor_hidden=32,
+        critic_hidden=(32, 16),
+        decoder_hidden=16,
+        decoder_embedding=4,
+    )
+
+
+def _legacy_model_config() -> dict[str, object]:
+    config = _small_config()
+    return {
+        "actor_spatial_channels": config.actor_spatial_channels,
+        "actor_scalar_features": config.actor_scalar_features,
+        "critic_spatial_channels": config.critic_spatial_channels,
+        "critic_scalar_features": config.critic_scalar_features,
+        "width": config.width,
+        "residual_blocks": config.residual_blocks,
+        "se_reduction": config.se_reduction,
+        "scalar_hidden": config.scalar_hidden,
+        "actor_hidden": config.actor_hidden,
+        "critic_hidden": config.critic_hidden,
+        "decoder_hidden": config.decoder_hidden,
+        "decoder_embedding": config.decoder_embedding,
+        "action_head_schema": "autoregressive_head_v1",
+        "activation": config.activation,
+    }

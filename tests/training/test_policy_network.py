@@ -60,9 +60,30 @@ class PolicyNetworkTests(unittest.TestCase):
             for block in encoder.blocks:
                 self.assertEqual(torch.count_nonzero(block.se_fc2.weight).item(), 0)
                 self.assertEqual(torch.count_nonzero(block.se_fc2.bias).item(), 0)
+        candidate_output = model.candidate_action_head[-1]
+        self.assertEqual(torch.count_nonzero(candidate_output.weight).item(), 0)
+        self.assertEqual(torch.count_nonzero(candidate_output.bias).item(), 0)
 
         vp_prior = torch.softmax(model.vp_head.bias.detach(), dim=0)
         self.assertTrue(torch.allclose(vp_prior, torch.tensor([0.90, 0.07, 0.03]), atol=1e-6))
+
+    def test_candidate_residual_head_is_initially_noop(self) -> None:
+        model = _small_model()
+        spatial, scalars = _feature_tensors(batch_size=2)
+        encoded = model._encode(spatial, scalars)
+        hidden = torch.randn(2, model.config.decoder_hidden)
+        candidate_positions = torch.tensor(
+            [
+                [0, 1, 17, 18, 19],
+                [16, 15, 33, 34, 35],
+            ],
+            dtype=torch.long,
+        )
+
+        logits = model._action_logits(hidden, encoded.spatial_features, candidate_positions)
+        base_logits = model.decoder_action_head(hidden)
+
+        self.assertTrue(torch.allclose(logits, base_logits, atol=0.0, rtol=0.0))
 
     def test_actor_and_critic_parameters_are_disjoint(self) -> None:
         model = _small_model()

@@ -13,6 +13,8 @@ from simulator.types import Action, GameOutput
 FEATURE_SCHEMA = "goldrush2_feature_v2"
 SPATIAL_CHANNELS = 43
 SCALAR_FEATURES = 10
+ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1"
+LEGACY_ACTION_HEAD_SCHEMA = "autoregressive_head_v1"
 CRITIC_FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v1"
 CRITIC_SPATIAL_CHANNELS = 26
 CRITIC_SCALAR_FEATURES = 17
@@ -44,6 +46,7 @@ class PolicyNetworkConfig:
     critic_hidden: tuple[int, int] = (256, 128)
     decoder_hidden: int = 128
     decoder_embedding: int = 16
+    action_head_schema: str = ACTION_HEAD_SCHEMA
     activation: str = "silu"
 
     @property
@@ -293,6 +296,12 @@ class GoldRushPolicyNetwork(nn.Module):
         self.decoder_initial = nn.Linear(self.config.actor_hidden, self.config.decoder_hidden)
         self.decoder = AutoregressiveGRUCell(decoder_input, self.config.decoder_hidden)
         self.decoder_action_head = nn.Linear(self.config.decoder_hidden, ACTION_COUNT)
+        self.action_candidate_embedding = nn.Embedding(ACTION_COUNT, embedding)
+        self.candidate_action_head = nn.Sequential(
+            nn.Linear(self.config.decoder_hidden + width + embedding, self.config.decoder_hidden),
+            _activation(activation),
+            nn.Linear(self.config.decoder_hidden, 1),
+        )
 
         self.critic_mlp = nn.Sequential(
             nn.Linear(width * 6, self.config.critic_hidden[0]),
@@ -307,6 +316,7 @@ class GoldRushPolicyNetwork(nn.Module):
         self.register_buffer("official_slot_table", official_slots, persistent=True)
         self.register_buffer("action_row_delta", torch.tensor((-1, 1, 0, 0, 0)), persistent=True)
         self.register_buffer("action_col_delta", torch.tensor((0, 0, -1, 1, 0)), persistent=True)
+        self.register_buffer("action_id_table", torch.arange(ACTION_COUNT, dtype=torch.long), persistent=False)
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -327,6 +337,11 @@ class GoldRushPolicyNetwork(nn.Module):
         for head in (self.ko_head, self.vp_head, self.decoder_action_head):
             nn.init.normal_(head.weight, mean=0.0, std=0.01)
             nn.init.zeros_(head.bias)
+        candidate_output = self.candidate_action_head[-1]
+        if not isinstance(candidate_output, nn.Linear):
+            raise TypeError("candidate_action_head final module must be nn.Linear")
+        nn.init.zeros_(candidate_output.weight)
+        nn.init.zeros_(candidate_output.bias)
 
         vp_prior = torch.log(torch.tensor([0.90, 0.07, 0.03], dtype=self.vp_head.bias.dtype))
         with torch.no_grad():
@@ -365,6 +380,8 @@ class GoldRushPolicyNetwork(nn.Module):
             self.decoder_initial,
             self.decoder,
             self.decoder_action_head,
+            self.action_candidate_embedding,
+            self.candidate_action_head,
         )
         return tuple(parameter for module in modules for parameter in module.parameters())
 
@@ -581,12 +598,12 @@ class GoldRushPolicyNetwork(nn.Module):
                 dim=1,
             )
             hidden = self.decoder(decoder_input, hidden)
-            logits = self.decoder_action_head(hidden)
             valid_actions, candidate_positions = self._movement_candidates(
                 current_position,
                 other_position,
                 encoded.known_obstacles,
             )
+            logits = self._action_logits(hidden, encoded.spatial_features, candidate_positions)
             masked_logits = logits.masked_fill(~valid_actions, torch.finfo(logits.dtype).min)
             if forced_actions is None:
                 selected, selected_logprob = _select_logits(masked_logits, deterministic=deterministic)
@@ -618,6 +635,17 @@ class GoldRushPolicyNetwork(nn.Module):
             final_unit0_position=unit0_position,
             final_unit1_position=unit1_position,
         )
+
+    def _action_logits(self, hidden: Tensor, spatial_features: Tensor, candidate_positions: Tensor) -> Tensor:
+        base_logits = self.decoder_action_head(hidden)
+        candidate_local = _gather_positions(spatial_features, candidate_positions)
+        batch_size = hidden.shape[0]
+        hidden_expanded = hidden[:, None, :].expand(-1, ACTION_COUNT, -1)
+        action_embedding = self.action_candidate_embedding(self.action_id_table)
+        action_embedding = action_embedding[None, :, :].expand(batch_size, -1, -1)
+        candidate_input = torch.cat((hidden_expanded, candidate_local, action_embedding), dim=-1)
+        candidate_delta = self.candidate_action_head(candidate_input).squeeze(-1)
+        return base_logits + candidate_delta
 
     def _movement_candidates(
         self,
@@ -844,6 +872,12 @@ def _gather_position(h: Tensor, position: Tensor) -> Tensor:
     return flat.gather(2, index).squeeze(2)
 
 
+def _gather_positions(h: Tensor, positions: Tensor) -> Tensor:
+    flat = h.flatten(2)
+    index = positions[:, None, :].expand(-1, h.shape[1], -1)
+    return flat.gather(2, index).transpose(1, 2)
+
+
 def _validate_config(config: PolicyNetworkConfig) -> None:
     if config.actor_spatial_channels != SPATIAL_CHANNELS:
         raise ValueError(f"actor_spatial_channels must be {SPATIAL_CHANNELS}, got {config.actor_spatial_channels}")
@@ -857,6 +891,8 @@ def _validate_config(config: PolicyNetworkConfig) -> None:
         raise ValueError(
             f"critic_scalar_features must be {CRITIC_SCALAR_FEATURES}, got {config.critic_scalar_features}"
         )
+    if config.action_head_schema != ACTION_HEAD_SCHEMA:
+        raise ValueError(f"action_head_schema must be {ACTION_HEAD_SCHEMA!r}, got {config.action_head_schema!r}")
     if config.width <= 0:
         raise ValueError(f"width must be positive, got {config.width}")
     if config.residual_blocks <= 0:

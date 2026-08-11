@@ -734,6 +734,7 @@ def _actor_init_config(config: PolicyNetworkConfig | dict[str, Any]) -> dict[str
         "actor_hidden": raw.get("actor_hidden"),
         "decoder_hidden": raw.get("decoder_hidden"),
         "decoder_embedding": raw.get("decoder_embedding"),
+        "action_head_schema": raw.get("action_head_schema", "autoregressive_head_v1"),
         "activation": raw.get("activation"),
     }
 
@@ -781,6 +782,7 @@ def _model_config_from_checkpoint(checkpoint: dict[str, Any]) -> PolicyNetworkCo
         critic_hidden=tuple(int(value) for value in raw["critic_hidden"]),
         decoder_hidden=int(raw["decoder_hidden"]),
         decoder_embedding=int(raw["decoder_embedding"]),
+        action_head_schema=str(raw.get("action_head_schema", "autoregressive_head_v1")),
         activation=str(raw["activation"]),
     )
 

@@ -87,12 +87,12 @@ class StochasticActorExport(nn.Module):
                 dim=1,
             )
             hidden = self.model.decoder(decoder_input, hidden)
-            logits = self.model.decoder_action_head(hidden)
             valid_actions, candidate_positions = self.model._movement_candidates(
                 current_position,
                 other_position,
                 encoded.known_obstacles,
             )
+            logits = self.model._action_logits(hidden, encoded.spatial_features, candidate_positions)
             masked_logits = torch.where(valid_actions, logits, torch.full_like(logits, -1.0e9))
             selected = _gumbel_argmax(masked_logits, rand_action[:, step, :])
             selected_position = candidate_positions.gather(1, selected.unsqueeze(1)).squeeze(1)
@@ -159,6 +159,7 @@ def main() -> None:
         "operator_types": sorted(set(ops)),
         "stochastic": True,
         "critic_exported": False,
+        "action_head_schema": model.config.action_head_schema,
         "model_config": asdict(model.config),
         "inputs": {
             "actor_planes": [1, SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE],
@@ -199,6 +200,7 @@ def _load_model(path: Path) -> tuple[GoldRushPolicyNetwork, dict[str, Any]]:
         critic_hidden=tuple(int(v) for v in raw_config["critic_hidden"]),
         decoder_hidden=int(raw_config["decoder_hidden"]),
         decoder_embedding=int(raw_config["decoder_embedding"]),
+        action_head_schema=str(raw_config.get("action_head_schema", "autoregressive_head_v1")),
         activation=str(raw_config["activation"]),
     )
     if config.actor_spatial_channels != SPATIAL_CHANNELS or config.actor_scalar_features != SCALAR_FEATURES:
