@@ -10,7 +10,7 @@ from torch import Tensor
 from simulator.errors import SimulatorRuleError
 
 
-ACTOR_SPATIAL_CHANNELS = 38
+ACTOR_SPATIAL_CHANNELS = 43
 ACTOR_SCALAR_FEATURES = 10
 CRITIC_SPATIAL_CHANNELS = 26
 CRITIC_SCALAR_FEATURES = 17
@@ -253,7 +253,7 @@ class PpoBatch:
 def _validate_transitions(transitions: list[PpoTransition] | tuple[PpoTransition, ...]) -> None:
     for idx, transition in enumerate(transitions):
         if tuple(transition.spatial_planes.shape) != (ACTOR_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
-            raise ValueError(f"transition {idx} spatial_planes must have shape 38x17x17")
+            raise ValueError(f"transition {idx} spatial_planes must have shape 43x17x17")
         if tuple(transition.scalars.shape) != (ACTOR_SCALAR_FEATURES,):
             raise ValueError(f"transition {idx} scalars must have shape 10")
         if tuple(transition.critic_planes.shape) != (CRITIC_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
@@ -271,7 +271,7 @@ def _validate_batch_arrays(batch: PpoBatch) -> None:
     if transition_count <= 0:
         raise SimulatorRuleError("PpoBatch requires at least one transition")
     if tuple(batch.spatial_planes.shape) != (transition_count, ACTOR_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
-        raise ValueError(f"spatial_planes must have shape Nx38x17x17, got {tuple(batch.spatial_planes.shape)}")
+        raise ValueError(f"spatial_planes must have shape Nx43x17x17, got {tuple(batch.spatial_planes.shape)}")
     if tuple(batch.scalars.shape) != (transition_count, ACTOR_SCALAR_FEATURES):
         raise ValueError(f"scalars must have shape Nx10, got {tuple(batch.scalars.shape)}")
     if tuple(batch.critic_planes.shape) != (transition_count, CRITIC_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):

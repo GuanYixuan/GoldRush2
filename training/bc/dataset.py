@@ -114,8 +114,8 @@ def collate_bc_batches(items: list[BcBatch]) -> BcBatch:
 
 def _validate_arrays(planes: Tensor, scalars: Tensor, actions: Tensor, k: Tensor, order: Tensor, vp: Tensor) -> None:
     n = int(k.shape[0])
-    if tuple(planes.shape) != (n, 38, 17, 17):
-        raise ValueError(f"planes must have shape Nx38x17x17, got {tuple(planes.shape)}")
+    if tuple(planes.shape) != (n, 43, 17, 17):
+        raise ValueError(f"planes must have shape Nx43x17x17, got {tuple(planes.shape)}")
     if tuple(scalars.shape) != (n, 10):
         raise ValueError(f"scalars must have shape Nx10, got {tuple(scalars.shape)}")
     if tuple(actions.shape) != (n, 6):

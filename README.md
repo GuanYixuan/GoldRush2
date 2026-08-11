@@ -8,7 +8,7 @@
 
 当前神经策略主线是慢速后手 PPO：
 
-- actor 使用可部署的 `goldrush2_feature_v1`，由 `policy_runtime/` 的 C++ runtime 提供。
+- actor 使用可部署的 `goldrush2_feature_v2`，由 `policy_runtime/` 的 C++ runtime 提供。
 - critic 使用训练期 privileged full-state feature，具体 schema 见 `docs/features/privileged_critic_feature_v1.md`。
 - 网络结构见 `docs/policy_network_design.md`。
 - PPO、reward 和训练栈入口见 `training/README.md`、`docs/rl_architecture.md`、`docs/reward_design.md`。

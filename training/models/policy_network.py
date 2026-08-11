@@ -10,8 +10,8 @@ from torch.nn import functional as F
 from simulator.types import Action, GameOutput
 
 
-FEATURE_SCHEMA = "goldrush2_feature_v1"
-SPATIAL_CHANNELS = 38
+FEATURE_SCHEMA = "goldrush2_feature_v2"
+SPATIAL_CHANNELS = 43
 SCALAR_FEATURES = 10
 CRITIC_FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v1"
 CRITIC_SPATIAL_CHANNELS = 26

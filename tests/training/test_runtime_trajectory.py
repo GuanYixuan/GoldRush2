@@ -34,8 +34,8 @@ class RuntimeTrajectoryTests(unittest.TestCase):
         self.assertEqual([episode.player_id for episode in policy.episodes], [1, 2])
         self.assertEqual(policy.episodes[0].features[0]["visible_t1_count"], 0)
         self.assertEqual(policy.episodes[1].features[0]["visible_t1_count"], 0)
-        self.assertEqual(policy.episodes[0].features[0]["schema"], "goldrush2_feature_v1")
-        self.assertEqual(policy.episodes[1].features[0]["schema"], "goldrush2_feature_v1")
+        self.assertEqual(policy.episodes[0].features[0]["schema"], "goldrush2_feature_v2")
+        self.assertEqual(policy.episodes[1].features[0]["schema"], "goldrush2_feature_v2")
 
     def test_feature_schema_is_stable_within_episode(self) -> None:
         policy = _RecordingRuntimePolicy((_stay_output(),) * 5)
@@ -44,8 +44,8 @@ class RuntimeTrajectoryTests(unittest.TestCase):
         sampler.collect(policy, pair_count=1, seed=103, map_ids=(1,))
 
         for episode in policy.episodes:
-            self.assertTrue(all(summary["schema"] == "goldrush2_feature_v1" for summary in episode.features))
-            self.assertTrue(all(summary["plane_shape"] == (38, 17, 17) for summary in episode.features))
+            self.assertTrue(all(summary["schema"] == "goldrush2_feature_v2" for summary in episode.features))
+            self.assertTrue(all(summary["plane_shape"] == (43, 17, 17) for summary in episode.features))
             self.assertTrue(all(summary["scalar_shape"] == (10,) for summary in episode.features))
 
     def test_runtime_rollout_runs_multi_round_without_round_regression(self) -> None:

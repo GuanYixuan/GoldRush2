@@ -130,7 +130,7 @@ def run_worker_episode(
                 f"episode {task.task_id!r} exceeded transition shared memory length {max_episode_length}"
             )
         actor_features = extractor.observe(observation)
-        if actor_features["feature_schema"] != "goldrush2_feature_v1":
+        if actor_features["feature_schema"] != "goldrush2_feature_v2":
             raise SimulatorRuleError(f"unexpected feature schema: {actor_features['feature_schema']!r}")
         critic_features = _extract_critic_features(env, task.agent_player_id, int(static_config["round_count"]))
         actor_planes = np.asarray(actor_features["planes"], dtype=np.float32)

@@ -4,7 +4,7 @@
 
 ## 文档入口
 
-- `actor_feature_v1.md`：第一版可提交 actor feature，schema 为 `goldrush2_feature_v1`，输入来源是官方 `GameInput`。该路径可以进入 ONNX/C++ 提交模型。
+- `actor_feature_v1.md`：历史第一版 actor feature spec，schema 为 `goldrush2_feature_v1`。当前主线 runtime 已升级到 v2，v1 仅用于语义追溯和 checkpoint inflation。
 - `actor_feature_v2.md`：v1 的小增量版本，schema 为 `goldrush2_feature_v2`，新增 5 个 spatial planes：snapshot generated、中心金币先验、炸弹 belief、static2 mask 和 static2 距离图。
 - `privileged_critic_feature_v1.md`：当前训练期 critic feature，schema 为 `goldrush2_privileged_critic_feature_v1`，输入来源是 simulator full state。该路径禁止进入提交模型。
 

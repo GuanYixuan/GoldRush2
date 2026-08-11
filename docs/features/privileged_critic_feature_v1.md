@@ -13,11 +13,11 @@ source: GameState / RoundStepEnv full state
 critic_feature_schema: goldrush2_privileged_critic_feature_v1
 ```
 
-它可以包含全图金币、全图炸弹、全图障碍、双方真实角色位置、NPC 真实位置、双方金币和回合进度等信息。critic feature 的时态应与 actor observe 对齐：使用本回合行动前的 `round.start` 状态，即本回合开始时的金币生成和炸弹刷新已经应用后的状态。actor 仍只能使用 `goldrush2_feature_v1`。
+它可以包含全图金币、全图炸弹、全图障碍、双方真实角色位置、NPC 真实位置、双方金币和回合进度等信息。critic feature 的时态应与 actor observe 对齐：使用本回合行动前的 `round.start` 状态，即本回合开始时的金币生成和炸弹刷新已经应用后的状态。actor 仍只能使用 `goldrush2_feature_v2`。
 
 ## 输出形态
 
-critic feature 不绑定 actor feature 的 `38` plane 数量。当前 v1 固定为：
+critic feature 不绑定 actor feature 的 plane 数量。当前 v1 固定为：
 
 ```text
 critic_planes: Cc x 17 x 17

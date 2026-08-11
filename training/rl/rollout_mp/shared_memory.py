@@ -8,7 +8,7 @@ from training.rl.privileged_critic_features import SCALAR_FEATURES as CRITIC_SCA
 from training.rl.privileged_critic_features import SPATIAL_CHANNELS as CRITIC_SPATIAL_CHANNELS
 
 
-ACTOR_SPATIAL_CHANNELS = 38
+ACTOR_SPATIAL_CHANNELS = 43
 ACTOR_SCALAR_FEATURES = 10
 GRID_SIZE = 17
 

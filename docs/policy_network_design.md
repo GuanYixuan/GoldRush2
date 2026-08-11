@@ -1,15 +1,15 @@
 # Policy Network 设计
 
-本文冻结当前训练与部署共享的网络结构和动作概率语义。Actor feature 输入见 `docs/features/actor_feature_v1.md`，PPO 栈见 `docs/rl_architecture.md`，游戏动作规则以 `gamerules/gamerules.md` 为准。
+本文冻结当前训练与部署共享的网络结构和动作概率语义。Actor feature 输入见 `docs/features/actor_feature_v2.md`，PPO 栈见 `docs/rl_architecture.md`，游戏动作规则以 `gamerules/gamerules.md` 为准。
 
 ## 定位
 
-网络使用 actor/critic 双输入。actor 输入保持可提交路径 feature v1 不变：
+网络使用 actor/critic 双输入。actor 输入使用可提交路径 feature v2：
 
 ```text
-actor_spatial_planes: B x 38 x 17 x 17
+actor_spatial_planes: B x 43 x 17 x 17
 actor_scalars: B x 10
-actor_feature_schema: goldrush2_feature_v1
+actor_feature_schema: goldrush2_feature_v2
 ```
 
 critic 输入使用训练期 privileged critic feature：
@@ -38,7 +38,7 @@ actor 和 critic 使用两套参数独立的 encoder。第一版两套 encoder �
 
 ```text
 Actor stem:
-    Conv3x3(38 -> 96)
+    Conv3x3(43 -> 96)
     SiLU
     Conv3x3(96 -> 96)
     SiLU
@@ -257,7 +257,7 @@ extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent
 主进程/GPU 只负责批量推理。shared memory 与 PPO batch 保存两套 feature，shape 固定为：
 
 ```text
-actor:  38 x 17 x 17, scalars 10
+actor:  43 x 17 x 17, scalars 10
 critic: 26 x 17 x 17, scalars 17
 ```
 

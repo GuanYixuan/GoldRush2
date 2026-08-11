@@ -13,9 +13,9 @@ class FeatureExtractorTests(unittest.TestCase):
 
         features = extractor.observe(_basic_input(round_index=0))
 
-        self.assertEqual(feature_schema(), "goldrush2_feature_v1")
-        self.assertEqual(features["feature_schema"], "goldrush2_feature_v1")
-        self.assertEqual(features["planes"].shape, (38, 17, 17))
+        self.assertEqual(feature_schema(), "goldrush2_feature_v2")
+        self.assertEqual(features["feature_schema"], "goldrush2_feature_v2")
+        self.assertEqual(features["planes"].shape, (43, 17, 17))
         self.assertEqual(features["scalars"].shape, (10,))
         self.assertEqual(tuple(features["channel_names"]), tuple(channel_names()))
         self.assertEqual(tuple(features["scalar_names"]), tuple(scalar_names()))
@@ -96,13 +96,21 @@ class FeatureExtractorTests(unittest.TestCase):
         extractor = FeatureExtractor(player_id=1)
         first = _basic_input(round_index=0)
         first.snapshot_valid = True
-        first.snapshot = _snapshot(gold=(100, 200, 300, 400, 500), occupants=(1, 2, 3, 4, 8))
+        first.snapshot = _snapshot(
+            gold=(100, 200, 300, 400, 500),
+            occupants=(1, 2, 3, 4, 8),
+            generated=(5, 10, 15, 20, 25),
+        )
 
         features0 = extractor.observe(first)
         features1 = extractor.observe(_basic_input(round_index=1))
         second = _basic_input(round_index=5)
         second.snapshot_valid = True
-        second.snapshot = _snapshot(gold=(50, 60, 70, 80, 90), occupants=(0, 1, 2, 3, 4))
+        second.snapshot = _snapshot(
+            gold=(50, 60, 70, 80, 90),
+            occupants=(0, 1, 2, 3, 4),
+            generated=(30, 40, 50, 60, 70),
+        )
         features2 = extractor.observe(second)
 
         ch = _channel_index()
@@ -114,8 +122,10 @@ class FeatureExtractorTests(unittest.TestCase):
         self.assertEqual(features0["planes"][ch["last_snapshot_gold_remaining_map"], 8, 8], 1.0)
         self.assertEqual(features1["planes"][ch["last_snapshot_gold_remaining_map"], 0, 16], 2.0)
         self.assertEqual(features1["planes"][ch["last_snapshot_occupants_map"], 0, 16], 2.0)
+        self.assertEqual(features1["planes"][ch["last_snapshot_gold_generated_map"], 0, 16], 0.25)
         self.assertEqual(features2["planes"][ch["last_snapshot_gold_remaining_map"], 8, 8], 0.5)
         self.assertEqual(features2["planes"][ch["prev_snapshot_gold_remaining_map"], 8, 8], 1.0)
+        self.assertEqual(features2["planes"][ch["last_snapshot_gold_generated_map"], 8, 8], 0.3)
 
     def test_scalar_features(self) -> None:
         game_input = _basic_input(round_index=0)
@@ -145,15 +155,16 @@ class FeatureExtractorTests(unittest.TestCase):
         extractor.commit_action(_right_output())
         after = extractor.observe(_basic_input(round_index=1))
 
-        self.assertEqual(before["feature_schema"], "goldrush2_feature_v1")
-        self.assertEqual(after["feature_schema"], "goldrush2_feature_v1")
-        self.assertEqual(after["planes"].shape, (38, 17, 17))
+        self.assertEqual(before["feature_schema"], "goldrush2_feature_v2")
+        self.assertEqual(after["feature_schema"], "goldrush2_feature_v2")
+        self.assertEqual(after["planes"].shape, (43, 17, 17))
         self.assertEqual(after["scalars"].shape, (10,))
 
     def test_reset_clears_memory(self) -> None:
         extractor = FeatureExtractor(player_id=1)
         first = _fog_input(round_index=0)
         first.grid[1][2] = -1
+        first.grid[0][5] = 16
         extractor.observe(first)
 
         extractor.reset(1)
@@ -162,6 +173,8 @@ class FeatureExtractorTests(unittest.TestCase):
         ch = _channel_index()
         self.assertEqual(features["planes"][ch["obstacle_known_mask"], 1, 2], 0.0)
         self.assertEqual(features["planes"][ch["visible_mask_t1"], 1, 2], 0.0)
+        self.assertEqual(features["planes"][ch["bomb_belief_mask"], 1, 2], 0.0795)
+        self.assertEqual(features["planes"][ch["static_2_mask"], 0, 5], 1.0)
 
     def test_round_regression_fails_fast(self) -> None:
         extractor = FeatureExtractor(player_id=1)
@@ -170,6 +183,58 @@ class FeatureExtractorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(Exception, "round regression"):
             extractor.observe(_basic_input(round_index=1))
+
+    def test_center_gold_spawn_prior_masks_known_obstacles(self) -> None:
+        game_input = _fog_input(round_index=0)
+        game_input.grid[4][4] = -1
+
+        features = FeatureExtractor(player_id=1).observe(game_input)
+
+        ch = _channel_index()
+        self.assertEqual(features["planes"][ch["center_gold_spawn_prob"], 8, 8], 1.0)
+        self.assertEqual(features["planes"][ch["center_gold_spawn_prob"], 4, 4], 0.0)
+        self.assertGreater(features["planes"][ch["center_gold_spawn_prob"], 4, 5], 0.0)
+        self.assertEqual(features["planes"][ch["center_gold_spawn_prob"], 3, 8], 0.0)
+
+    def test_bomb_belief_refresh_visibility_and_invisible_persistence(self) -> None:
+        extractor = FeatureExtractor(player_id=1)
+        first = _fog_input(round_index=0)
+        first.grid[3][4] = -3
+
+        features0 = extractor.observe(first)
+        features1 = extractor.observe(_fog_input(round_index=1))
+        features20 = extractor.observe(_fog_input(round_index=20))
+
+        ch = _channel_index()
+        self.assertEqual(features0["planes"][ch["bomb_belief_mask"], 3, 4], 1.0)
+        self.assertEqual(features0["planes"][ch["bomb_belief_mask"], 0, 0], 0.0)
+        self.assertEqual(features0["planes"][ch["bomb_belief_mask"], 2, 2], 0.0795)
+        self.assertEqual(features1["planes"][ch["bomb_belief_mask"], 3, 4], 1.0)
+        self.assertEqual(features20["planes"][ch["bomb_belief_mask"], 3, 4], 0.0795)
+
+    def test_static2_public_map_exclusion_online_discovery_and_distance(self) -> None:
+        extractor = FeatureExtractor(player_id=1)
+
+        initial = extractor.observe(_fog_input(round_index=0))
+        exclude_map1 = _fog_input(round_index=1)
+        exclude_map1.grid[0][3] = 0
+        after_exclusion = extractor.observe(exclude_map1)
+        full_empty = _basic_input(round_index=2)
+        no_public_targets = extractor.observe(full_empty)
+        online = _basic_input(round_index=3)
+        online.grid[0][4] = 16
+        online.grid[8][8] = 16
+        discovered = extractor.observe(online)
+
+        ch = _channel_index()
+        self.assertEqual(initial["planes"][ch["static_2_mask"], 0, 5], 1.0)
+        self.assertEqual(initial["planes"][ch["to_static2_distance"], 0, 5], 0.0)
+        self.assertEqual(after_exclusion["planes"][ch["static_2_mask"], 0, 5], 0.0)
+        self.assertEqual(no_public_targets["planes"][ch["static_2_mask"], 0, 4], 0.0)
+        self.assertEqual(no_public_targets["planes"][ch["to_static2_distance"], 0, 4], 2.0)
+        self.assertEqual(discovered["planes"][ch["static_2_mask"], 0, 4], 1.0)
+        self.assertEqual(discovered["planes"][ch["static_2_mask"], 8, 8], 0.0)
+        self.assertEqual(discovered["planes"][ch["to_static2_distance"], 0, 4], 0.0)
 
 
 def _channel_index() -> dict[str, int]:
@@ -201,12 +266,22 @@ def _fog_input(round_index: int) -> GameInput:
     return game_input
 
 
-def _snapshot(*, gold: tuple[int, int, int, int, int], occupants: tuple[int, int, int, int, int]) -> Snapshot:
+def _snapshot(
+    *,
+    gold: tuple[int, int, int, int, int],
+    occupants: tuple[int, int, int, int, int],
+    generated: tuple[int, int, int, int, int] = (0, 0, 0, 0, 0),
+) -> Snapshot:
     return Snapshot(
         window_begin=0,
         window_end=4,
         regions=[
-            RegionStat(id=idx + 1, gold_remaining=gold[idx], occupants=occupants[idx])
+            RegionStat(
+                id=idx + 1,
+                gold_remaining=gold[idx],
+                occupants=occupants[idx],
+                gold_generated=generated[idx],
+            )
             for idx in range(5)
         ],
     )

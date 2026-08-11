@@ -52,7 +52,7 @@ class MultiprocessRolloutTests(unittest.TestCase):
         )
 
         self.assertEqual(batch.transition_count, 2)
-        self.assertEqual(tuple(batch.spatial_planes.shape), (2, 38, 17, 17))
+        self.assertEqual(tuple(batch.spatial_planes.shape), (2, 43, 17, 17))
         self.assertEqual(tuple(batch.scalars.shape), (2, 10))
         self.assertEqual(tuple(batch.critic_planes.shape), (2, 26, 17, 17))
         self.assertEqual(tuple(batch.critic_scalars.shape), (2, 17))

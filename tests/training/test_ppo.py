@@ -92,7 +92,7 @@ class PpoTests(unittest.TestCase):
         self.assertEqual(batch.transition_count, 2)
         self.assertEqual(batch.episode_ids[0], "pair-000000-seed-5-first")
         self.assertEqual(batch.episode_ids[1], "pair-000000-seed-5-second")
-        self.assertEqual(tuple(batch.spatial_planes.shape), (2, 38, 17, 17))
+        self.assertEqual(tuple(batch.spatial_planes.shape), (2, 43, 17, 17))
         self.assertEqual(tuple(batch.critic_planes.shape), (2, 26, 17, 17))
         self.assertEqual(tuple(batch.critic_scalars.shape), (2, 17))
         self.assertEqual(stats.update_count, 1)
@@ -146,7 +146,7 @@ def _batch_from_model(model: GoldRushPolicyNetwork) -> PpoBatch:
 
 
 def _feature_tensors(*, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-    spatial = torch.zeros(batch_size, 38, 17, 17)
+    spatial = torch.zeros(batch_size, 43, 17, 17)
     scalars = torch.zeros(batch_size, 10)
     spatial[:, 24, 0, 0] = 1.0
     spatial[:, 25, 16, 16] = 1.0

@@ -372,7 +372,7 @@ def _small_model() -> GoldRushPolicyNetwork:
 def _feature_tensors(
     *, batch_size: int, unit0: tuple[int, int] = (1, 1), unit1: tuple[int, int] = (15, 15)
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    spatial = torch.zeros(batch_size, 38, 17, 17)
+    spatial = torch.zeros(batch_size, 43, 17, 17)
     scalars = torch.zeros(batch_size, 10)
     spatial[:, 24, unit0[0], unit0[1]] = 1.0
     spatial[:, 25, unit1[0], unit1[1]] = 1.0
@@ -394,7 +394,7 @@ def _critic_feature_tensors(
 def _feature_dict() -> dict[str, object]:
     spatial, scalars = _feature_tensors(batch_size=1)
     return {
-        "feature_schema": "goldrush2_feature_v1",
+        "feature_schema": "goldrush2_feature_v2",
         "planes": spatial[0].numpy(),
         "scalars": scalars[0].numpy(),
     }
