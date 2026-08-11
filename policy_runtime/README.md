@@ -1,5 +1,7 @@
 # Policy Runtime
 
+`onnxruntime_c_api/` 保存已验证可用于提交 `.so` 组装的 ONNX Runtime C API headers。`tools/submission/build_cpp_policy.py` 会复制这些 headers 到生成目录，并在 C++ 侧通过 `dlopen` / `dlsym` 动态调用平台环境中的 `libonnxruntime.so`，避免编译期链接。
+
 `policy_runtime/` 承载训练和最终 C++ 提交策略共享的确定性运行时逻辑。当前实现冻结为 actor 侧 `goldrush2_feature_v1`，具体 feature 语义见 `docs/features/actor_feature_v1.md`。
 
 训练期 privileged critic feature 不在本 runtime 中实现。critic feature 读取 simulator full state，由训练栈 Python 侧提供，schema 见 `docs/features/privileged_critic_feature_v1.md`。

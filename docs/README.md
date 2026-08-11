@@ -20,6 +20,7 @@
 
 ## 部署与研究归档
 
+- `submission_pipeline.md`：checkpoint 到 ONNX、C++ `.so`、本地 smoke、平台 self-play 和供挑战上传的正式流程。
 - `neural_inference.md`：C++/ONNX Runtime 提交路线、平台速度和量化实验归档。
 - `fast_option_design.md`：conditional fast option 的未来设计，不是当前已实现主线能力。
 

@@ -76,3 +76,5 @@ conda run --no-capture-output -n goldrush \
 ```
 
 通用工具说明见 `tools/README.md`。涉及平台提交、发起对局或下载日志时，必须先阅读 `AGENTS.md` 和对应工具文档。
+
+策略部署链路见 `docs/submission_pipeline.md`，当前正式路径为 `checkpoint -> actor-only stochastic FP32 ONNX -> C++ .so -> smoke -> 平台验证/供挑战上传`。

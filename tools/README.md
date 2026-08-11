@@ -73,6 +73,33 @@ conda run --no-capture-output -n goldrush \
 
 缓存路径可通过 `--cache-dir` 修改。缓存只用于减少重复下载，不作为长期数据源。
 
+## `submission/`
+
+策略导出后的提交资产组装与平台操作工具。完整流程见 `docs/submission_pipeline.md`。
+
+### 只写本地资产
+
+`build_cpp_policy.py` 将 actor ONNX 组装为 C++ `.so`，会写入指定 `--output-dir`，不会访问平台：
+
+```bash
+PYTHONPATH=. conda run --no-capture-output -n goldrush \
+  python tools/submission/build_cpp_policy.py \
+  --onnx temp/submission_builds/example/actor.onnx \
+  --output-dir temp/submission_builds/example/cpp \
+  --module-name PlayerExample
+```
+
+`smoke_cpp_policy.py` 在本地 simulator 中加载 `.so` 做短局 smoke，不会访问平台。
+
+### 会访问或修改平台
+
+以下工具会读取 `.env` 中的 `LOGIN_KEY`，不得打印 key 或 token：
+
+- `platform_submit_selfplay.py`：上传同一 `.so` 两份并发起一局公测 self-play，随后下载 replay。
+- `platform_publish_challenge.py`：上传 `.so` 为供他人挑战版本，会修改平台上当前 `player<user.id>` 挑战代码。
+
+平台提交、发起对局或修改挑战版本只能在用户明确要求时执行。
+
 ## `metrics_tensorboard.py`
 
 只读训练指标查看工具。它将命令行明确指定的一个或多个实验目录中的 `metrics.jsonl` 导出为 TensorBoard event 文件；不会扫描整个 `temp/`，不会访问评测平台，也不会修改训练 checkpoint 或原始日志。

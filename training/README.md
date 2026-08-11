@@ -38,6 +38,7 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 - `training/bc/`：BC 数据采集、审计、加载、loss 和 actor-only 训练。
 - `training/opponents/`：训练和评估用 opponent runner、scripted opponents 与 league 参数采样。
 - `training/configs/`：稳定评估配置。
+- `training/export/`：可部署 actor 导出工具，当前支持 actor-only stochastic FP32 ONNX。
 - `training/scripts/`：可执行入口，当前包括 PPO、BC 采集/审计/训练。
 
 ## 常用能力
