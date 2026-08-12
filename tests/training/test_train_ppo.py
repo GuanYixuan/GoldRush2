@@ -125,6 +125,29 @@ class TrainPpoTests(unittest.TestCase):
                 )
             )
 
+    def test_stem_new_channel_lr_only_updates_new_stem_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                actor_learning_rate=1.0e-6,
+                candidate_action_learning_rate=1.0e-4,
+                stem_new_channel_learning_rate=3.0e-4,
+                actor_lr_ramp_updates=1,
+                freeze_ko_vp_heads=True,
+            )
+            torch.manual_seed(config.seed)
+            initial_model = GoldRushPolicyNetwork(_small_model_config())
+            initial_stem = initial_model.actor_encoder.stem[0].weight.detach().clone()
+
+            result = run_training(config)
+
+            records = _read_jsonl(Path(tmpdir) / "metrics.jsonl")
+            self.assertAlmostEqual(float(records[0]["stem_new_channel_lr"]), 3.0e-4)
+            model, _checkpoint = load_checkpoint(result.latest_checkpoint, model_config=_small_model_config())
+            final_stem = model.actor_encoder.stem[0].weight.detach().cpu()
+            self.assertTrue(torch.allclose(initial_stem[:, 38:43], final_stem[:, 38:43], atol=0.0, rtol=0.0) is False)
+            self.assertTrue(torch.allclose(initial_stem[:, :38], final_stem[:, :38], atol=1.0e-8, rtol=0.0))
+
     def test_fork_ppo_checkpoint_loads_model_without_resuming_update(self) -> None:
         with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as fork_tmp:
             first = run_training(_smoke_config(output_dir=Path(first_tmp), total_updates=2))
@@ -273,6 +296,7 @@ def _smoke_config(
     actor_lr_ramp_updates: int = 100,
     actor_learning_rate: float = 5.0e-5,
     candidate_action_learning_rate: float | None = None,
+    stem_new_channel_learning_rate: float | None = None,
     freeze_ko_vp_heads: bool = False,
     fork_ppo_checkpoint: Path | None = None,
     rollout_seed_base: int | None = None,
@@ -295,6 +319,7 @@ def _smoke_config(
         beta_margin=0.0,
         actor_learning_rate=actor_learning_rate,
         candidate_action_learning_rate=candidate_action_learning_rate,
+        stem_new_channel_learning_rate=stem_new_channel_learning_rate,
         critic_warmup_updates=critic_warmup_updates,
         actor_lr_ramp_updates=actor_lr_ramp_updates,
         freeze_ko_vp_heads=freeze_ko_vp_heads,
