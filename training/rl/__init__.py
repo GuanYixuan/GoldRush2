@@ -2,6 +2,7 @@
 
 from .env import SingleAgentEnvConfig, SingleAgentGoldRushEnv
 from .eval import EvaluationCase, EvaluationConfig, EvaluationResult, EvaluationSuite, evaluate_policy
+from .eval_mp import EvalEpisodeSummary, EvalTask, ParallelEvalConfig, ParallelEvalPool, evaluate_parallel
 from .multiprocess_rollout import MultiprocessRolloutConfig, MultiprocessRolloutPool, collect_multiprocess_ppo_rollouts
 from .ppo import (
     PpoConfig,
@@ -32,8 +33,12 @@ __all__ = [
     "EvaluationConfig",
     "EvaluationResult",
     "EvaluationSuite",
+    "EvalEpisodeSummary",
+    "EvalTask",
     "MultiprocessRolloutConfig",
     "MultiprocessRolloutPool",
+    "ParallelEvalConfig",
+    "ParallelEvalPool",
     "PpoBatch",
     "PpoConfig",
     "PpoEvaluation",
@@ -54,6 +59,7 @@ __all__ = [
     "collect_ppo_rollouts",
     "critic_only_update",
     "evaluate_actions",
+    "evaluate_parallel",
     "evaluate_policy",
     "extract_privileged_critic_features",
     "privileged_critic_channel_names",
