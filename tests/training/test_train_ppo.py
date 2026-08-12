@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 
 from simulator.config import EpisodeConfig, RulesConfig
-from training.models import PolicyNetworkConfig
+from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.rl import EvaluationCase, PpoConfig
 from training.rl import MultiprocessRolloutConfig
 from training.scripts.train_ppo import (
@@ -93,6 +93,37 @@ class TrainPpoTests(unittest.TestCase):
             self.assertAlmostEqual(float(train_records[0]["critic_lr"]), config.critic_learning_rate)
             self.assertAlmostEqual(float(train_records[1]["actor_lr"]), config.actor_learning_rate * 0.5)
             self.assertAlmostEqual(float(train_records[2]["actor_lr"]), config.actor_learning_rate)
+
+    def test_candidate_action_lr_split_can_freeze_ko_vp_heads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                actor_learning_rate=1.0e-5,
+                candidate_action_learning_rate=1.0e-4,
+                actor_lr_ramp_updates=1,
+                freeze_ko_vp_heads=True,
+            )
+            result = run_training(config)
+
+            records = _read_jsonl(Path(tmpdir) / "metrics.jsonl")
+            self.assertAlmostEqual(float(records[0]["actor_lr"]), 1.0e-5)
+            self.assertAlmostEqual(float(records[0]["candidate_action_lr"]), 1.0e-4)
+            self.assertTrue(records[0]["freeze_ko_vp_heads"])
+            model, _checkpoint = load_checkpoint(result.latest_checkpoint, model_config=_small_model_config())
+            torch.manual_seed(config.seed)
+            expected_initial_model = GoldRushPolicyNetwork(_small_model_config())
+            self.assertTrue(
+                torch.allclose(
+                    torch.cat([parameter.detach().flatten() for parameter in expected_initial_model.ko_head.parameters()]),
+                    torch.cat([parameter.detach().flatten().cpu() for parameter in model.ko_head.parameters()]),
+                )
+            )
+            self.assertTrue(
+                torch.allclose(
+                    torch.cat([parameter.detach().flatten() for parameter in expected_initial_model.vp_head.parameters()]),
+                    torch.cat([parameter.detach().flatten().cpu() for parameter in model.vp_head.parameters()]),
+                )
+            )
 
     def test_fork_ppo_checkpoint_loads_model_without_resuming_update(self) -> None:
         with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as fork_tmp:
@@ -210,6 +241,9 @@ class TrainPpoTests(unittest.TestCase):
                 "16",
                 "--decoder-embedding",
                 "4",
+                "--candidate-action-learning-rate",
+                "1e-4",
+                "--freeze-ko-vp-heads",
                 "--ppo-minibatch-size",
                 "2",
                 "--ppo-update-epochs",
@@ -237,6 +271,9 @@ def _smoke_config(
     multiprocess_rollout: MultiprocessRolloutConfig | None = None,
     critic_warmup_updates: int = 0,
     actor_lr_ramp_updates: int = 100,
+    actor_learning_rate: float = 5.0e-5,
+    candidate_action_learning_rate: float | None = None,
+    freeze_ko_vp_heads: bool = False,
     fork_ppo_checkpoint: Path | None = None,
     rollout_seed_base: int | None = None,
     advance_rollout_seed: bool = True,
@@ -256,8 +293,11 @@ def _smoke_config(
         rollout_mode=rollout_mode,
         multiprocess_rollout=multiprocess_rollout or MultiprocessRolloutConfig(),
         beta_margin=0.0,
+        actor_learning_rate=actor_learning_rate,
+        candidate_action_learning_rate=candidate_action_learning_rate,
         critic_warmup_updates=critic_warmup_updates,
         actor_lr_ramp_updates=actor_lr_ramp_updates,
+        freeze_ko_vp_heads=freeze_ko_vp_heads,
         model=_small_model_config(),
         ppo=PpoConfig(update_epochs=1, minibatch_size=2, target_joint_kl=None),
         episode=EpisodeConfig(rules=RulesConfig(round_count=1, snapshot_period=1), seed=7, map_id=1),

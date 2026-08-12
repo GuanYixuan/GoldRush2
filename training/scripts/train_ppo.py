@@ -57,9 +57,11 @@ class TrainPpoConfig:
     gold_gain_scale: float = 100.0
     net_gold_gain_scale: float = 50.0
     actor_learning_rate: float = 5.0e-5
+    candidate_action_learning_rate: float | None = None
     critic_learning_rate: float = 5.0e-4
     critic_warmup_updates: int = 0
     actor_lr_ramp_updates: int = 100
+    freeze_ko_vp_heads: bool = False
     adam_eps: float = 1.0e-5
     rollout_mode: str = "serial"
     multiprocess_rollout: MultiprocessRolloutConfig = field(default_factory=MultiprocessRolloutConfig)
@@ -102,7 +104,7 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
 
     if config.resume_checkpoint is not None:
         optimizer_phase = _checkpoint_optimizer_phase(Path(config.resume_checkpoint), device=device)
-        _set_trainable(model, optimizer_phase)
+        _set_trainable(model, optimizer_phase, config=config)
         optimizer = _make_optimizer(model, optimizer_phase=optimizer_phase, config=config)
         start_update = _load_checkpoint(
             Path(config.resume_checkpoint),
@@ -115,7 +117,7 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
         fork_metadata = _checkpoint_fork_metadata(Path(config.resume_checkpoint), device=device)
     else:
         optimizer_phase = _phase_for_update(1, config)
-        _set_trainable(model, optimizer_phase)
+        _set_trainable(model, optimizer_phase, config=config)
         optimizer = _make_optimizer(model, optimizer_phase=optimizer_phase, config=config)
 
     train_metrics: list[dict[str, Any]] = []
@@ -130,7 +132,7 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
             desired_phase = _phase_for_update(update_index, config)
             if desired_phase != optimizer_phase:
                 optimizer_phase = desired_phase
-                _set_trainable(model, optimizer_phase)
+                _set_trainable(model, optimizer_phase, config=config)
                 optimizer = _make_optimizer(model, optimizer_phase=optimizer_phase, config=config)
             learning_rates = _set_learning_rates_for_update(optimizer, config=config, optimizer_phase=optimizer_phase, update_index=update_index)
             batch, rollout_stats = _collect_training_rollouts(
@@ -164,8 +166,11 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "fork_checkpoint_update": None if fork_metadata is None else fork_metadata["fork_checkpoint_update"],
                 "fork_checkpoint_tag": None if fork_metadata is None else fork_metadata["fork_checkpoint_tag"],
                 "actor_lr": learning_rates["actor_lr"],
+                "candidate_action_lr": learning_rates["candidate_action_lr"],
                 "critic_lr": learning_rates["critic_lr"],
                 "actor_lr_ramp_updates": config.actor_lr_ramp_updates,
+                "candidate_action_learning_rate": config.candidate_action_learning_rate,
+                "freeze_ko_vp_heads": config.freeze_ko_vp_heads,
                 "critic_warmup_updates": config.critic_warmup_updates,
                 "transition_count": batch.transition_count,
                 "mean_reward": float(batch.rewards.mean().detach().cpu().item()),
@@ -303,9 +308,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gold-gain-scale", type=float, default=100.0)
     parser.add_argument("--net-gold-gain-scale", type=float, default=50.0)
     parser.add_argument("--actor-learning-rate", type=float, default=5.0e-5)
+    parser.add_argument("--candidate-action-learning-rate", type=float, default=None)
     parser.add_argument("--critic-learning-rate", type=float, default=5.0e-4)
     parser.add_argument("--critic-warmup-updates", type=int, default=0)
     parser.add_argument("--actor-lr-ramp-updates", type=int, default=100)
+    parser.add_argument("--freeze-ko-vp-heads", action="store_true")
     parser.add_argument("--adam-eps", type=float, default=1.0e-5)
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
     parser.add_argument("--init-model-checkpoint", type=Path, default=None)
@@ -390,9 +397,13 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         gold_gain_scale=float(args.gold_gain_scale),
         net_gold_gain_scale=float(args.net_gold_gain_scale),
         actor_learning_rate=float(args.actor_learning_rate),
+        candidate_action_learning_rate=(
+            None if args.candidate_action_learning_rate is None else float(args.candidate_action_learning_rate)
+        ),
         critic_learning_rate=float(args.critic_learning_rate),
         critic_warmup_updates=int(args.critic_warmup_updates),
         actor_lr_ramp_updates=int(args.actor_lr_ramp_updates),
+        freeze_ko_vp_heads=bool(args.freeze_ko_vp_heads),
         adam_eps=float(args.adam_eps),
         rollout_mode=str(args.rollout_mode),
         multiprocess_rollout=multiprocess_rollout,
@@ -476,7 +487,7 @@ def _phase_for_update(update_index: int, config: TrainPpoConfig) -> str:
     return "critic" if update_index <= config.critic_warmup_updates else "full"
 
 
-def _set_trainable(model: GoldRushPolicyNetwork, optimizer_phase: str) -> None:
+def _set_trainable(model: GoldRushPolicyNetwork, optimizer_phase: str, *, config: TrainPpoConfig) -> None:
     if optimizer_phase == "critic":
         for parameter in model.parameters():
             parameter.requires_grad_(False)
@@ -486,6 +497,9 @@ def _set_trainable(model: GoldRushPolicyNetwork, optimizer_phase: str) -> None:
     if optimizer_phase == "full":
         for parameter in model.parameters():
             parameter.requires_grad_(True)
+        if config.freeze_ko_vp_heads:
+            for parameter in _ko_vp_parameters(model):
+                parameter.requires_grad_(False)
         return
     raise ValueError(f"unknown optimizer_phase: {optimizer_phase!r}")
 
@@ -499,10 +513,7 @@ def _make_optimizer(
     if optimizer_phase == "critic":
         params: Any = [{"params": list(model.critic_parameters()), "lr": config.critic_learning_rate, "name": "critic"}]
     elif optimizer_phase == "full":
-        params = [
-            {"params": list(model.actor_parameters()), "lr": config.actor_learning_rate, "name": "actor"},
-            {"params": list(model.critic_parameters()), "lr": config.critic_learning_rate, "name": "critic"},
-        ]
+        params = _full_optimizer_param_groups(model, config)
     else:
         raise ValueError(f"unknown optimizer_phase: {optimizer_phase!r}")
     return torch.optim.Adam(params, lr=config.critic_learning_rate, eps=config.adam_eps)
@@ -518,25 +529,74 @@ def _set_learning_rates_for_update(
     if optimizer_phase == "critic":
         for group in optimizer.param_groups:
             group["lr"] = config.critic_learning_rate
-        return {"actor_lr": None, "critic_lr": config.critic_learning_rate}
+        return {"actor_lr": None, "candidate_action_lr": None, "critic_lr": config.critic_learning_rate}
     if optimizer_phase != "full":
         raise ValueError(f"unknown optimizer_phase: {optimizer_phase!r}")
 
+    actor_lr = _ramped_actor_lr(config.actor_learning_rate, config=config, update_index=update_index)
+    candidate_lr = None if config.candidate_action_learning_rate is None else _ramped_actor_lr(config.candidate_action_learning_rate, config=config, update_index=update_index)
+    group_names = [group.get("name") for group in optimizer.param_groups]
+    if config.candidate_action_learning_rate is None:
+        if group_names != ["actor", "critic"]:
+            raise RuntimeError(f"full PPO optimizer groups must be ordered actor, critic, got {group_names}")
+        actor_group, critic_group = optimizer.param_groups
+        actor_group["lr"] = actor_lr
+        critic_group["lr"] = config.critic_learning_rate
+    else:
+        if group_names != ["actor_body", "candidate_action", "critic"]:
+            raise RuntimeError(
+                "full PPO optimizer groups must be ordered actor_body, candidate_action, critic, "
+                f"got {group_names}"
+            )
+        actor_group, candidate_group, critic_group = optimizer.param_groups
+        actor_group["lr"] = actor_lr
+        candidate_group["lr"] = candidate_lr
+        critic_group["lr"] = config.critic_learning_rate
+    return {"actor_lr": actor_lr, "candidate_action_lr": candidate_lr, "critic_lr": config.critic_learning_rate}
+
+
+def _ramped_actor_lr(target_lr: float, *, config: TrainPpoConfig, update_index: int) -> float:
     ppo_phase_update = update_index - config.critic_warmup_updates
     ramp_updates = int(config.actor_lr_ramp_updates)
-    actor_lr = (
-        config.actor_learning_rate
-        if ramp_updates <= 0
-        else config.actor_learning_rate * min(1.0, float(ppo_phase_update) / float(ramp_updates))
-    )
-    if len(optimizer.param_groups) != 2:
-        raise RuntimeError("full PPO phase requires separate actor/critic optimizer groups")
-    actor_group, critic_group = optimizer.param_groups
-    if actor_group.get("name") != "actor" or critic_group.get("name") != "critic":
-        raise RuntimeError("full PPO optimizer groups must be ordered actor, critic")
-    actor_group["lr"] = actor_lr
-    critic_group["lr"] = config.critic_learning_rate
-    return {"actor_lr": actor_lr, "critic_lr": config.critic_learning_rate}
+    if ramp_updates <= 0:
+        return target_lr
+    return target_lr * min(1.0, float(ppo_phase_update) / float(ramp_updates))
+
+
+def _full_optimizer_param_groups(model: GoldRushPolicyNetwork, config: TrainPpoConfig) -> list[dict[str, Any]]:
+    critic_params = _trainable_parameters(model.critic_parameters())
+    if config.candidate_action_learning_rate is None:
+        return [
+            {"params": _trainable_parameters(model.actor_parameters()), "lr": config.actor_learning_rate, "name": "actor"},
+            {"params": critic_params, "lr": config.critic_learning_rate, "name": "critic"},
+        ]
+
+    candidate_ids = {id(parameter) for parameter in _candidate_action_parameters(model)}
+    candidate_params = _trainable_parameters(_candidate_action_parameters(model))
+    actor_body_params = [
+        parameter
+        for parameter in model.actor_parameters()
+        if id(parameter) not in candidate_ids and parameter.requires_grad
+    ]
+    return [
+        {"params": actor_body_params, "lr": config.actor_learning_rate, "name": "actor_body"},
+        {"params": candidate_params, "lr": config.candidate_action_learning_rate, "name": "candidate_action"},
+        {"params": critic_params, "lr": config.critic_learning_rate, "name": "critic"},
+    ]
+
+
+def _trainable_parameters(parameters) -> list[torch.nn.Parameter]:
+    return [parameter for parameter in parameters if parameter.requires_grad]
+
+
+def _candidate_action_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn.Parameter, ...]:
+    modules = (model.action_candidate_embedding, model.candidate_action_head)
+    return tuple(parameter for module in modules for parameter in module.parameters())
+
+
+def _ko_vp_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn.Parameter, ...]:
+    modules = (model.ko_head, model.vp_head)
+    return tuple(parameter for module in modules for parameter in module.parameters())
 
 
 def _should_save_update(config: TrainPpoConfig, update_index: int) -> bool:
@@ -806,6 +866,11 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError(f"rollout_mode must be serial or multiprocess, got {config.rollout_mode!r}")
     if config.actor_learning_rate <= 0.0:
         raise ValueError(f"actor_learning_rate must be positive, got {config.actor_learning_rate}")
+    if config.candidate_action_learning_rate is not None and config.candidate_action_learning_rate <= 0.0:
+        raise ValueError(
+            "candidate_action_learning_rate must be positive when set, "
+            f"got {config.candidate_action_learning_rate}"
+        )
     if config.critic_learning_rate <= 0.0:
         raise ValueError(f"critic_learning_rate must be positive, got {config.critic_learning_rate}")
     if config.critic_warmup_updates < 0:
