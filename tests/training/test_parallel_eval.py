@@ -24,6 +24,8 @@ class ParallelEvalTests(unittest.TestCase):
                 agent_player_id=1,
                 round_count=1,
                 setting="smoke",
+                policy_sample_key="eval-a",
+                policy_sample_seed=123,
             ),
             EvalTask(
                 task_id="eval-b",
@@ -33,6 +35,8 @@ class ParallelEvalTests(unittest.TestCase):
                 agent_player_id=2,
                 round_count=1,
                 setting="smoke",
+                policy_sample_key="eval-b",
+                policy_sample_seed=123,
             ),
         )
 

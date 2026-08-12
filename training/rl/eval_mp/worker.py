@@ -114,6 +114,8 @@ def run_worker_episode(
                     request_id=request_id,
                     round_index=int(observation.round),
                     feature_slot=worker_id,
+                    policy_sample_key=task.policy_sample_key,
+                    policy_sample_seed=task.policy_sample_seed,
                 ),
             }
         )

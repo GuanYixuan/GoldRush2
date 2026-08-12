@@ -124,6 +124,45 @@ class PolicyNetworkTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(action.logprob).all().item())
         self.assertTrue(torch.isfinite(action.normalized_entropy).all().item())
 
+    def test_sample_action_accepts_reproducible_generator(self) -> None:
+        model = _small_model()
+        spatial, scalars = _feature_tensors(batch_size=1)
+        critic_spatial, critic_scalars = _critic_feature_tensors(batch_size=1)
+
+        first = model.act(
+            spatial,
+            scalars,
+            critic_spatial,
+            critic_scalars,
+            generator=torch.Generator().manual_seed(123),
+        )
+        second = model.act(
+            spatial,
+            scalars,
+            critic_spatial,
+            critic_scalars,
+            generator=torch.Generator().manual_seed(123),
+        )
+
+        self.assertTrue(torch.equal(first.actions, second.actions))
+        self.assertTrue(torch.equal(first.k, second.k))
+        self.assertTrue(torch.equal(first.order, second.order))
+        self.assertTrue(torch.equal(first.vp, second.vp))
+
+    def test_sample_action_accepts_external_uniforms(self) -> None:
+        model = _small_model()
+        spatial, scalars = _feature_tensors(batch_size=2)
+        critic_spatial, critic_scalars = _critic_feature_tensors(batch_size=2)
+        uniforms = torch.rand(2, 8, generator=torch.Generator().manual_seed(456))
+
+        first = model.act(spatial, scalars, critic_spatial, critic_scalars, sample_uniforms=uniforms)
+        second = model.act(spatial, scalars, critic_spatial, critic_scalars, sample_uniforms=uniforms)
+
+        self.assertTrue(torch.equal(first.actions, second.actions))
+        self.assertTrue(torch.equal(first.k, second.k))
+        self.assertTrue(torch.equal(first.order, second.order))
+        self.assertTrue(torch.equal(first.vp, second.vp))
+
     def test_deterministic_action_is_repeatable(self) -> None:
         model = _small_model()
         spatial, scalars = _feature_tensors(batch_size=2)

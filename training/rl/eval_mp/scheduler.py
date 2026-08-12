@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import queue
 import time
 from collections.abc import Sequence
@@ -202,17 +203,24 @@ def run_eval_inference_batch(
     stack_ns = time.perf_counter_ns() - stack_start
     model_sample_start = time.perf_counter_ns()
     with torch.no_grad():
-        action = model.act(spatial, scalars, critic_spatial, critic_scalars, deterministic=deterministic)
+        action = model.act(
+            spatial,
+            scalars,
+            critic_spatial,
+            critic_scalars,
+            deterministic=deterministic,
+            sample_uniforms=None if deterministic else _request_sample_uniforms(requests, device=device),
+        )
         if not policy_action_is_finite(action):
             raise RuntimeError("parallel eval model produced NaN or Inf")
+        actions_cpu = action.actions.detach().cpu().tolist()
+        k_cpu = action.k.detach().cpu().tolist()
+        order_cpu = action.order.detach().cpu().tolist()
+        vp_cpu = action.vp.detach().cpu().tolist()
     sync(device)
     model_sample_ns = time.perf_counter_ns() - model_sample_start
     elapsed_ns = time.perf_counter_ns() - start
     action_send_start = time.perf_counter_ns()
-    actions_cpu = action.actions.detach().cpu().tolist()
-    k_cpu = action.k.detach().cpu().tolist()
-    order_cpu = action.order.detach().cpu().tolist()
-    vp_cpu = action.vp.detach().cpu().tolist()
     for batch_index, request in enumerate(requests):
         command_queues[request.worker_id].put(
             {
@@ -236,3 +244,29 @@ def run_eval_inference_batch(
         "action_send_ns": action_send_ns,
         "total_with_action_send_ns": time.perf_counter_ns() - start,
     }
+
+
+def _request_sample_uniforms(requests: list[EvalFeatureRequest], *, device: torch.device) -> torch.Tensor | None:
+    if not all(request.policy_sample_key is not None for request in requests):
+        return None
+    values = [_request_uniform_row(request) for request in requests]
+    return torch.tensor(values, dtype=torch.float32, device=device)
+
+
+def _request_uniform_row(request: EvalFeatureRequest) -> list[float]:
+    if request.policy_sample_key is None:
+        return []
+    seed = _request_seed(request)
+    digest = hashlib.blake2b(str(seed).encode("utf-8"), digest_size=64).digest()
+    return [
+        (int.from_bytes(digest[index * 8 : (index + 1) * 8], byteorder="little", signed=False) + 0.5) / 2**64
+        for index in range(8)
+    ]
+
+
+def _request_seed(request: EvalFeatureRequest) -> int:
+    base_seed = 0 if request.policy_sample_seed is None else int(request.policy_sample_seed)
+    payload = f"{request.policy_sample_key}|{request.round_index}".encode("utf-8")
+    digest = hashlib.blake2b(payload, digest_size=8).digest()
+    offset = int.from_bytes(digest, byteorder="little", signed=False)
+    return (base_seed + offset) % (2**63 - 1)

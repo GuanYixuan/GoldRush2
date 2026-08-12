@@ -25,6 +25,8 @@ class EvalTask:
     round_count: int
     setting: str = "eval"
     tags: tuple[str, ...] = field(default_factory=tuple)
+    policy_sample_key: str | None = None
+    policy_sample_seed: int | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class EvalFeatureRequest:
     request_id: str
     round_index: int
     feature_slot: int
+    policy_sample_key: str | None = None
+    policy_sample_seed: int | None = None
 
 
 @dataclass(frozen=True)

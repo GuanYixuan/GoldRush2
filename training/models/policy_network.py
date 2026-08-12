@@ -402,6 +402,8 @@ class GoldRushPolicyNetwork(nn.Module):
         critic_scalars: Tensor,
         *,
         deterministic: bool = False,
+        generator: torch.Generator | None = None,
+        sample_uniforms: Tensor | None = None,
     ) -> PolicyAction:
         self._validate_actor_inputs(spatial_planes, scalars)
         self._validate_critic_inputs(critic_planes, critic_scalars)
@@ -412,22 +414,71 @@ class GoldRushPolicyNetwork(nn.Module):
         critic_scalars = critic_scalars.float()
         encoded = self._encode_actor(spatial_planes, scalars)
         value = self._critic_value(critic_planes, critic_scalars)
-        return self._act_from_encoded(encoded, value=value, deterministic=deterministic)
+        return self._act_from_encoded(
+            encoded,
+            value=value,
+            deterministic=deterministic,
+            generator=generator,
+            sample_uniforms=sample_uniforms,
+        )
 
-    def act_actor_only(self, spatial_planes: Tensor, scalars: Tensor, *, deterministic: bool = False) -> PolicyAction:
+    def act_actor_only(
+        self,
+        spatial_planes: Tensor,
+        scalars: Tensor,
+        *,
+        deterministic: bool = False,
+        generator: torch.Generator | None = None,
+        sample_uniforms: Tensor | None = None,
+    ) -> PolicyAction:
         self._validate_actor_inputs(spatial_planes, scalars)
         spatial_planes = spatial_planes.float()
         scalars = scalars.float()
         encoded = self._encode_actor(spatial_planes, scalars)
         value = torch.zeros(spatial_planes.shape[0], dtype=spatial_planes.dtype, device=spatial_planes.device)
-        return self._act_from_encoded(encoded, value=value, deterministic=deterministic)
+        return self._act_from_encoded(
+            encoded,
+            value=value,
+            deterministic=deterministic,
+            generator=generator,
+            sample_uniforms=sample_uniforms,
+        )
 
-    def _act_from_encoded(self, encoded: _EncodedState, *, value: Tensor, deterministic: bool) -> PolicyAction:
+    def _act_from_encoded(
+        self,
+        encoded: _EncodedState,
+        *,
+        value: Tensor,
+        deterministic: bool,
+        generator: torch.Generator | None,
+        sample_uniforms: Tensor | None,
+    ) -> PolicyAction:
+        if sample_uniforms is not None and tuple(sample_uniforms.shape) != (encoded.actor_context.shape[0], MOVE_BUDGET + 2):
+            raise ValueError(
+                f"sample_uniforms must have shape Bx{MOVE_BUDGET + 2}, got {tuple(sample_uniforms.shape)}"
+            )
         ko_logits = self.ko_head(encoded.actor_context)
         vp_logits = self.vp_head(encoded.actor_context)
-        ko, ko_logprob = _select_logits(ko_logits, deterministic=deterministic)
-        vp, vp_logprob = _select_logits(vp_logits, deterministic=deterministic)
-        decoded = self._decode(encoded, ko, deterministic=deterministic, forced_actions=None)
+        ko, ko_logprob = _select_logits(
+            ko_logits,
+            deterministic=deterministic,
+            generator=generator,
+            sample_uniform=None if sample_uniforms is None else sample_uniforms[:, 0],
+        )
+        vp, vp_logprob = _select_logits(
+            vp_logits,
+            deterministic=deterministic,
+            generator=generator,
+            sample_uniform=None if sample_uniforms is None else sample_uniforms[:, 1],
+        )
+        decoded = self._decode(
+            encoded,
+            ko,
+            deterministic=deterministic,
+            forced_actions=None,
+            generator=generator,
+            sample_uniforms=None if sample_uniforms is None else sample_uniforms[:, 2:],
+        )
 
         ko_entropy = _normalized_entropy(ko_logits, math.log(KO_COUNT))
         vp_entropy = _normalized_entropy(vp_logits, math.log(3.0))
@@ -562,6 +613,8 @@ class GoldRushPolicyNetwork(nn.Module):
         *,
         deterministic: bool,
         forced_actions: Tensor | None,
+        generator: torch.Generator | None = None,
+        sample_uniforms: Tensor | None = None,
     ) -> _DecodedActions:
         batch_size = encoded.actor_context.shape[0]
         roles = self.execution_role_table[ko]
@@ -577,6 +630,8 @@ class GoldRushPolicyNetwork(nn.Module):
         logprobs: list[Tensor] = []
         entropies: list[Tensor] = []
         all_forced_actions_valid = torch.ones(batch_size, dtype=torch.bool, device=encoded.actor_context.device)
+        if sample_uniforms is not None and tuple(sample_uniforms.shape) != (batch_size, MOVE_BUDGET):
+            raise ValueError(f"sample_uniforms must have shape Bx{MOVE_BUDGET}, got {tuple(sample_uniforms.shape)}")
 
         for step in range(MOVE_BUDGET):
             role = roles[:, step]
@@ -606,7 +661,12 @@ class GoldRushPolicyNetwork(nn.Module):
             logits = self._action_logits(hidden, encoded.spatial_features, candidate_positions)
             masked_logits = logits.masked_fill(~valid_actions, torch.finfo(logits.dtype).min)
             if forced_actions is None:
-                selected, selected_logprob = _select_logits(masked_logits, deterministic=deterministic)
+                selected, selected_logprob = _select_logits(
+                    masked_logits,
+                    deterministic=deterministic,
+                    generator=generator,
+                    sample_uniform=None if sample_uniforms is None else sample_uniforms[:, step],
+                )
             else:
                 selected = forced_actions.gather(1, official_slots[:, step].unsqueeze(1)).squeeze(1)
                 selected_logprob = _logprob(masked_logits, selected)
@@ -837,13 +897,29 @@ def _execution_tables() -> tuple[Tensor, Tensor]:
     return torch.tensor(execution_roles, dtype=torch.long), torch.tensor(official_slots, dtype=torch.long)
 
 
-def _select_logits(logits: Tensor, *, deterministic: bool) -> tuple[Tensor, Tensor]:
+def _select_logits(
+    logits: Tensor,
+    *,
+    deterministic: bool,
+    generator: torch.Generator | None = None,
+    sample_uniform: Tensor | None = None,
+) -> tuple[Tensor, Tensor]:
     if deterministic:
         selected = logits.argmax(dim=-1)
+    elif sample_uniform is not None:
+        if sample_uniform.shape != logits.shape[:-1]:
+            raise ValueError(f"sample_uniform must have shape {tuple(logits.shape[:-1])}, got {tuple(sample_uniform.shape)}")
+        probabilities = torch.softmax(logits, dim=-1)
+        cdf = probabilities.cumsum(dim=-1)
+        sample = sample_uniform.to(device=logits.device, dtype=logits.dtype).clamp(0.0, 1.0 - torch.finfo(logits.dtype).eps)
+        selected = torch.searchsorted(cdf.contiguous(), sample.unsqueeze(-1), right=False).squeeze(-1)
+        selected = selected.clamp(max=logits.shape[-1] - 1)
     else:
         probabilities = torch.softmax(logits, dim=-1)
         selected = torch.multinomial(
-            probabilities.reshape(-1, probabilities.shape[-1]), num_samples=1
+            probabilities.reshape(-1, probabilities.shape[-1]),
+            num_samples=1,
+            generator=generator,
         ).reshape(logits.shape[:-1])
     return selected, _logprob(logits, selected)
 
