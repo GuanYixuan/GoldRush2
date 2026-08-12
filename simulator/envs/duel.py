@@ -12,7 +12,7 @@ from ..config import EpisodeConfig
 from ..errors import SimulatorRuleError
 from ..mechanisms.bombs import BernoulliBombRefresher, BombRefreshEvent
 from ..mechanisms.gold import CenterGoldGenerator, OuterGoldGenerator, OuterGoldState
-from ..mechanisms.maps import MapPool, MapTemplate, SpawnConfig, build_initial_state, built_in_public_map_pool
+from ..mechanisms.maps import MapPool, MapTemplate, SpawnConfig, build_initial_state, built_in_training_map_pool
 from ..mechanisms.npc import M4aNpcPolicy
 from ..observation.sdk import GameInput, make_game_input
 from ..replay import SimulatorReplayRecorder
@@ -95,7 +95,7 @@ def run_duel(
     mechanisms = DuelMechanisms() if mechanisms is None else mechanisms
     rng_streams = make_simulator_rng_streams(config.episode.seed)
     rng = rng_streams.environment
-    template = _select_map(map_pool or built_in_public_map_pool(), config.episode.map_id, rng)
+    template = _select_map(map_pool or built_in_training_map_pool(), config.episode.map_id, rng)
     state = build_initial_state(template, spawn)
     snapshot_accumulator = SnapshotAccumulator(config.episode.rules)
     visible_snapshot: Snapshot | None = None

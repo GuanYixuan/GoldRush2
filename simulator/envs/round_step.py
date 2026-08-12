@@ -10,7 +10,7 @@ from ..config import EpisodeConfig
 from ..errors import SimulatorRuleError
 from ..mechanisms.bombs import BernoulliBombRefresher, BombRefreshEvent
 from ..mechanisms.gold import CenterGoldGenerator, OuterGoldGenerator, OuterGoldState
-from ..mechanisms.maps import MapPool, MapTemplate, SpawnConfig, build_initial_state, built_in_public_map_pool
+from ..mechanisms.maps import MapPool, MapTemplate, SpawnConfig, build_initial_state, built_in_training_map_pool
 from ..mechanisms.npc import M4aNpcPolicy, NpcEpisodeProfile
 from ..observation.sdk import GameInput, make_game_inputs
 from ..replay import SimulatorReplayRecorder
@@ -78,7 +78,7 @@ class RoundStepEnv:
     ) -> None:
         self.config = RoundStepConfig() if config is None else config
         self.mechanisms = RoundStepMechanisms() if mechanisms is None else mechanisms
-        self.map_pool = map_pool or built_in_public_map_pool()
+        self.map_pool = map_pool or built_in_training_map_pool()
         self.spawn = spawn
         self.record_replay = record_replay
         self.player_names = player_names

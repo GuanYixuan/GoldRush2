@@ -3,9 +3,17 @@ from __future__ import annotations
 import random
 import unittest
 
-from simulator.constants import MAX_NPCS, STATIC_OBSTACLE, STATIC_SPECIAL_NON_BLOCKING
+from simulator.constants import GRID_SIZE, MAX_NPCS, STATIC_OBSTACLE, STATIC_SPECIAL_NON_BLOCKING
 from simulator.errors import SimulatorRuleError
-from simulator.mechanisms.maps import MapPool, MapTemplate, SpawnConfig, build_initial_state, built_in_public_map_pool
+from simulator.mechanisms.maps import (
+    MapPool,
+    MapTemplate,
+    SpawnConfig,
+    build_initial_state,
+    built_in_public_map_pool,
+    built_in_training_map_pool,
+    validate_competition_training_map,
+)
 from simulator.observation.sdk import make_game_input
 from simulator.types import Position
 
@@ -17,6 +25,38 @@ class MapsTests(unittest.TestCase):
         self.assertEqual([template.map_id for template in pool.templates], [1, 2, 3])
         self.assertEqual([len(template.obstacles) for template in pool.templates], [40, 24, 78])
         self.assertEqual([len(template.special_cells) for template in pool.templates], [20, 20, 20])
+
+    def test_built_in_training_pool_initially_matches_public_pool(self) -> None:
+        public_pool = built_in_public_map_pool()
+        training_pool = built_in_training_map_pool()
+
+        self.assertEqual([template.map_id for template in training_pool.templates], [1, 2, 3])
+        self.assertEqual(
+            [template.static_grid for template in training_pool.templates],
+            [template.static_grid for template in public_pool.templates],
+        )
+
+    def test_training_maps_satisfy_competition_constraints(self) -> None:
+        for template in built_in_training_map_pool().templates:
+            validate_competition_training_map(template)
+
+    def test_training_map_validation_rejects_non_axis_symmetric_obstacles(self) -> None:
+        grid = _valid_training_grid()
+        grid[1][2] = STATIC_OBSTACLE
+
+        template = MapTemplate.from_static_grid(99, "bad_symmetry", grid)
+
+        with self.assertRaisesRegex(SimulatorRuleError, "symmetry"):
+            validate_competition_training_map(template)
+
+    def test_training_map_validation_rejects_bad_outer_special_counts(self) -> None:
+        grid = _valid_training_grid()
+        grid[0][4] = 0
+
+        template = MapTemplate.from_static_grid(99, "bad_static2_count", grid)
+
+        with self.assertRaisesRegex(SimulatorRuleError, "exactly 5 special"):
+            validate_competition_training_map(template)
 
     def test_static_two_cells_are_non_blocking_special_cells(self) -> None:
         template = built_in_public_map_pool().get(2)
@@ -76,6 +116,34 @@ class MapsTests(unittest.TestCase):
     def test_empty_pool_fails_fast(self) -> None:
         with self.assertRaises(SimulatorRuleError):
             MapPool(())
+
+
+def _valid_training_grid() -> list[list[int]]:
+    grid = [[0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
+    for row, col in (
+        (0, 4),
+        (0, 5),
+        (0, 6),
+        (0, 7),
+        (0, 8),
+        (4, 0),
+        (5, 0),
+        (6, 0),
+        (7, 0),
+        (8, 0),
+        (16, 4),
+        (16, 5),
+        (16, 6),
+        (16, 7),
+        (16, 8),
+        (4, 16),
+        (5, 16),
+        (6, 16),
+        (7, 16),
+        (8, 16),
+    ):
+        grid[row][col] = STATIC_SPECIAL_NON_BLOCKING
+    return grid
 
 
 if __name__ == "__main__":

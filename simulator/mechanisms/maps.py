@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import random
+from collections import deque
 from dataclasses import dataclass
 from typing import Sequence
 
 from ..constants import GRID_SIZE, MAX_NPCS, STATIC_EMPTY, STATIC_OBSTACLE, STATIC_SPECIAL_NON_BLOCKING
 from ..errors import SimulatorRuleError
+from ..rules.snapshot import region_id
 from ..state import GameState, NpcState, PlayerState, UnitState
 from ..types import Position
 
@@ -106,10 +108,78 @@ def built_in_public_map_pool() -> MapPool:
     )
 
 
+def built_in_training_map_pool() -> MapPool:
+    pool = built_in_public_map_pool()
+    for template in pool.templates:
+        validate_competition_training_map(template)
+    return pool
+
+
 def _validate_spawn_against_map(template: MapTemplate, spawn: SpawnConfig) -> None:
     for pos in spawn.p1_units + spawn.p2_units + (spawn.npc_position,):
         if pos in template.obstacles:
             raise SimulatorRuleError(f"spawn position overlaps obstacle on map {template.map_id}: {pos}")
+
+
+def validate_competition_training_map(template: MapTemplate, spawn: SpawnConfig | None = None) -> None:
+    spawn = SpawnConfig() if spawn is None else spawn
+    _validate_spawn_against_map(template, spawn)
+    _validate_obstacle_symmetry(template)
+    _validate_outer_special_cell_counts(template)
+    _validate_spawn_reaches_center(template, spawn)
+
+
+def _validate_obstacle_symmetry(template: MapTemplate) -> None:
+    obstacles = template.obstacles
+    up_down = all(Position(GRID_SIZE - 1 - pos.row, pos.col) in obstacles for pos in obstacles)
+    left_right = all(Position(pos.row, GRID_SIZE - 1 - pos.col) in obstacles for pos in obstacles)
+    if not (up_down or left_right):
+        raise SimulatorRuleError(
+            f"map {template.map_id} obstacles must satisfy at least up-down or left-right symmetry"
+        )
+
+
+def _validate_outer_special_cell_counts(template: MapTemplate) -> None:
+    counts = {region: 0 for region in (2, 3, 4, 5)}
+    for pos in template.special_cells:
+        region = region_id(pos)
+        if region in counts:
+            counts[region] += 1
+    bad = {region: count for region, count in counts.items() if count != 5}
+    if bad:
+        raise SimulatorRuleError(f"map {template.map_id} must have exactly 5 special cells in each outer region: {bad}")
+
+
+def _validate_spawn_reaches_center(template: MapTemplate, spawn: SpawnConfig) -> None:
+    center_targets = {
+        Position(row, col)
+        for row in range(GRID_SIZE)
+        for col in range(GRID_SIZE)
+        if region_id(Position(row, col)) == 1 and Position(row, col) not in template.obstacles
+    }
+    if not center_targets:
+        raise SimulatorRuleError(f"map {template.map_id} has no non-obstacle center cells")
+    for start in spawn.p1_units + spawn.p2_units:
+        if not _can_reach_any(template, start, center_targets):
+            raise SimulatorRuleError(f"spawn {start} cannot reach center on map {template.map_id}")
+
+
+def _can_reach_any(template: MapTemplate, start: Position, targets: set[Position]) -> bool:
+    if start in template.obstacles:
+        return False
+    frontier: deque[Position] = deque([start])
+    visited = {start}
+    while frontier:
+        pos = frontier.popleft()
+        if pos in targets:
+            return True
+        for delta_row, delta_col in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            next_pos = Position(pos.row + delta_row, pos.col + delta_col)
+            if not next_pos.in_bounds() or next_pos in visited or next_pos in template.obstacles:
+                continue
+            visited.add(next_pos)
+            frontier.append(next_pos)
+    return False
 
 
 def _template_from_cells(
@@ -366,4 +436,12 @@ _MAP3_SPECIAL = (
 )
 
 
-__all__ = ["MapPool", "MapTemplate", "SpawnConfig", "build_initial_state", "built_in_public_map_pool"]
+__all__ = [
+    "MapPool",
+    "MapTemplate",
+    "SpawnConfig",
+    "build_initial_state",
+    "built_in_public_map_pool",
+    "built_in_training_map_pool",
+    "validate_competition_training_map",
+]

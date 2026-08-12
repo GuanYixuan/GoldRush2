@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from simulator.constants import GRID_BOMB, GRID_OBSTACLE, GRID_SIZE, MOVE_BUDGET, STATIC_OBSTACLE
 from simulator.mechanisms.gold import OUTER_REGIONS, outer_static2_candidate_cells
-from simulator.mechanisms.maps import MapTemplate, built_in_public_map_pool
+from simulator.mechanisms.maps import MapTemplate, built_in_training_map_pool
 from simulator.observation.sdk import GameInput
 from simulator.types import GameOutput, Position
 
@@ -142,7 +142,7 @@ def _template_for_map_id(map_id: int | None) -> MapTemplate | None:
     if map_id is None:
         return None
     try:
-        return built_in_public_map_pool().get(int(map_id))
+        return built_in_training_map_pool().get(int(map_id))
     except KeyError:
         return None
 
