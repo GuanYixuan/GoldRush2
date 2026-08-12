@@ -342,7 +342,7 @@ def _collect_one_ppo_episode(
 
     while observation is not None:
         features = extractor.observe(observation)
-        if features["feature_schema"] != "goldrush2_feature_v1":
+        if features["feature_schema"] != "goldrush2_feature_v2":
             raise SimulatorRuleError(f"unexpected feature schema: {features['feature_schema']!r}")
         spatial_planes = torch.as_tensor(features["planes"], dtype=torch.float32, device=device).unsqueeze(0)
         scalars = torch.as_tensor(features["scalars"], dtype=torch.float32, device=device).unsqueeze(0)

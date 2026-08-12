@@ -6,7 +6,7 @@
 PPO checkpoint -> actor-only stochastic FP32 ONNX -> C++ .so -> 本地 smoke -> 平台 self-play / 供挑战版本
 ```
 
-当前提交路线只导出 actor，critic 完全不进入部署资产。actor 使用 `policy_runtime/` 中的 `goldrush2_feature_v1` C++ feature extractor；ONNX 额外接收 C++ 侧生成的随机张量，通过 Gumbel argmax 实现 stochastic 采样。ONNX 图中不应出现 `Random*` 或 `Multinomial` 算子。
+当前提交路线只导出 actor，critic 完全不进入部署资产。actor 使用 `policy_runtime/` 中的 `goldrush2_feature_v2` C++ feature extractor；ONNX 额外接收 C++ 侧生成的随机张量，通过 Gumbel argmax 实现 stochastic 采样。ONNX 图中不应出现 `Random*` 或 `Multinomial` 算子。
 
 ## 分步工具
 
@@ -22,7 +22,8 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 导出工具会执行：
 
 - 检查 checkpoint schema 为 `ppo_train_v1`。
-- 检查 actor feature shape 与当前 `goldrush2_feature_v1` 一致。
+- 检查 actor feature shape 与当前 `goldrush2_feature_v2` 一致。
+- 检查 action head schema 与当前 `candidate_cell_residual_v1` 一致。
 - 校验 PyTorch 输出与 ONNXRuntime 输出完全一致。
 - 检查 ONNX 图中没有平台不稳定随机算子。
 - 写出 `actor.metadata.json`，包含 checkpoint update、模型配置、输入输出 shape 和算子类型。

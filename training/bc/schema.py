@@ -10,7 +10,7 @@ from typing import Any, Literal
 BC_DATASET_SCHEMA = "goldrush2_bc_dataset_v1"
 BC_SHARD_SCHEMA = "goldrush2_bc_shard_v1"
 BC_CHECKPOINT_SCHEMA = "bc_train_v1"
-FEATURE_SCHEMA = "goldrush2_feature_v1"
+FEATURE_SCHEMA = "goldrush2_feature_v2"
 
 BcDatasetSplit = Literal["train", "val", "holdout"]
 

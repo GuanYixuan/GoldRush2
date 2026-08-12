@@ -26,7 +26,7 @@ def test_collect_bc_dataset_writes_expected_transitions(tmp_path: Path) -> None:
 
     dataset = load_bc_dataset(tmp_path / "dataset", "train")
     assert len(dataset) == 8
-    assert tuple(dataset.planes.shape) == (8, 38, 17, 17)
+    assert tuple(dataset.planes.shape) == (8, 43, 17, 17)
     assert tuple(dataset.scalars.shape) == (8, 10)
     assert tuple(dataset.actions.shape) == (8, 6)
     assert set(dataset.k.tolist()) <= set(range(7))

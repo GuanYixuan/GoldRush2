@@ -12,7 +12,7 @@ class PpoBufferTests(unittest.TestCase):
         batch = PpoBatch.from_transitions([_transition(reward=1.0, done=True, episode_id="ep-0")])
 
         self.assertEqual(batch.transition_count, 1)
-        self.assertEqual(tuple(batch.spatial_planes.shape), (1, 38, 17, 17))
+        self.assertEqual(tuple(batch.spatial_planes.shape), (1, 43, 17, 17))
         self.assertEqual(tuple(batch.scalars.shape), (1, 10))
         self.assertEqual(tuple(batch.critic_planes.shape), (1, 26, 17, 17))
         self.assertEqual(tuple(batch.critic_scalars.shape), (1, 17))
@@ -22,7 +22,7 @@ class PpoBufferTests(unittest.TestCase):
 
     def test_batch_from_arrays_builds_tensors_and_metadata(self) -> None:
         batch = PpoBatch.from_arrays(
-            spatial_planes=torch.zeros(2, 38, 17, 17),
+            spatial_planes=torch.zeros(2, 43, 17, 17),
             scalars=torch.zeros(2, 10),
             critic_planes=torch.zeros(2, 26, 17, 17),
             critic_scalars=torch.zeros(2, 17),
@@ -50,7 +50,7 @@ class PpoBufferTests(unittest.TestCase):
 
     def test_batch_from_arrays_supports_gae_boundaries(self) -> None:
         batch = PpoBatch.from_arrays(
-            spatial_planes=torch.zeros(3, 38, 17, 17),
+            spatial_planes=torch.zeros(3, 43, 17, 17),
             scalars=torch.zeros(3, 10),
             critic_planes=torch.zeros(3, 26, 17, 17),
             critic_scalars=torch.zeros(3, 17),
@@ -122,7 +122,7 @@ class PpoBufferTests(unittest.TestCase):
         minibatches = list(batch.iter_minibatches(minibatch_size=2, shuffle=False))
 
         self.assertEqual([minibatch.transition_count for minibatch in minibatches], [2, 2, 1])
-        self.assertEqual(tuple(minibatches[0].spatial_planes.shape), (2, 38, 17, 17))
+        self.assertEqual(tuple(minibatches[0].spatial_planes.shape), (2, 43, 17, 17))
         self.assertEqual(tuple(minibatches[0].critic_planes.shape), (2, 26, 17, 17))
 
 
@@ -134,7 +134,7 @@ def _transition(
     episode_id: str = "episode",
 ) -> PpoTransition:
     return PpoTransition(
-        spatial_planes=torch.zeros(38, 17, 17),
+        spatial_planes=torch.zeros(43, 17, 17),
         scalars=torch.zeros(10),
         critic_planes=torch.zeros(26, 17, 17),
         critic_scalars=torch.zeros(17),

@@ -26,10 +26,10 @@ class RuntimePolicyTests(unittest.TestCase):
 
         self.assertEqual(action0, _stay_output())
         self.assertEqual(action1, _stay_output())
-        self.assertEqual(seen[0]["feature_schema"], "goldrush2_feature_v1")
-        self.assertEqual(seen[0]["planes"].shape, (38, 17, 17))
+        self.assertEqual(seen[0]["feature_schema"], "goldrush2_feature_v2")
+        self.assertEqual(seen[0]["planes"].shape, (43, 17, 17))
         self.assertEqual(seen[0]["scalars"].shape, (10,))
-        self.assertEqual(seen[1]["feature_schema"], "goldrush2_feature_v1")
+        self.assertEqual(seen[1]["feature_schema"], "goldrush2_feature_v2")
 
     def test_sampler_resets_runtime_policy_for_each_swapped_episode(self) -> None:
         call_counts = []

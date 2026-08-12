@@ -1,15 +1,16 @@
 # Policy Network 设计
 
-本文冻结当前训练与部署共享的网络结构和动作概率语义。Actor feature 输入见 `docs/features/actor_feature_v1.md`，PPO 栈见 `docs/rl_architecture.md`，游戏动作规则以 `gamerules/gamerules.md` 为准。
+本文冻结当前训练与部署共享的网络结构和动作概率语义。Actor feature 输入见 `docs/features/actor_feature_v2.md`，PPO 栈见 `docs/rl_architecture.md`，游戏动作规则以 `gamerules/gamerules.md` 为准。
 
 ## 定位
 
-网络使用 actor/critic 双输入。actor 输入保持可提交路径 feature v1 不变：
+网络使用 actor/critic 双输入。actor 输入使用可提交路径 feature v2：
 
 ```text
-actor_spatial_planes: B x 38 x 17 x 17
+actor_spatial_planes: B x 43 x 17 x 17
 actor_scalars: B x 10
-actor_feature_schema: goldrush2_feature_v1
+actor_feature_schema: goldrush2_feature_v2
+action_head_schema: candidate_cell_residual_v1
 ```
 
 critic 输入使用训练期 privileged critic feature：
@@ -38,7 +39,7 @@ actor 和 critic 使用两套参数独立的 encoder。第一版两套 encoder �
 
 ```text
 Actor stem:
-    Conv3x3(38 -> 96)
+    Conv3x3(43 -> 96)
     SiLU
     Conv3x3(96 -> 96)
     SiLU
@@ -143,6 +144,26 @@ ko embedding
 前一步 action embedding（首步 BOS）
 step embedding
 ```
+
+GRU hidden 先经过旧 action head 得到 base logits：
+
+```text
+base_logits = decoder_action_head(hidden)
+```
+
+随后对五个候选落点做 candidate-cell gather，并用零初始化 residual head 逐动作评分：
+
+```text
+candidate_local[action] = H_actor[candidate_position[action]]
+candidate_delta[action] = candidate_action_head(
+    hidden,
+    candidate_local[action],
+    action_candidate_embedding[action],
+)
+logits = base_logits + candidate_delta
+```
+
+`candidate_action_head` 最后一层零初始化。旧 `autoregressive_head_v1` checkpoint 经过显式 inflation 后，初始 `candidate_delta == 0`，策略行为与旧 head 完全一致。该 residual 路径只提供对 `to_static2_distance`、`static_2_mask`、`bomb_belief_mask`、局部金币/障碍等 spatial feature 的直接动作消费路径，不改变官方动作空间或 `k/order` 语义。
 
 动作生成按真实执行顺序进行，最终通过 `official_slot_table[ko]` scatter 回官方槽位。特别地：
 
@@ -257,7 +278,7 @@ extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent
 主进程/GPU 只负责批量推理。shared memory 与 PPO batch 保存两套 feature，shape 固定为：
 
 ```text
-actor:  38 x 17 x 17, scalars 10
+actor:  43 x 17 x 17, scalars 10
 critic: 26 x 17 x 17, scalars 17
 ```
 
@@ -275,13 +296,14 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 ## 初始化与兼容性
 
 - `ko/vp/decoder_action` 输出层使用 `std=0.01` 小初始化。
+- `candidate_action_head` 最后一层权重和 bias 为 0，使 residual 初始严格为 0。
 - `vp` bias 保持初始先验 `(0.90,0.07,0.03)`。
 - GRU input weight 使用 Xavier，hidden weight 使用 orthogonal，bias 为 0。
 - embedding 使用小正态初始化。
 - value 输出层使用小初始化，使初始 value 接近 0。
 - BC 训练只优化 actor 参数。PPO 从 BC checkpoint 初始化时，只加载 actor 路径；critic encoder 与 critic head 按 privileged critic schema 随机初始化或从专门 critic checkpoint 加载，不能默认拷贝 actor encoder，因为 actor/critic 输入 channel 与语义不同。
 
-旧 factorized checkpoint 和旧 shared-encoder PPO checkpoint 不兼容当前模型。主线不维护隐式部分加载；需要迁移 actor 或 critic 时必须使用显式转换实验并记录缺失字段。
+旧 factorized checkpoint、旧 shared-encoder PPO checkpoint 和缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint 不兼容当前模型。主线不维护隐式部分加载；旧 v2 autoregressive head checkpoint 需要先通过 `training.scripts.inflate_candidate_cell_residual_head_checkpoint` 显式补齐 residual head，且不继承旧 optimizer state。
 
 ## 部署与验证
 
@@ -293,6 +315,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - `k=0/6`、两种 order、边界、障碍和己方碰撞。
 - 非法动作不更新位置的规则参考对照。
 - rollout 与 teacher forcing logprob 等价。
+- candidate-cell residual head 初始为零扰动；旧 head checkpoint inflation 后 deterministic action 完全等价。
 - PPO 双输入中 actor feature 只影响 policy/logprob，critic feature 只影响 value。
 - critic 四角色 gather 的 channel index、shape 和 P1/P2 视角。
 - masked entropy、前向和反向 finite。
