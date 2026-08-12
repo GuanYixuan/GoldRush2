@@ -26,15 +26,21 @@ class MapsTests(unittest.TestCase):
         self.assertEqual([len(template.obstacles) for template in pool.templates], [40, 24, 78])
         self.assertEqual([len(template.special_cells) for template in pool.templates], [20, 20, 20])
 
-    def test_built_in_training_pool_initially_matches_public_pool(self) -> None:
+    def test_built_in_training_pool_extends_public_pool(self) -> None:
         public_pool = built_in_public_map_pool()
         training_pool = built_in_training_map_pool()
 
-        self.assertEqual([template.map_id for template in training_pool.templates], [1, 2, 3])
+        self.assertEqual([template.map_id for template in training_pool.templates], [1, 2, 3, 101, 111, 121])
         self.assertEqual(
-            [template.static_grid for template in training_pool.templates],
+            [template.static_grid for template in training_pool.templates[:3]],
             [template.static_grid for template in public_pool.templates],
         )
+        self.assertEqual(len(training_pool.get(101).obstacles), 38)
+        self.assertEqual(len(training_pool.get(101).special_cells), 20)
+        self.assertEqual(len(training_pool.get(111).obstacles), 42)
+        self.assertEqual(len(training_pool.get(111).special_cells), 20)
+        self.assertEqual(len(training_pool.get(121).obstacles), 52)
+        self.assertEqual(len(training_pool.get(121).special_cells), 20)
 
     def test_training_maps_satisfy_competition_constraints(self) -> None:
         for template in built_in_training_map_pool().templates:
