@@ -21,10 +21,9 @@ constexpr int BOMB_REFRESH_PERIOD = 20;
 constexpr int STATIC2_GOLD_THRESHOLD = 16;
 constexpr float CENTER_GOLD_B = 0.06735F;
 constexpr float PI = 3.14159265358979323846F;
-constexpr unsigned int PUBLIC_MAP_1 = 1U << 0;
-constexpr unsigned int PUBLIC_MAP_2 = 1U << 1;
-constexpr unsigned int PUBLIC_MAP_3 = 1U << 2;
-constexpr unsigned int ALL_PUBLIC_MAPS = PUBLIC_MAP_1 | PUBLIC_MAP_2 | PUBLIC_MAP_3;
+constexpr unsigned int SYMMETRY_UP_DOWN = 1U << 0;
+constexpr unsigned int SYMMETRY_LEFT_RIGHT = 1U << 1;
+constexpr unsigned int ALL_SYMMETRY_AXES = SYMMETRY_UP_DOWN | SYMMETRY_LEFT_RIGHT;
 
 enum TemporalKey {
     VISIBLE_MASK = 0,
@@ -57,76 +56,16 @@ float scaled_clip(float value, float denominator, float low, float high) {
     return clip(value / denominator, low, high);
 }
 
-void set_cells(std::array<int, CELL_COUNT>& mask, const std::vector<Position>& cells) {
-    for (const Position pos : cells) {
-        if (!in_bounds(pos)) {
-            throw std::logic_error("public map cell out of bounds");
-        }
-        mask[index(pos.row, pos.col)] = 1;
-    }
-}
-
-std::array<int, CELL_COUNT> cell_mask(const std::vector<Position>& cells) {
-    std::array<int, CELL_COUNT> mask{};
-    mask.fill(0);
-    set_cells(mask, cells);
-    return mask;
-}
-
-const std::array<std::array<int, CELL_COUNT>, 3>& public_obstacle_masks() {
-    static const std::array<std::array<int, CELL_COUNT>, 3> masks = {
-        cell_mask({
-            {0, 3}, {0, 13}, {2, 1}, {2, 2}, {2, 14}, {2, 15}, {3, 0}, {3, 3}, {3, 13}, {3, 16},
-            {4, 4}, {4, 12}, {5, 5}, {5, 11}, {6, 3}, {6, 13}, {7, 7}, {7, 9}, {8, 4}, {8, 6},
-            {8, 10}, {8, 12}, {9, 7}, {9, 9}, {10, 3}, {10, 13}, {11, 5}, {11, 11}, {12, 4},
-            {12, 12}, {13, 0}, {13, 3}, {13, 13}, {13, 16}, {14, 1}, {14, 2}, {14, 14},
-            {14, 15}, {16, 3}, {16, 13},
-        }),
-        cell_mask({
-            {2, 2}, {2, 6}, {2, 10}, {2, 14}, {4, 4}, {4, 8}, {4, 12}, {6, 2}, {6, 6}, {6, 10},
-            {6, 14}, {8, 4}, {8, 12}, {10, 2}, {10, 6}, {10, 10}, {10, 14}, {12, 4}, {12, 8},
-            {12, 12}, {14, 2}, {14, 6}, {14, 10}, {14, 14},
-        }),
-        cell_mask({
-            {2, 2}, {2, 3}, {2, 4}, {2, 12}, {2, 13}, {2, 14}, {3, 2}, {3, 3}, {3, 4}, {3, 12},
-            {3, 13}, {3, 14}, {4, 4}, {4, 5}, {4, 6}, {4, 7}, {4, 9}, {4, 10}, {4, 11}, {4, 12},
-            {5, 4}, {5, 5}, {5, 6}, {5, 7}, {5, 9}, {5, 10}, {5, 11}, {5, 12}, {6, 4}, {6, 5},
-            {6, 6}, {6, 7}, {6, 9}, {6, 10}, {6, 11}, {6, 12}, {8, 4}, {8, 5}, {8, 6}, {8, 10},
-            {8, 11}, {8, 12}, {10, 4}, {10, 5}, {10, 6}, {10, 7}, {10, 9}, {10, 10}, {10, 11},
-            {10, 12}, {11, 4}, {11, 5}, {11, 6}, {11, 7}, {11, 9}, {11, 10}, {11, 11}, {11, 12},
-            {12, 4}, {12, 5}, {12, 6}, {12, 7}, {12, 9}, {12, 10}, {12, 11}, {12, 12}, {13, 2},
-            {13, 3}, {13, 4}, {13, 12}, {13, 13}, {13, 14}, {14, 2}, {14, 3}, {14, 4}, {14, 12},
-            {14, 13}, {14, 14},
-        }),
-    };
-    return masks;
-}
-
-const std::array<std::array<int, CELL_COUNT>, 3>& public_static2_masks() {
-    static const std::array<std::array<int, CELL_COUNT>, 3> masks = {
-        cell_mask({
-            {0, 4}, {0, 5}, {0, 12}, {1, 6}, {1, 10}, {5, 0}, {7, 1}, {9, 2}, {11, 0}, {12, 3},
-            {15, 6}, {15, 10}, {16, 4}, {16, 5}, {16, 12}, {5, 16}, {7, 15}, {9, 14}, {11, 16},
-            {12, 13},
-        }),
-        cell_mask({
-            {0, 4}, {0, 8}, {1, 6}, {1, 12}, {3, 10}, {5, 0}, {7, 2}, {9, 1}, {11, 3}, {12, 0},
-            {13, 10}, {15, 6}, {15, 12}, {16, 4}, {16, 8}, {5, 16}, {7, 14}, {9, 15}, {11, 13},
-            {12, 16},
-        }),
-        cell_mask({
-            {0, 6}, {0, 7}, {0, 8}, {0, 9}, {0, 10}, {6, 0}, {7, 0}, {8, 0}, {9, 0}, {10, 0},
-            {16, 6}, {16, 7}, {16, 8}, {16, 9}, {16, 10}, {6, 16}, {7, 16}, {8, 16}, {9, 16},
-            {10, 16},
-        }),
-    };
-    return masks;
-}
-
-int mirror_flat(int flat) {
+int up_down_mirror_flat(int flat) {
     const int row = flat / GRID_SIZE;
     const int col = flat % GRID_SIZE;
-    return index(GRID_SIZE - 1 - row, GRID_SIZE - 1 - col);
+    return index(GRID_SIZE - 1 - row, col);
+}
+
+int left_right_mirror_flat(int flat) {
+    const int row = flat / GRID_SIZE;
+    const int col = flat % GRID_SIZE;
+    return index(row, GRID_SIZE - 1 - col);
 }
 
 int effective_obstacle_status(
@@ -136,15 +75,58 @@ int effective_obstacle_status(
     return direct[flat] != UNKNOWN_OBSTACLE_STATUS ? direct[flat] : inferred[flat];
 }
 
-void record_obstacle_status(
-    std::array<int, CELL_COUNT>& direct,
-    std::array<int, CELL_COUNT>& inferred,
-    int flat,
-    int status) {
+void record_obstacle_status(std::array<int, CELL_COUNT>& direct, int flat, int status) {
     direct[flat] = status;
-    const int mirrored = mirror_flat(flat);
-    if (direct[mirrored] == UNKNOWN_OBSTACLE_STATUS) {
-        inferred[mirrored] = status;
+}
+
+void update_possible_symmetry_axes(const std::array<int, CELL_COUNT>& direct, unsigned int& axes) {
+    if ((axes & SYMMETRY_UP_DOWN) != 0U) {
+        for (int flat = 0; flat < CELL_COUNT; ++flat) {
+            const int mirrored = up_down_mirror_flat(flat);
+            if (direct[flat] != UNKNOWN_OBSTACLE_STATUS && direct[mirrored] != UNKNOWN_OBSTACLE_STATUS
+                && direct[flat] != direct[mirrored]) {
+                axes &= ~SYMMETRY_UP_DOWN;
+                break;
+            }
+        }
+    }
+    if ((axes & SYMMETRY_LEFT_RIGHT) != 0U) {
+        for (int flat = 0; flat < CELL_COUNT; ++flat) {
+            const int mirrored = left_right_mirror_flat(flat);
+            if (direct[flat] != UNKNOWN_OBSTACLE_STATUS && direct[mirrored] != UNKNOWN_OBSTACLE_STATUS
+                && direct[flat] != direct[mirrored]) {
+                axes &= ~SYMMETRY_LEFT_RIGHT;
+                break;
+            }
+        }
+    }
+}
+
+int inferred_status_for_axis(const std::array<int, CELL_COUNT>& direct, int flat, unsigned int axis) {
+    const int mirrored = axis == SYMMETRY_UP_DOWN ? up_down_mirror_flat(flat) : left_right_mirror_flat(flat);
+    return direct[mirrored];
+}
+
+void rebuild_inferred_obstacle_status(
+    const std::array<int, CELL_COUNT>& direct,
+    unsigned int possible_axes,
+    std::array<int, CELL_COUNT>& inferred) {
+    inferred.fill(UNKNOWN_OBSTACLE_STATUS);
+    for (int flat = 0; flat < CELL_COUNT; ++flat) {
+        if (direct[flat] != UNKNOWN_OBSTACLE_STATUS) {
+            continue;
+        }
+        if (possible_axes == SYMMETRY_UP_DOWN || possible_axes == SYMMETRY_LEFT_RIGHT) {
+            inferred[flat] = inferred_status_for_axis(direct, flat, possible_axes);
+            continue;
+        }
+        if (possible_axes == ALL_SYMMETRY_AXES) {
+            const int up_down = inferred_status_for_axis(direct, flat, SYMMETRY_UP_DOWN);
+            const int left_right = inferred_status_for_axis(direct, flat, SYMMETRY_LEFT_RIGHT);
+            if (up_down != UNKNOWN_OBSTACLE_STATUS && up_down == left_right) {
+                inferred[flat] = up_down;
+            }
+        }
     }
 }
 
@@ -344,7 +326,7 @@ void FeatureExtractor::reset(int player_id) {
     last_snapshot_gold_generated_.fill(0.0F);
     bomb_belief_.fill(BOMB_SPAWN_PROBABILITY);
     observed_high_outer_gold_mask_.fill(0.0F);
-    possible_public_maps_ = ALL_PUBLIC_MAPS;
+    possible_symmetry_axes_ = ALL_SYMMETRY_AXES;
     last_snapshot_valid_ = false;
 }
 
@@ -409,26 +391,19 @@ FeatureOutput FeatureExtractor::observe(const GameInput& input) {
                 temporal_[temporal_index(BOMB_MASK, 0)][flat] = 1.0F;
             }
             const int obstacle_status = cell == GRID_OBSTACLE ? KNOWN_OBSTACLE : KNOWN_NON_OBSTACLE;
-            const auto& obstacle_masks = public_obstacle_masks();
-            for (int map_idx = 0; map_idx < 3; ++map_idx) {
-                const unsigned int bit = 1U << map_idx;
-                if ((possible_public_maps_ & bit) == 0U) {
-                    continue;
-                }
-                const bool public_obstacle = obstacle_masks[map_idx][flat] != 0;
-                const bool observed_obstacle = obstacle_status == KNOWN_OBSTACLE;
-                if (public_obstacle != observed_obstacle) {
-                    possible_public_maps_ &= ~bit;
-                }
-            }
             if (region_index(row, col) != 0 && cell >= STATIC2_GOLD_THRESHOLD) {
                 observed_high_outer_gold_mask_[flat] = 1.0F;
             }
             bomb_belief_[flat] = cell == GRID_BOMB ? 1.0F : 0.0F;
-            record_obstacle_status(direct_obstacle_status_, inferred_obstacle_status_, flat, obstacle_status);
+            record_obstacle_status(direct_obstacle_status_, flat, obstacle_status);
         }
     }
 
+    update_possible_symmetry_axes(direct_obstacle_status_, possible_symmetry_axes_);
+    rebuild_inferred_obstacle_status(
+        direct_obstacle_status_,
+        possible_symmetry_axes_,
+        inferred_obstacle_status_);
     clear_known_obstacle_beliefs(bomb_belief_, direct_obstacle_status_, inferred_obstacle_status_);
     mark_visible_non_bomb(bomb_belief_, input.my_units[0]);
     mark_visible_non_bomb(bomb_belief_, input.my_units[1]);
@@ -460,20 +435,8 @@ FeatureOutput FeatureExtractor::observe(const GameInput& input) {
 
     const auto unit0_bfs = known_obstacle_distances(input.my_units[0], direct_obstacle_status_, inferred_obstacle_status_);
     const auto unit1_bfs = known_obstacle_distances(input.my_units[1], direct_obstacle_status_, inferred_obstacle_status_);
-    const auto& static2_masks = public_static2_masks();
     std::array<float, CELL_COUNT> static2_mask{};
     static2_mask.fill(0.0F);
-    for (int map_idx = 0; map_idx < 3; ++map_idx) {
-        const unsigned int bit = 1U << map_idx;
-        if ((possible_public_maps_ & bit) == 0U) {
-            continue;
-        }
-        for (int flat = 0; flat < CELL_COUNT; ++flat) {
-            if (static2_masks[map_idx][flat] != 0) {
-                static2_mask[flat] = 1.0F;
-            }
-        }
-    }
     for (int flat = 0; flat < CELL_COUNT; ++flat) {
         if (observed_high_outer_gold_mask_[flat] > 0.5F) {
             static2_mask[flat] = 1.0F;

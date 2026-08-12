@@ -42,23 +42,36 @@ class FeatureExtractorTests(unittest.TestCase):
         self.assertEqual(features1["planes"][ch["visible_enemy_count_t1"], 5, 6], 1.0)
         self.assertEqual(features1["planes"][ch["visible_mask_t4"], 1, 2], 0.0)
 
-    def test_obstacle_memory_symmetry_and_direct_override(self) -> None:
+    def test_obstacle_memory_axis_symmetry_and_direct_override(self) -> None:
         extractor = FeatureExtractor(player_id=1)
         first = _fog_input(round_index=0)
         first.grid[1][2] = -1
 
         features0 = extractor.observe(first)
         second = _fog_input(round_index=1)
-        second.grid[15][14] = 0
+        second.grid[15][2] = 0
         features1 = extractor.observe(second)
 
         ch = _channel_index()
         self.assertEqual(features0["planes"][ch["obstacle_known_mask"], 1, 2], 1.0)
         self.assertEqual(features0["planes"][ch["obstacle_mask"], 1, 2], 1.0)
-        self.assertEqual(features0["planes"][ch["obstacle_known_mask"], 15, 14], 1.0)
-        self.assertEqual(features0["planes"][ch["obstacle_mask"], 15, 14], 1.0)
-        self.assertEqual(features1["planes"][ch["obstacle_known_mask"], 15, 14], 1.0)
-        self.assertEqual(features1["planes"][ch["obstacle_mask"], 15, 14], 0.0)
+        self.assertEqual(features0["planes"][ch["obstacle_known_mask"], 1, 14], 0.0)
+        self.assertEqual(features0["planes"][ch["obstacle_known_mask"], 15, 2], 0.0)
+        self.assertEqual(features1["planes"][ch["obstacle_known_mask"], 15, 2], 1.0)
+        self.assertEqual(features1["planes"][ch["obstacle_mask"], 15, 2], 0.0)
+        self.assertEqual(features1["planes"][ch["obstacle_known_mask"], 1, 14], 1.0)
+        self.assertEqual(features1["planes"][ch["obstacle_mask"], 1, 14], 1.0)
+
+    def test_obstacle_memory_keeps_unknown_when_both_axes_disagree_or_lack_evidence(self) -> None:
+        extractor = FeatureExtractor(player_id=1)
+        game_input = _fog_input(round_index=0)
+        game_input.grid[1][2] = -1
+
+        features = extractor.observe(game_input)
+
+        ch = _channel_index()
+        self.assertEqual(features["planes"][ch["obstacle_known_mask"], 1, 14], 0.0)
+        self.assertEqual(features["planes"][ch["obstacle_mask"], 1, 14], 0.0)
 
     def test_visible_npc_count_and_crowded_mask(self) -> None:
         game_input = _fog_input(round_index=0)
@@ -174,7 +187,7 @@ class FeatureExtractorTests(unittest.TestCase):
         self.assertEqual(features["planes"][ch["obstacle_known_mask"], 1, 2], 0.0)
         self.assertEqual(features["planes"][ch["visible_mask_t1"], 1, 2], 0.0)
         self.assertEqual(features["planes"][ch["bomb_belief_mask"], 1, 2], 0.0795)
-        self.assertEqual(features["planes"][ch["static_2_mask"], 0, 5], 1.0)
+        self.assertEqual(features["planes"][ch["static_2_mask"], 0, 5], 0.0)
 
     def test_round_regression_fails_fast(self) -> None:
         extractor = FeatureExtractor(player_id=1)
@@ -212,26 +225,18 @@ class FeatureExtractorTests(unittest.TestCase):
         self.assertEqual(features1["planes"][ch["bomb_belief_mask"], 3, 4], 1.0)
         self.assertEqual(features20["planes"][ch["bomb_belief_mask"], 3, 4], 0.0795)
 
-    def test_static2_public_map_exclusion_online_discovery_and_distance(self) -> None:
+    def test_static2_online_discovery_and_distance(self) -> None:
         extractor = FeatureExtractor(player_id=1)
 
         initial = extractor.observe(_fog_input(round_index=0))
-        exclude_map1 = _fog_input(round_index=1)
-        exclude_map1.grid[0][3] = 0
-        after_exclusion = extractor.observe(exclude_map1)
-        full_empty = _basic_input(round_index=2)
-        no_public_targets = extractor.observe(full_empty)
-        online = _basic_input(round_index=3)
+        online = _basic_input(round_index=1)
         online.grid[0][4] = 16
         online.grid[8][8] = 16
         discovered = extractor.observe(online)
 
         ch = _channel_index()
-        self.assertEqual(initial["planes"][ch["static_2_mask"], 0, 5], 1.0)
-        self.assertEqual(initial["planes"][ch["to_static2_distance"], 0, 5], 0.0)
-        self.assertEqual(after_exclusion["planes"][ch["static_2_mask"], 0, 5], 0.0)
-        self.assertEqual(no_public_targets["planes"][ch["static_2_mask"], 0, 4], 0.0)
-        self.assertEqual(no_public_targets["planes"][ch["to_static2_distance"], 0, 4], 2.0)
+        self.assertEqual(initial["planes"][ch["static_2_mask"], 0, 5], 0.0)
+        self.assertEqual(initial["planes"][ch["to_static2_distance"], 0, 5], 2.0)
         self.assertEqual(discovered["planes"][ch["static_2_mask"], 0, 4], 1.0)
         self.assertEqual(discovered["planes"][ch["static_2_mask"], 8, 8], 0.0)
         self.assertEqual(discovered["planes"][ch["to_static2_distance"], 0, 4], 0.0)

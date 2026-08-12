@@ -44,7 +44,7 @@ private:
     std::array<float, REGION_COUNT> last_snapshot_gold_generated_{};
     std::array<float, GRID_SIZE * GRID_SIZE> bomb_belief_{};
     std::array<float, GRID_SIZE * GRID_SIZE> observed_high_outer_gold_mask_{};
-    unsigned int possible_public_maps_ = 0;
+    unsigned int possible_symmetry_axes_ = 0;
     bool last_snapshot_valid_ = false;
 };
 

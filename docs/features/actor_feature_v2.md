@@ -4,16 +4,17 @@
 
 ## 定位
 
-v2 的目标是补上三类低参数高价值信息：
+v2 的目标是补上三类低参数高价值信息，并按正式规则澄清修正障碍推断：
 
 - snapshot 中最近窗口各区域 `gold_generated`。
 - 中心小额金币生成概率先验。
 - 炸弹当前存在概率 belief。
-- 公开地图与在线高额外围金币推断出的 static2 候选 belief，以及到候选格的静态导航距离图。
+- 在线高额外围金币推断出的 static2 候选 belief，以及到候选格的静态导航距离图。
+- 障碍物只假设满足上下对称或左右对称至少一条，不再使用 180 度中心对称推断。
 
-`static_2_mask` 允许“背已有三张公开地图”，但必须保留开放集边界：不能假设正式地图一定属于公开三图。
+正式比赛不会采用当前三张公开地图，因此 actor feature 不再内置公开地图库、公开地图 obstacle/static2 坐标或闭集地图识别逻辑。
 
-actor 输入仍只能来自官方 `GameInput`、历史 observation、公开地图/机理数据推断和 feature extractor 自身状态。禁止使用 simulator full state、训练期 `map_id` 真值、真实 `MapTemplate.special_cells` 或未来金币生成信息。
+actor 输入仍只能来自官方 `GameInput`、历史 observation、规则允许的地图对称性/机理数据推断和 feature extractor 自身状态。禁止使用 simulator full state、训练期 `map_id` 真值、真实 `MapTemplate.special_cells`、公开地图坐标或未来金币生成信息。
 
 ## 输出形态
 
@@ -75,6 +76,64 @@ known_obstacle(cell) = obstacle_known_mask[cell] == 1 and obstacle_mask[cell] ==
 
 该 plane 不包含总体强度 `A`，范围约为 `0..1`。未知障碍格不按障碍处理，保持中心概率先验；只有 actor 已经直接或按 v1 障碍记忆推断为障碍的格子才置 0。
 
+## 障碍轴对称推断
+
+v2 覆盖 v1 的障碍推断规则：不再使用 180 度中心对称 `(r, c) -> (16-r, 16-c)`。正式地图只保证静态障碍至少满足以下一条：
+
+```text
+up_down symmetry:    (r, c) -> (16-r, c)
+left_right symmetry: (r, c) -> (r, 16-c)
+```
+
+feature extractor 每局维护：
+
+```text
+possible_symmetry_axes = {up_down, left_right}
+direct_obstacle_status[17][17] in {unknown, free, obstacle}
+inferred_obstacle_status[17][17] in {unknown, free, obstacle}
+```
+
+每次直接观察到非迷雾格：
+
+```text
+if visible cell is obstacle:
+    direct_obstacle_status[cell] = obstacle
+else:
+    direct_obstacle_status[cell] = free
+```
+
+直接观测永远优先。随后根据直接观测排除不再可能的轴：
+
+```text
+if any directly observed pair conflicts under up_down:
+    remove up_down from possible_symmetry_axes
+
+if any directly observed pair conflicts under left_right:
+    remove left_right from possible_symmetry_axes
+```
+
+最后重算推断缓存：
+
+```text
+if direct_obstacle_status[cell] is known:
+    effective_status[cell] = direct_obstacle_status[cell]
+else if only one axis remains possible:
+    effective_status[cell] = direct_obstacle_status[mirror(cell, axis)]
+else if both axes remain possible:
+    up_down_status = direct_obstacle_status[mirror(cell, up_down)]
+    left_right_status = direct_obstacle_status[mirror(cell, left_right)]
+    if both are known and equal:
+        effective_status[cell] = up_down_status
+    else:
+        effective_status[cell] = unknown
+else:
+    effective_status[cell] = unknown
+```
+
+若只剩一条轴可能，但镜像格尚未直接观察，则该格仍为 unknown。若两条轴都可能，必须两条轴都能推出同一个状态，才输出 inferred known；否则保持 unknown。
+
+`obstacle_known_mask` / `obstacle_mask`、`unit*_known_obstacle_distance`、`center_gold_spawn_prob` 的障碍过滤、`bomb_belief_mask` 的障碍清零，以及 `to_static2_distance` 的阻挡规则都使用该 `effective_status`。
+
 ## Bomb Belief Mask
 
 `bomb_belief_mask` 表达 actor 对当前该格存在炸弹的 belief，取值范围 `[0, 1]`。第一版只使用硬规则和机制固定概率：
@@ -126,81 +185,19 @@ if round % 20 != 0:
 
 ## Static2 推断状态
 
-feature extractor 每局维护两类 static2 状态：
+feature extractor 每局只维护在线 static2 推断状态：
 
 ```text
-possible_public_maps: bitset over {1, 2, 3}
 observed_high_outer_gold_mask: 17 x 17 bool
 ```
 
 初始化：
 
 ```text
-possible_public_maps = {1, 2, 3}
 observed_high_outer_gold_mask = all false
 ```
 
 `reset(player_id)` 必须清空上述状态。round 回退触发 reset 或 fail-fast 时，也必须清空。
-
-## 公开地图候选集
-
-v2 内置三张公开地图的 static2 候选格。每张图共 20 个格，四个外围 region 各 5 个。
-
-地图 1：
-
-```text
-region 2: (0,4), (0,5), (0,12), (1,6), (1,10)
-region 3: (5,0), (7,1), (9,2), (11,0), (12,3)
-region 4: (15,6), (15,10), (16,4), (16,5), (16,12)
-region 5: (5,16), (7,15), (9,14), (11,16), (12,13)
-```
-
-地图 2：
-
-```text
-region 2: (0,4), (0,8), (1,6), (1,12), (3,10)
-region 3: (5,0), (7,2), (9,1), (11,3), (12,0)
-region 4: (13,10), (15,6), (15,12), (16,4), (16,8)
-region 5: (5,16), (7,14), (9,15), (11,13), (12,16)
-```
-
-地图 3：
-
-```text
-region 2: (0,6), (0,7), (0,8), (0,9), (0,10)
-region 3: (6,0), (7,0), (8,0), (9,0), (10,0)
-region 4: (16,6), (16,7), (16,8), (16,9), (16,10)
-region 5: (6,16), (7,16), (8,16), (9,16), (10,16)
-```
-
-这些坐标来自机理分析和 simulator 公开地图模板。它们是可部署先验，不是当前对局的直接观测事实。
-
-## 地图排除规则
-
-v2 不计算地图概率，也不做闭集 softmax。`possible_public_maps` 只表达“尚未被直接 observation 矛盾排除的公开地图集合”。
-
-每次 `observe(game_input)` 时，对当前直接可见格更新：
-
-```text
-if visible cell is obstacle:
-    observed_static_state = obstacle
-else:
-    observed_static_state = free
-```
-
-对每个仍可能的公开地图 `m`：
-
-```text
-if public_map[m] 在该格的 obstacle/free 状态与 observed_static_state 矛盾:
-    remove m from possible_public_maps
-```
-
-规则约束：
-
-- 只使用直接可见 observation 做排除，不使用 v1 的中心对称障碍推断排除地图。
-- 可见金币、炸弹、NPC、玩家位置和普通空地都属于 `free`，因为 static2 可通行且不是障碍。
-- `possible_public_maps` 允许变为空集；这表示当前对局可能不是公开三图之一，不能再输出公开地图 static2 先验。
-- 如果 `possible_public_maps` 只剩一张图，也不表示正式确定当前就是该图；它只表示其它公开图已被 observation 排除。
 
 ## 在线高金币发现
 
@@ -228,28 +225,15 @@ if region_id(cell) != 1 and visible_gold(cell) >= 16:
 
 ## `static_2_mask` 输出规则
 
-先构造公开地图先验：
-
-```text
-public_prior_mask[cell] =
-    any(cell in static2_cells[m] for m in possible_public_maps)
-```
-
-如果 `possible_public_maps` 为空，则：
-
-```text
-public_prior_mask = all false
-```
-
-最终输出：
+输出：
 
 ```text
 static_2_mask[cell] =
-    1.0 if public_prior_mask[cell] or observed_high_outer_gold_mask[cell]
+    1.0 if observed_high_outer_gold_mask[cell]
     0.0 otherwise
 ```
 
-该 plane 是硬 binary feature，不含概率含义。它表达“该格是尚未被 observation 排除的公开地图 static2 候选格，或该格已被在线高额外围金币观测标记为可疑 static2 格”。
+该 plane 是硬 binary feature，不含概率含义。它只表达“该格已被在线高额外围金币观测标记为可疑 static2 格”。开局没有任何 static2 坐标先验。
 
 ## Static2 Distance
 
@@ -273,14 +257,13 @@ blocked(cell) = obstacle_known_mask[cell] == 1 and obstacle_mask[cell] == 1
 
 未知格按可通行处理。玩家、敌人、NPC、金币和炸弹都不作为该距离图的阻挡，因为该 plane 表达的是静态地图导航势场，不是本回合精确 legal path。
 
-当三张公开图均被排除时，`static_2_mask` 可能只包含在线高金币发现格；此时 `to_static2_distance` 退化为到已发现外围高价值格的已知障碍距离图。若没有任何 static2 target belief，则全图取最大值 `2`。
+若没有任何在线 static2 target belief，则全图取最大值 `2`。
 
 ## 设计边界
 
 `static_2_mask` 有意避免引入更多参数和状态：
 
-- 不维护 `unknown_map` 概率。
-- 不维护 map posterior/log weight。
+- 不维护公开地图坐标或地图 posterior/log weight。
 - 不维护证据强弱分数。
 - 不维护 region confidence。
 - 不根据 high gold 自动推断同 region 其它未知候选格。
@@ -310,11 +293,12 @@ v2 在 v1 测试基础上新增：
 - `bomb_belief_mask` 初始化和刷新回合将未知/非障碍格置为 `0.0795`，已知障碍格置 0。
 - `bomb_belief_mask` 可见炸弹格为 1，可见非炸弹格为 0。
 - 非刷新回合不可见格保持上一轮 bomb belief；此前为 1 的不可见格保持 1。
-- `static_2_mask` 初始为三张公开图未排除 static2 候选格的 union。
-- 直接观察障碍/非障碍矛盾会从 `possible_public_maps` 中移除对应公开图。
-- 三张公开图均被排除时，`static_2_mask` 只保留 `observed_high_outer_gold_mask`。
+- 障碍推断不使用 180 度中心对称；直接观测优先，轴对称候选按上下/左右冲突排除。
+- 两条轴都可能时，只有上下/左右镜像直接观测推出同一状态，才输出 inferred known。
+- 只剩一条轴可能时，按该轴镜像直接观测推断；镜像未观测则保持 unknown。
+- `static_2_mask` 初始全 0。
 - 当前可见外围金币 `>=16` 的格会写入并持久保留 online mask。
 - 中心区金币 `>=16` 不写入 online mask。
 - `to_static2_distance` 对 `static_2_mask` 中非已知障碍 target 取 0，并按已知障碍 BFS 距离 `clip(distance / 32, 0, 2)` 填充。
 - 无 static2 target belief 时，`to_static2_distance` 全图为 2。
-- reset 清空 `possible_public_maps` 和 online mask。
+- reset 清空 symmetry axis 状态和 online mask。
