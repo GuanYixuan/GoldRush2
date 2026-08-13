@@ -47,6 +47,8 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 - `<module-name>.so`。
 - `assembly_metadata.json`。
 
+组装前会读取同目录下的 `actor.metadata.json`，并校验导出 schema、输入输出 shape、`stochastic=true`、`critic_exported=false`。缺少 metadata 或传入旧 actor ONNX 会 fail-fast，避免生成运行时才失败的 `.so`。
+
 `--fast-runtime-mode` 必须显式填写：
 
 - `release`：正式平台提交模式，`POLICY_RUNTIME_FAST_DEBUG=0`，关闭 fast debug result 热路径。

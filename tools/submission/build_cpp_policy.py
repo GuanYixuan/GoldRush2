@@ -12,6 +12,23 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 ORT_HEADER_SOURCE = ROOT / "policy_runtime" / "onnxruntime_c_api"
 SAFE_SO_BYTES = 15_500_000
+EXPECTED_ONNX_SCHEMA = "goldrush2_stochastic_actor_onnx_export_v1"
+EXPECTED_INPUTS = {
+    "actor_planes": [1, 43, 17, 17],
+    "actor_scalars": [1, 10],
+    "fast_scalars": [1, 2],
+    "rand_ko": [1, 14],
+    "rand_vp": [1, 3],
+    "rand_action": [1, 6, 5],
+}
+EXPECTED_OUTPUTS = {
+    "actions": [1, 6],
+    "k": [1],
+    "order": [1],
+    "vp": [1],
+    "threshold_mu_raw": [1],
+    "threshold_log_std": [1],
+}
 
 
 def main() -> None:
@@ -28,6 +45,7 @@ def main() -> None:
     module_name = _module_name(args.module_name)
     if not onnx_path.exists():
         raise FileNotFoundError(onnx_path)
+    onnx_metadata = _load_onnx_metadata(onnx_path)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     _copy_ort_headers(output_dir / "ort_include")
@@ -47,7 +65,11 @@ def main() -> None:
     metadata = {
         "schema": "goldrush2_cpp_policy_assembly_v1",
         "onnx": str(onnx_path),
+        "onnx_metadata": str(onnx_path.with_suffix(".metadata.json")),
         "onnx_bytes": onnx_path.stat().st_size,
+        "onnx_schema": onnx_metadata["schema"],
+        "onnx_checkpoint_update": onnx_metadata.get("checkpoint_update"),
+        "onnx_action_head_schema": onnx_metadata.get("action_head_schema"),
         "output_dir": str(output_dir),
         "module_name": module_name,
         "so": None if not so_path.exists() else str(so_path),
@@ -74,6 +96,24 @@ def _copy_ort_headers(dst: Path) -> None:
     dst.mkdir(parents=True, exist_ok=True)
     for name in ("onnxruntime_c_api.h", "onnxruntime_error_code.h", "onnxruntime_ep_c_api.h"):
         shutil.copy2(ORT_HEADER_SOURCE / name, dst / name)
+
+
+def _load_onnx_metadata(onnx_path: Path) -> dict[str, Any]:
+    metadata_path = onnx_path.with_suffix(".metadata.json")
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"missing actor ONNX metadata: {metadata_path}")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if metadata.get("schema") != EXPECTED_ONNX_SCHEMA:
+        raise ValueError(f"ONNX metadata schema must be {EXPECTED_ONNX_SCHEMA!r}, got {metadata.get('schema')!r}")
+    if metadata.get("stochastic") is not True:
+        raise ValueError("ONNX metadata must mark stochastic=true")
+    if metadata.get("critic_exported") is not False:
+        raise ValueError("ONNX metadata must mark critic_exported=false")
+    if metadata.get("inputs") != EXPECTED_INPUTS:
+        raise ValueError(f"ONNX input schema mismatch: {metadata.get('inputs')!r}")
+    if metadata.get("outputs") != EXPECTED_OUTPUTS:
+        raise ValueError(f"ONNX output schema mismatch: {metadata.get('outputs')!r}")
+    return metadata
 
 
 def _write(path: Path, text: str) -> None:
