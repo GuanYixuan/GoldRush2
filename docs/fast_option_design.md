@@ -62,12 +62,7 @@ threshold = 4 + 26 * sigmoid(threshold_raw)
 
 PPO 保存并 teacher-force rollout 中采样到的 `threshold_raw`，logprob 在 raw 空间按 Normal 计算；`threshold` 只是给 simulator 和 runtime 使用的确定性变换。这样 threshold head 能用标准 policy gradient 学习，而不是依赖不可导的 `gold >= threshold` 触发条件。
 
-部署时默认使用均值路径：
-
-```text
-threshold_raw = mu_raw
-threshold = 4 + 26 * sigmoid(mu_raw)
-```
+部署时也使用 stochastic action 口径。C++ runtime 应从模型输出的分布参数采样普通动作和 `threshold_raw`，再执行同一 sigmoid 与整数化逻辑；不得在文档或默认提交路径中把 argmax/均值路径作为默认策略。
 
 fast path 只读取保存好的整数 threshold，不在 fast 回合运行神经网络。连续 threshold 转整数时统一使用：
 
@@ -97,7 +92,7 @@ fast_effective_confidence = min((alpha + beta) / 20, 1)
 
 ```text
 expected_gain = simulate_known_gold_pickups(saved_input_t, fast_output_t)
-actual_delta = current_my_units_gold[fast_role] - saved_my_units_gold[fast_role]
+actual_delta = current_my_units_gold[inferred_fast_role] - saved_my_units_gold[inferred_fast_role]
 score = clip(actual_delta / max(expected_gain, 1), 0, 1)
 ```
 
@@ -112,14 +107,7 @@ beta += 1 - score
 
 `p_fast_effective` 和 `fast_effective_confidence` 应作为 threshold head 的额外 scalar 输入。它们不进入 actor 主干或 actor scalar FiLM，但 PPO 重算 logprob 时必须能复现同一输入；critic value 也应看到这两个 scalar，否则同一 observation 下未来 fast 有效性分布不同，value 会更难拟合。
 
-可选记录但不一定进入主干：
-
-```text
-last_fast_effective_score
-last_fast_expected_gain_scaled
-last_fast_actual_delta_scaled
-recent_fast_trigger_rate
-```
+第一版不额外保存逐次 belief/debug 字段；`score`、`expected_gain` 和 `actual_delta` 只用于更新 Beta belief，并按 update 聚合到默认诊断指标。
 
 ### 轻量金币模拟口径
 
@@ -134,7 +122,7 @@ recent_fast_trigger_rate
 该 proxy 的语义是：
 
 ```text
-last_fast_effective_score =
+fast_effective_score_sample =
   实际持币变化 / 按上回合可见金币和自身 fast 动作可解释的预期收益
 ```
 
@@ -150,7 +138,9 @@ last_fast_effective_score =
 - fast-path 输出至多 6 步官方动作，且只让一个己方角色承担抢金动作；另一个角色保持不动或无关。
 - fast-path 至多追加一次 bounce；bounce 也必须落在保存局面中可见且 `grid >= 0` 的格子。
 - fast-path 可能在去目标或 bounce 过程中吃到路径上的其它已知金币，因此 expected gain 不能只按目标格金币计算。
-- fast-path 保存 pending 时必须同时保存足以复现模拟的 `GameInput` 关键字段、实际 `GameOutput`、fast role、触发前两角色持币。
+- fast-path 保存 pending 时必须同时保存足以复现模拟的 `GameInput` 关键字段、实际 `GameOutput` 和触发前两角色持币；不保存 `fast_role`。
+
+`inferred_fast_role` 在慢路径 backfill 时后推得到。实现应根据 pending 中保存的 `GameOutput`、`k/order` 和保存局面，把两个角色各自的官方动作段分别重放到可见金币模拟中，选择产生正 `expected_gain` 或唯一非停动作段的角色。按当前 fast-path 约束，成功 fast action 只应由一个角色承担抢金动作，因此该反推应唯一；训练/simulator 中若无法唯一反推应 fail-fast，部署侧可跳过本次 belief 更新以保持运行稳健。
 
 ## 训练语义
 
@@ -226,27 +216,72 @@ policy_loss_t =
 
 不把 `threshold_logprob_t` 搬到第 `t+1` 条 transition，也不额外构造 `threshold_loss`、`A_threshold_t` 或 one-step fast delta 辅助目标。这样实现最接近标准 PPO，避免一开始引入额外权重和长期/短期收益冲突。
 
-为降低分析盲区，rollout metrics 仍应把第 `t` 的 threshold 与第 `t+1` 的 fast 后果串起来记录，例如 `fast_triggered_by_threshold_t`、`fast_effective_score_t1`、`fast_pickup_gold_t1`、`fast_bomb_lost_t1` 和 `one_step_fast_delta_t1`。这些只用于诊断，不进入第一版 loss。
+为降低分析盲区，rollout metrics 仍应把第 `t` 的 threshold 与第 `t+1` 的 fast 后果串起来聚合统计。这些只用于诊断，不进入第一版 loss。
 
-第 `t+1` 回合 fast action 的后果应归因给第 `t` 回合输出的 threshold。PPO batch 至少需要记录：
+### PPO 必需字段
+
+PPO batch / shared memory 必须保存能重算 logprob/value 的字段：
 
 ```text
+fast_scalars_t
 threshold_raw_sample_t
 threshold_logprob_t
-threshold_t
-fast_triggered_t1
-fast_action_used_t1
-fast_effective_score_t1
-fast_target_gold_t1
-fast_action_count_t1
-fast_pickup_gold_t1
-fast_bomb_lost_t1
-decision_mode_t1 = fast | neural
-p_fast_effective_t
-fast_effective_confidence_t
+threshold_int_t
+old_logprob_t   # normal action + threshold_raw
 ```
 
 PPO 更新时必须 teacher-force rollout 中采样到的 `threshold_raw_sample_t`，禁止用当前模型重新采样。critic 仍只输出普通 state value，不为 threshold 单独输出 value head。
+
+### 默认诊断指标
+
+第一版默认按 update 聚合以下 metrics，不保存逐次 debug 字段：
+
+```text
+threshold_raw_mean
+threshold_raw_std
+threshold_int_mean
+threshold_int_p10
+threshold_int_p50
+threshold_int_p90
+threshold_log_std
+threshold_entropy
+threshold_approx_kl
+
+fast_success_per_episode
+fast_miss_no_target_per_episode
+fast_path_fail_per_episode
+neural_fallback_per_episode
+fast_nonstay_per_episode
+
+latent_first_rate_mean
+actual_fast_first_rate
+fast_order_samples_per_episode
+
+p_fast_effective_mean
+p_fast_effective_p50
+fast_effective_confidence_mean
+fast_effective_updates_per_episode
+fast_effective_score_mean
+fast_expected_gain_mean
+fast_actual_delta_mean
+
+fast_pickup_gold_per_episode
+fast_bomb_lost_gold_per_episode
+fast_trample_penalty_per_episode
+one_step_fast_delta_per_episode
+```
+
+命名上避免单独使用含义不清的 `fast_triggered`。`fast_success` 专指真正返回 ultra-fast action；`fast_miss_no_target` 表示 first-hit 没有找到目标；`fast_path_fail` 表示找到目标但 greedy path 构造失败；`neural_fallback` 表示本回合最终回退 neural path。
+
+`one_step_fast_delta_per_episode` 在训练 rollout 中使用轻量 proxy：
+
+```text
+one_step_fast_delta = actual_delta - expected_gain
+```
+
+其中 `actual_delta` 是 `inferred_fast_role` 从 pending 回合到当前回合的持币变化，`expected_gain` 是 saved visible gold 下重放 pending fast output 得到的可解释金币收益。该指标不是 paired neural baseline regret；wrapper on/off 的真实差值只在 CRN eval 中报告。
+
+第一版不加入 `last_fast_role`、`last_fast_target`、`last_fast_action_count`、逐次 threshold bucket 等 debug-only 字段。若后续需要人工排查 replay，可另开 debug schema 或临时日志，不进入默认 PPO batch。
 
 ## Runtime State
 
@@ -274,6 +309,78 @@ t+2 neural:
   run neural
 ```
 
+### Pending Backfill 结构
+
+pending 只在 fast path 成功并直接返回 ultra-fast action 时创建。若 first-hit miss 或 greedy path 构造失败，本回合应回退 neural path，不创建 pending。
+
+第一版 pending 只保存 backfill 必需信息；任何可延后到下一次 neural 回合的 belief/diagnostic 计算都不得进入 fast 热路径。特别地，fast path 不计算也不保存 `expected_known_gain`。
+
+推荐结构：
+
+```cpp
+struct PendingSnapshotRegion {
+    int id;
+    int gold_generated;
+    int gold_remaining;
+    int occupants;
+};
+
+struct PendingFastBackfill {
+    bool valid;
+
+    int round;
+    int8_t grid_padded21[21 * 21];
+    Position my_units[2];
+    int my_units_gold[2];
+    int gold_opp;
+    Position visible_enemies[2];
+    int num_visible_npcs;
+    NpcInfo visible_npcs[MAX_NPCS];
+
+    int snapshot_valid;
+    PendingSnapshotRegion snapshot_regions[REGION_COUNT];
+
+    GameOutput output;
+    int threshold_int;
+};
+```
+
+`grid_padded21` 使用 padding=2 的 `21x21` 网格，padding 区填 `GRID_FOG`。真实 `17x17` 网格按以下规则压缩：
+
+```text
+-5/-3/-1/0 原样保存
+gold > 127 clip 到 127
+其它 gold 原样保存
+```
+
+`int8 clip 127` 不破坏 `threshold_int <= 30` 的 first-hit 触发，也尽量保留高金币的相对幅度。actor feature 当前对 `gold_count` 使用 `/20` 后 clip 到 `3`，因此 `>60` 的 actor plane 等价；若未来 feature 需要未裁剪金币值，pending grid schema 必须重新评估。
+
+`PendingSnapshotRegion` 只保存 actor feature 当前实际使用的 snapshot 字段。`window_begin/window_end/enter/leave/gold_collected` 第一版不保存；若后续 actor feature 使用这些字段，pending schema 必须同步升级。
+
+### Backfill 顺序
+
+下一次 neural 回合收到 `input_now` 后，必须先处理 pending，再构造当前回合 feature：
+
+```text
+if pending.valid:
+    restored_input = restore_game_input(pending)
+
+    expected_gain = simulate_known_gold_pickups(restored_input, pending.output)
+    update_fast_effective_belief(pending, input_now, expected_gain)
+
+    observe(restored_input)
+    commit_action(pending.output)
+    clear pending
+
+features_now = observe(input_now)
+fast_scalars_now = current_belief_scalars()
+run neural model
+commit_action(neural_output)
+save threshold for next round
+```
+
+belief 更新发生在当前 neural model 推理前，使 `fast_scalars_now` 能反映上一次 fast 的实际效果。`simulate_known_gold_pickups()` 在慢路径使用 restored pending input 和 pending output 现算；它可以受 `int8 clip 127` 影响，但不影响 fast 动作或 feature backfill。第一版接受该 proxy 近似以保护 fast 热路径。
+
 已有预研显示 shadow backfill 可以保持 feature state 等价；主线实现前仍必须保留覆盖测试，尤其是：
 
 - temporal planes shift。
@@ -281,6 +388,9 @@ t+2 neural:
 - `static_2_mask` 在线发现。
 - snapshot memory。
 - `commit_action()` 相关状态。
+- fast miss/path fail 不创建 pending，而是回退 neural path。
+- `int8 clip 127` restore 后 actor feature 与原始输入在当前 schema 下等价。
+- Fast Effective Belief 在当前 neural 推理前更新，且每局 reset。
 
 ## Fast Controller 边界
 
@@ -323,14 +433,15 @@ t+2 neural:
 
 fast option 实验除官方净金币/胜率外，必须额外报告：
 
-- fast trigger rate。
+- `threshold_raw_*` 和 `threshold_int_*` 分布与饱和比例。
+- fast success/miss/path-fail/fallback rate。
 - fast nonstay rate。
-- fast effective score。
+- latent/actual fast first rate。
+- fast effective score/confidence。
 - fast pickup gold。
 - fast bomb lost。
-- one-step fast delta / regret。
+- fast trample penalty。
+- one-step fast delta，即训练 rollout 中的 `actual_delta - expected_gain` proxy。
 - wrapper on/off paired delta。
-- threshold 分布和饱和比例。
-- neural fallback rate。
 
 特别注意 500 round 中炸弹损失随持币增加放大。fast option 不能只看即时 pickup，也必须检查后续位置质量和 bomb loss。

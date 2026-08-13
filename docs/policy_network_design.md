@@ -245,14 +245,7 @@ threshold_log_std ~= -1.3
 
 `threshold_mlp` 最后一层权重为 `0`，bias 为 `mu_bias`，使接入初期 `threshold ~= 8`。`threshold_log_std` 训练和导出时应 clamp 到稳定范围，例如 `[-3.0, 0.0]`。
 
-部署默认使用均值路径：
-
-```text
-threshold_raw = mu_raw
-threshold = 4 + 26 * sigmoid(mu_raw)
-```
-
-若需要 stochastic threshold 部署，必须显式在 C++ runtime 中提供随机数输入并复现同一采样语义；第一版不作为默认提交路径。
+部署默认也使用 stochastic action 口径。C++ runtime 应从模型输出的分布参数采样普通动作和 `threshold_raw`，再执行同一 sigmoid 与整数化逻辑；随机流必须由 runtime 显式维护，避免训练、评估和平台提交之间出现隐式语义漂移。
 
 ## Belief 位置模拟
 
@@ -302,11 +295,11 @@ evaluate_actions(
 ) -> PolicyEvaluation
 ```
 
-`act()` 使用 actor feature 采样或逐步 argmax `ko/vp/actions`，再基于采样动作后的模拟终点采样或取均值 `threshold_raw`，并使用 critic feature 通过 critic encoder 输出 value。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder，并用保存的 `threshold_raw` 重算 threshold logprob；value 由 critic feature 重算。
+`act()` 使用 actor feature 按 `deterministic` 参数采样或取贪心 `ko/vp/actions`，再基于已选动作后的模拟终点采样或取中心值 `threshold_raw`，并使用 critic feature 通过 critic encoder 输出 value。训练和默认部署均使用 stochastic 路径；deterministic 只用于等价测试、导出 smoke 或明确指定的消融。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder，并用保存的 `threshold_raw` 重算 threshold logprob；value 由 critic feature 重算。
 
 部署/BC/ONNX 路径应保留 actor-only 入口。该入口只能返回 action、threshold、logprob/entropy 或使用占位 value，不得要求 privileged critic feature。PPO 训练路径必须使用双输入接口。
 
-`forward()` 是部署友好的 deterministic `act()` 包装，不用于 PPO 更新。
+`forward()` 是导出友好的 actor-only 包装，不用于 PPO 更新。默认提交路径应支持 stochastic 采样；若导出图本身只输出 logits/mu/log_std，则采样由 C++ runtime 在 ONNX 推理后完成。
 
 若 teacher-forced 动作被同一规则 mask 判为非法，立即报错。这通常表示槽位映射、位置递推或 feature 不一致，禁止静默赋予极小概率。
 
@@ -327,12 +320,14 @@ PPO buffer 和 multiprocess shared memory 保存：
 actor_spatial_planes/actor_scalars
 fast_scalars
 critic_spatial_planes/critic_scalars
-actions/k/order/vp/threshold_raw/threshold/old_logprob/value
+actions/k/order/vp/threshold_raw/threshold_int/old_logprob/value
 ```
 
-decoder hidden、执行顺序动作、`ko` 和 threshold head 输入均可由现有字段确定，不进入 buffer。PPO 更新必须 teacher force buffer 动作和 `threshold_raw`，禁止重新采样或用当前 argmax/均值作为 prefix。模型参数不变时，rollout logprob 与重算 logprob 必须在浮点误差内一致。
+decoder hidden、执行顺序动作、`ko`、连续 `threshold` 和 threshold head 输入均可由现有字段确定，不进入 buffer。`threshold_int` 保存用于对齐环境执行和诊断。PPO 更新必须 teacher force buffer 动作和 `threshold_raw`，禁止重新采样或用当前 argmax/均值作为 prefix。模型参数不变时，rollout logprob 与重算 logprob 必须在浮点误差内一致。
 
 threshold 是 delayed action component：第 `t` 条 transition 保存 `threshold_raw_t` 和对应 logprob，第 `t+1` 回合 fast controller 的后果通过标准 reward/return/GAE 回传到 `advantage_t`。第一版不拆 `threshold_loss`，也不把 `threshold_logprob_t` 搬到第 `t+1` 条 transition；所有 actor component 共用同一个 PPO clipped objective 和同一个 `advantage_t`。
+
+fast option 的 success/miss/path-fail/fallback、belief、first-rate 和 one-step delta 等诊断按 update 聚合，不作为模型输入或 PPO logprob 重算字段保存。第一版不加入逐次 debug-only 字段。
 
 policy loss、KL 和 entropy 只读取 actor feature；value loss、old value 对齐和 explained variance 只读取 critic feature。`old_logprob` 仍来自 actor 路径，`old_value` 来自 critic 路径。
 
@@ -396,11 +391,13 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - value 输出层使用小初始化，使初始 value 接近 0。
 - BC 训练只优化 actor 参数。PPO 从 BC checkpoint 初始化时，只加载 actor 路径；critic encoder 与 critic head 按 privileged critic schema 随机初始化或从专门 critic checkpoint 加载，不能默认拷贝 actor encoder，因为 actor/critic 输入 channel 与语义不同。
 
-旧 factorized checkpoint、旧 shared-encoder PPO checkpoint、缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint，以及缺少 fast threshold head 的 checkpoint 不兼容当前模型。主线不维护隐式部分加载；旧 v2 autoregressive head checkpoint 需要先通过显式 inflation 工具补齐 residual head 和 fast threshold head，且不继承旧 optimizer state。
+主线不维护隐式部分加载。fast threshold 接入时，显式 inflation 工具只支持当前稳定的 feature v2 / `action_head_schema=candidate_cell_residual_v1` checkpoint：补齐 fast threshold head，并在 critic value 第一层追加 2 个 `fast_scalars` 输入列且置零，使初始普通动作分布和旧 value 输出保持不变。
+
+旧 factorized checkpoint、旧 shared-encoder PPO checkpoint、缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint，以及 schema 元信息缺失或不匹配的 checkpoint 均不兼容当前模型，应 fail-fast。inflation 后不继承旧 optimizer state。
 
 ## 部署与验证
 
-部署使用逐步 argmax 路径，并对 threshold 使用 `mu_raw` 均值路径。固定六步循环应在 ONNX 导出时展开，优先使用 Gather、ScatterElements、Where、ArgMax、Sigmoid 和基础整数/布尔算子；训练用 `torch.multinomial`、Normal sampling 和 threshold logprob 不进入确定性部署图。
+部署使用 stochastic 路径：ONNX 输出普通动作 logits、threshold `mu_raw/log_std` 等分布参数，C++ runtime 负责采样、动作选择、`threshold_raw -> threshold_int` 转换和 fast controller 调用。固定六步循环可在 ONNX 导出时展开，优先使用 Gather、ScatterElements、Where、Sigmoid 和基础整数/布尔算子；若采样放在 C++ 侧，训练用 `torch.multinomial`、Normal sampling 和 threshold logprob 不进入 ONNX 图。
 
 最低测试要求：
 
@@ -408,9 +405,9 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - `k=0/6`、两种 order、边界、障碍和己方碰撞。
 - 非法动作不更新位置的规则参考对照。
 - rollout 与 teacher forcing logprob 等价。
-- candidate-cell residual head 初始为零扰动；旧 head checkpoint inflation 后 deterministic action 完全等价。
+- candidate-cell residual head 初始为零扰动；旧 head checkpoint inflation 后在同一随机种子或 deterministic 检查下官方动作完全等价。
 - fast threshold head 初始 `threshold ~= 8`，旧 checkpoint inflation 后官方动作完全等价且 threshold 输出固定在 8 附近。
-- threshold raw teacher forcing logprob 等价，部署均值路径不会采样。
+- threshold raw teacher forcing logprob 等价，部署 stochastic 采样语义与训练分布一致。
 - PPO 双输入中 actor feature 只影响 policy/logprob，critic feature 只影响 value。
 - critic 四角色 gather 的 channel index、shape 和 P1/P2 视角。
 - masked entropy、前向和反向 finite。
