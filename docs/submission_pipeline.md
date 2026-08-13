@@ -35,16 +35,26 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
   python tools/submission/build_cpp_policy.py \
   --onnx temp/submission_builds/your_build/actor.onnx \
   --output-dir temp/submission_builds/your_build/cpp \
-  --module-name Player0811L
+  --module-name Player0811L \
+  --fast-runtime-mode release
 ```
 
 该工具会生成：
 
 - `model_bytes.h`：内嵌 ONNX bytes。
-- `player.cpp`：官方 `moveDecision` 入口、feature extractor、ONNX Runtime C API 调用与 stochastic 随机输入。
+- `player.cpp`：官方 `moveDecision` 入口、`FastRuntimeState`、ONNX Runtime C API 调用与 stochastic 随机输入。
 - `Makefile`。
 - `<module-name>.so`。
 - `assembly_metadata.json`。
+
+`--fast-runtime-mode` 必须显式填写：
+
+- `release`：正式平台提交模式，`POLICY_RUNTIME_FAST_DEBUG=0`，关闭 fast debug result 热路径。
+- `debug`：本地训练/调试模式，`POLICY_RUNTIME_FAST_DEBUG=1`，保留完整 fast debug result。
+
+正式平台 self-play、挑战版本和最终提交均应使用 `release`。不要省略该参数；工具会 fail-fast。
+
+正式 `.so` 的每回合调用链是：若上一回合网络已设置下一回合 threshold，则先尝试 `try_fast_output()`；fast 命中直接返回 `GameOutput`，不进入 ONNX；fast miss/path fail 或没有 armed threshold 时才调用 `prepare_neural()`、运行 ONNX、读取动作和 threshold 分布参数，并将采样出的 `threshold_int` 保存给下一回合。
 
 `.so` 大小超过 `15_500_000` bytes 会 fail-fast。ONNX Runtime C API headers 来自 `policy_runtime/onnxruntime_c_api/`，不再依赖 `temp/`。
 

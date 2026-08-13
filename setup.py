@@ -25,6 +25,9 @@ setup(
                 str(ROOT),
                 str(ROOT / "policy_runtime" / "include"),
             ],
+            define_macros=[
+                ("POLICY_RUNTIME_FAST_DEBUG", "1"),
+            ],
             cxx_std=17,
         )
     ],

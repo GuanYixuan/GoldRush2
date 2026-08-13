@@ -6,6 +6,14 @@
 #include "official_sdk/code/game_api.h"
 #include "policy_runtime/feature_extractor.h"
 
+#ifndef POLICY_RUNTIME_FAST_DEBUG
+#error "POLICY_RUNTIME_FAST_DEBUG must be explicitly set to 0 or 1"
+#endif
+
+#if POLICY_RUNTIME_FAST_DEBUG != 0 && POLICY_RUNTIME_FAST_DEBUG != 1
+#error "POLICY_RUNTIME_FAST_DEBUG must be 0 or 1"
+#endif
+
 namespace policy_runtime {
 
 constexpr int FAST_SCALAR_FEATURES = 2;
@@ -63,6 +71,7 @@ public:
     bool pending_valid() const;
 
     void set_next_threshold(int threshold_int);
+    FastStatus try_fast_output(const GameInput& input, GameOutput* output);
     FastTryResult try_fast(const GameInput& input);
     NeuralPrepareResult prepare_neural(const GameInput& input);
     void commit_neural(const GameOutput& output);

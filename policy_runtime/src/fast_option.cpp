@@ -90,13 +90,6 @@ inline bool is_visible_enemy(const GameInput& input, int row, int col) {
     return (enemy0.row == row && enemy0.col == col) || (enemy1.row == row && enemy1.col == col);
 }
 
-inline bool can_step_on(const GameInput& input, int row, int col) {
-    return static_cast<unsigned int>(row) < GRID_SIZE
-        && static_cast<unsigned int>(col) < GRID_SIZE
-        && input.grid[row][col] >= 0
-        && !is_visible_enemy(input, row, col);
-}
-
 inline int ceil_pickup(int value) {
     return (value * 65 + 99) / 100;
 }
@@ -162,6 +155,8 @@ bool append_greedy_path_to_output(const GameInput& input, Position start, Positi
     int col = start.col;
     const int target_row = target.row;
     const int target_col = target.col;
+    const Position enemy0 = input.visible_enemies[0];
+    const Position enemy1 = input.visible_enemies[1];
     while ((row != target_row || col != target_col) && *action_count < S) {
         int next_row = row;
         int next_col = col;
@@ -175,7 +170,10 @@ bool append_greedy_path_to_output(const GameInput& input, Position start, Positi
             next_row = row + 1;
             action = ACTION_DOWN;
         }
-        if (action != ACTION_STAY && can_step_on(input, next_row, next_col)) {
+        if (action != ACTION_STAY
+            && input.grid[next_row][next_col] >= 0
+            && !(enemy0.row == next_row && enemy0.col == next_col)
+            && !(enemy1.row == next_row && enemy1.col == next_col)) {
             output->actions[*action_count] = action;
             *action_count += 1;
             row = next_row;
@@ -194,7 +192,10 @@ bool append_greedy_path_to_output(const GameInput& input, Position start, Positi
                 next_col = col + 1;
                 action = ACTION_RIGHT;
             }
-            if (action != ACTION_STAY && can_step_on(input, next_row, next_col)) {
+            if (action != ACTION_STAY
+                && input.grid[next_row][next_col] >= 0
+                && !(enemy0.row == next_row && enemy0.col == next_col)
+                && !(enemy1.row == next_row && enemy1.col == next_col)) {
                 output->actions[*action_count] = action;
                 *action_count += 1;
                 row = next_row;
@@ -210,10 +211,13 @@ bool append_greedy_path_to_output(const GameInput& input, Position start, Positi
     return row == target_row && col == target_col;
 }
 
-void pack_padded_grid(std::int8_t* dst, const GameInput& input) {
+void init_padded_grid(std::int8_t* dst) {
     for (int i = 0; i < PAD2_COUNT; ++i) {
         dst[i] = static_cast<std::int8_t>(GRID_FOG);
     }
+}
+
+void pack_padded_grid_interior(std::int8_t* dst, const GameInput& input) {
     for (int row = 0; row < GRID_SIZE; ++row) {
         std::int8_t* out = &dst[pad2_index(row, 0)];
         for (int col = 0; col < GRID_SIZE; ++col) {
@@ -224,6 +228,11 @@ void pack_padded_grid(std::int8_t* dst, const GameInput& input) {
             out[col] = static_cast<std::int8_t>(cell);
         }
     }
+}
+
+void pack_padded_grid(std::int8_t* dst, const GameInput& input) {
+    init_padded_grid(dst);
+    pack_padded_grid_interior(dst, input);
 }
 
 void split_output(const GameOutput& output, int role, int* actions, int* count) {
@@ -296,6 +305,66 @@ bool try_fast_gold_grab(const GameInput& input, int threshold_int, GameOutput* o
         result->action_count = action_count;
     }
     return true;
+}
+
+FastStatus try_fast_output_core(
+    std::int8_t* padded_grid,
+    const GameInput& input,
+    int threshold_int,
+    GameOutput* output,
+#if POLICY_RUNTIME_FAST_DEBUG
+    int* role_out,
+    Position* target_out,
+    int* action_count_out
+#else
+    int*,
+    Position*,
+    int*
+#endif
+) {
+    pack_padded_grid_interior(padded_grid, input);
+
+    Position target{0, 0};
+    int role = 0;
+    if (!choose_target_padded(padded_grid, input, threshold_int, &target, &role)) {
+        return FastStatus::MissNoTarget;
+    }
+
+    GameOutput fused = stay_output();
+    int action_count = 0;
+    if (!append_greedy_path_to_output(input, input.my_units[role], target, &fused, &action_count)) {
+#if POLICY_RUNTIME_FAST_DEBUG
+        if (role_out != nullptr) {
+            *role_out = role;
+        }
+        if (target_out != nullptr) {
+            *target_out = target;
+        }
+#endif
+        return FastStatus::PathFail;
+    }
+    if (action_count > 0 && action_count + 2 <= S) {
+        const int last_action = fused.actions[action_count - 1];
+        fused.actions[action_count++] = opposite_action(last_action);
+        fused.actions[action_count++] = last_action;
+    }
+    fused.k = role == 0 ? action_count : 0;
+    fused.order = role == 0 ? 0 : 1;
+    fused.vp = 0;
+
+    *output = fused;
+#if POLICY_RUNTIME_FAST_DEBUG
+    if (role_out != nullptr) {
+        *role_out = role;
+    }
+    if (target_out != nullptr) {
+        *target_out = target;
+    }
+    if (action_count_out != nullptr) {
+        *action_count_out = action_count;
+    }
+#endif
+    return FastStatus::Success;
 }
 
 int simulate_known_gold_pickups(const GameInput& input, const GameOutput& output, int role) {
@@ -391,41 +460,69 @@ void FastRuntimeState::set_next_threshold(int threshold_int) {
     threshold_int_ = clamp_threshold(threshold_int);
 }
 
+FastStatus FastRuntimeState::try_fast_output(const GameInput& input, GameOutput* output) {
+    GameOutput fused{};
+#if POLICY_RUNTIME_FAST_DEBUG
+    int action_count = 0;
+    const FastStatus status = try_fast_output_core(pending_.grid, input, threshold_int_, &fused, nullptr, nullptr, &action_count);
+#else
+    const FastStatus status = try_fast_output_core(pending_.grid, input, threshold_int_, &fused, nullptr, nullptr, nullptr);
+#endif
+
+#if POLICY_RUNTIME_FAST_DEBUG
+    if (status == FastStatus::MissNoTarget) {
+        diagnostics_.fast_miss_no_target += 1;
+        diagnostics_.neural_fallback += 1;
+    } else if (status == FastStatus::PathFail) {
+        diagnostics_.fast_path_fail += 1;
+        diagnostics_.neural_fallback += 1;
+    } else {
+        diagnostics_.fast_success += 1;
+        if (action_count > 0) {
+            diagnostics_.fast_nonstay += 1;
+        }
+    }
+#endif
+    if (status != FastStatus::Success) {
+        return status;
+    }
+
+    *output = fused;
+    store_pending_meta(input, fused);
+    return FastStatus::Success;
+}
+
 FastTryResult FastRuntimeState::try_fast(const GameInput& input) {
     FastTryResult result{};
-    pack_padded_grid(pending_.grid, input);
-    if (!choose_target_padded(pending_.grid, input, threshold_int_, &result.target, &result.role)) {
-        result.status = FastStatus::MissNoTarget;
+    GameOutput output{};
+#if POLICY_RUNTIME_FAST_DEBUG
+    int role = -1;
+    Position target{0, 0};
+    int action_count = 0;
+    result.status = try_fast_output_core(pending_.grid, input, threshold_int_, &output, &role, &target, &action_count);
+    result.role = role;
+    result.target = target;
+    result.action_count = action_count;
+
+    if (result.status == FastStatus::MissNoTarget) {
         diagnostics_.fast_miss_no_target += 1;
         diagnostics_.neural_fallback += 1;
         return result;
     }
-
-    GameOutput fused = stay_output();
-    int action_count = 0;
-    if (!append_greedy_path_to_output(input, input.my_units[result.role], result.target, &fused, &action_count)) {
-        result.status = FastStatus::PathFail;
+    if (result.status == FastStatus::PathFail) {
         diagnostics_.fast_path_fail += 1;
         diagnostics_.neural_fallback += 1;
         return result;
     }
-    if (action_count > 0 && action_count + 2 <= S) {
-        const int last_action = fused.actions[action_count - 1];
-        fused.actions[action_count++] = opposite_action(last_action);
-        fused.actions[action_count++] = last_action;
-    }
-    fused.k = result.role == 0 ? action_count : 0;
-    fused.order = result.role == 0 ? 0 : 1;
-    fused.vp = 0;
-
-    result.status = FastStatus::Success;
-    result.output = fused;
-    result.action_count = action_count;
+    result.output = output;
     diagnostics_.fast_success += 1;
     if (action_count > 0) {
         diagnostics_.fast_nonstay += 1;
     }
-    store_pending_meta(input, fused);
+    store_pending_meta(input, output);
+#else
+    result.status = try_fast_output(input, &output);
+#endif
     return result;
 }
 
@@ -450,13 +547,11 @@ void FastRuntimeState::clear_pending() {
 }
 
 void FastRuntimeState::init_pending_grid() {
-    for (int i = 0; i < PAD2_COUNT; ++i) {
-        pending_.grid[i] = static_cast<std::int8_t>(GRID_FOG);
-    }
+    init_padded_grid(pending_.grid);
 }
 
 void FastRuntimeState::pack_grid(const GameInput& input) {
-    pack_padded_grid(pending_.grid, input);
+    pack_padded_grid_interior(pending_.grid, input);
 }
 
 void FastRuntimeState::store_pending_meta(const GameInput& input, const GameOutput& output) {

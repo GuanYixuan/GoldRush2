@@ -19,6 +19,7 @@ def main() -> None:
     parser.add_argument("--onnx", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--module-name", default="Player0810S")
+    parser.add_argument("--fast-runtime-mode", choices=("debug", "release"), required=True)
     parser.add_argument("--no-build", action="store_true")
     args = parser.parse_args()
 
@@ -32,7 +33,8 @@ def main() -> None:
     _copy_ort_headers(output_dir / "ort_include")
     _write(output_dir / "model_bytes.h", _model_bytes_header(onnx_path.read_bytes()))
     _write(output_dir / "player.cpp", _player_cpp(module_name))
-    _write(output_dir / "Makefile", _makefile(module_name))
+    fast_debug = 1 if args.fast_runtime_mode == "debug" else 0
+    _write(output_dir / "Makefile", _makefile(module_name, fast_debug=fast_debug))
 
     so_path = output_dir / f"{module_name}.so"
     if not args.no_build:
@@ -53,6 +55,8 @@ def main() -> None:
         "fp32": True,
         "stochastic": True,
         "critic_exported": False,
+        "fast_runtime_mode": args.fast_runtime_mode,
+        "policy_runtime_fast_debug": fast_debug,
     }
     _write(output_dir / "assembly_metadata.json", json.dumps(metadata, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
     print(json.dumps(metadata, sort_keys=True))
@@ -100,14 +104,14 @@ def _model_bytes_header(data: bytes) -> str:
     return "\n".join(lines)
 
 
-def _makefile(module_name: str) -> str:
+def _makefile(module_name: str, *, fast_debug: int) -> str:
     return f"""CXX ?= g++
 REPO_ROOT := {ROOT}
-CXXFLAGS ?= -std=c++17 -O3 -fPIC -Wall -Wextra -I$(REPO_ROOT) -I$(REPO_ROOT)/policy_runtime/include -I.
+CXXFLAGS ?= -std=c++17 -O3 -fPIC -Wall -Wextra -DPOLICY_RUNTIME_FAST_DEBUG={fast_debug} -I$(REPO_ROOT) -I$(REPO_ROOT)/policy_runtime/include -I.
 LDFLAGS ?= -shared
 LDLIBS ?= -ldl
 TARGET = {module_name}.so
-SRC = player.cpp $(REPO_ROOT)/policy_runtime/src/feature_extractor.cpp
+SRC = player.cpp $(REPO_ROOT)/policy_runtime/src/feature_extractor.cpp $(REPO_ROOT)/policy_runtime/src/fast_option.cpp
 
 all: $(TARGET)
 
@@ -121,12 +125,13 @@ clean:
 
 def _player_cpp(module_name: str) -> str:
     return f"""#include "official_sdk/code/game_api.h"
-#include "policy_runtime/feature_extractor.h"
+#include "policy_runtime/fast_option.h"
 #include "ort_include/onnxruntime_c_api.h"
 #include "model_bytes.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <dlfcn.h>
@@ -142,6 +147,9 @@ constexpr int kKoCount = 14;
 constexpr int kVpCount = 3;
 constexpr int kActionCount = 5;
 constexpr int kMoveBudget = S;
+constexpr int kOutputCount = 6;
+constexpr int kThresholdLow = policy_runtime::FAST_THRESHOLD_LOW;
+constexpr int kThresholdHigh = policy_runtime::FAST_THRESHOLD_HIGH;
 
 GameOutput safe_output() {{
     GameOutput output = {{}};
@@ -164,7 +172,7 @@ bool release_status(const OrtApi* api, OrtStatus* status) {{
 
 class SubmissionRuntime {{
 public:
-    SubmissionRuntime() : extractor_(1), rng_(seed_rng()) {{
+    SubmissionRuntime() : runtime_(1), rng_(seed_rng()) {{
         init_ort();
     }}
 
@@ -189,15 +197,25 @@ public:
         }}
         try {{
             maybe_reset_episode(*input);
-            const policy_runtime::FeatureOutput features = extractor_.observe(*input);
+            if (fast_armed_) {{
+                GameOutput fast_output = {{}};
+                const policy_runtime::FastStatus fast_status = runtime_.try_fast_output(*input, &fast_output);
+                fast_armed_ = false;
+                if (fast_status == policy_runtime::FastStatus::Success) {{
+                    return fast_output;
+                }}
+            }}
+
+            const policy_runtime::NeuralPrepareResult prepared = runtime_.prepare_neural(*input);
+            const policy_runtime::FeatureOutput& features = prepared.actor_features;
             if (features.planes.size() != static_cast<std::size_t>(kFeaturePlaneCount) ||
                 features.scalars.size() != static_cast<std::size_t>(kFeatureScalarCount)) {{
                 return safe_output();
             }}
             std::copy(features.planes.begin(), features.planes.end(), actor_planes_data_);
             std::copy(features.scalars.begin(), features.scalars.end(), actor_scalars_data_);
-            fast_scalars_data_[0] = 0.8F;
-            fast_scalars_data_[1] = 0.25F;
+            fast_scalars_data_[0] = prepared.fast_scalars[0];
+            fast_scalars_data_[1] = prepared.fast_scalars[1];
             fill_random_inputs();
 
             release_outputs();
@@ -209,15 +227,20 @@ public:
                 inputs,
                 6,
                 output_names_,
-                4,
+                kOutputCount,
                 outputs_);
             if (!release_status(api_, status)) {{
                 ready_ = false;
                 return safe_output();
             }}
-            GameOutput output = read_output();
-            extractor_.commit_action(output);
-            return output;
+            const NeuralDecision decision = read_decision();
+            if (!decision.valid) {{
+                return safe_output();
+            }}
+            runtime_.commit_neural(decision.output);
+            runtime_.set_next_threshold(decision.threshold_int);
+            fast_armed_ = true;
+            return decision.output;
         }} catch (const std::exception&) {{
             return safe_output();
         }} catch (...) {{
@@ -239,7 +262,8 @@ private:
 
     void maybe_reset_episode(const GameInput& input) {{
         if (!seen_round_ || input.round == 0 || input.round < last_round_) {{
-            extractor_.reset(1);
+            runtime_.reset(1);
+            fast_armed_ = false;
         }}
         seen_round_ = true;
         last_round_ = input.round;
@@ -342,14 +366,23 @@ private:
         }}
     }}
 
-    GameOutput read_output() {{
+    struct NeuralDecision {{
+        GameOutput output{{}};
+        int threshold_int = 12;
+        bool valid = false;
+    }};
+
+    NeuralDecision read_decision() {{
         int64_t* actions = nullptr;
         int64_t* k = nullptr;
         int64_t* order = nullptr;
         int64_t* vp = nullptr;
-        if (!get_output(0, &actions) || !get_output(1, &k) || !get_output(2, &order) || !get_output(3, &vp)) {{
+        float* threshold_mu_raw = nullptr;
+        float* threshold_log_std = nullptr;
+        if (!get_output(0, &actions) || !get_output(1, &k) || !get_output(2, &order) || !get_output(3, &vp) ||
+            !get_output(4, &threshold_mu_raw) || !get_output(5, &threshold_log_std)) {{
             ready_ = false;
-            return safe_output();
+            return NeuralDecision{{}};
         }}
 
         GameOutput output = {{}};
@@ -360,7 +393,11 @@ private:
         output.k = (0 <= k[0] && k[0] <= 6) ? static_cast<int>(k[0]) : 3;
         output.order = (0 <= order[0] && order[0] <= 1) ? static_cast<int>(order[0]) : 0;
         output.vp = (0 <= vp[0] && vp[0] <= 2) ? static_cast<int>(vp[0]) : 0;
-        return output;
+        NeuralDecision decision;
+        decision.output = output;
+        decision.threshold_int = sample_threshold_int(threshold_mu_raw[0], threshold_log_std[0]);
+        decision.valid = true;
+        return decision;
     }}
 
     bool get_output(int index, int64_t** data) {{
@@ -371,10 +408,36 @@ private:
         return release_status(api_, status) && *data != nullptr;
     }}
 
-    policy_runtime::FeatureExtractor extractor_;
+    bool get_output(int index, float** data) {{
+        if (outputs_[index] == nullptr) {{
+            return false;
+        }}
+        OrtStatus* status = api_->GetTensorMutableData(outputs_[index], reinterpret_cast<void**>(data));
+        return release_status(api_, status) && *data != nullptr;
+    }}
+
+    int sample_threshold_int(float mu_raw, float log_std) {{
+        std::normal_distribution<float> dist(0.0F, 1.0F);
+        const float raw = mu_raw + std::exp(log_std) * dist(rng_);
+        const float exp_value = std::exp(raw >= 0.0F ? -raw : raw);
+        const float sigmoid = raw >= 0.0F ? 1.0F / (1.0F + exp_value) : exp_value / (1.0F + exp_value);
+        const float threshold = static_cast<float>(kThresholdLow) +
+            static_cast<float>(kThresholdHigh - kThresholdLow) * sigmoid;
+        int threshold_int = static_cast<int>(std::floor(threshold + 0.5F));
+        if (threshold_int < kThresholdLow) {{
+            threshold_int = kThresholdLow;
+        }}
+        if (threshold_int > kThresholdHigh) {{
+            threshold_int = kThresholdHigh;
+        }}
+        return threshold_int;
+    }}
+
+    policy_runtime::FastRuntimeState runtime_;
     std::mt19937_64 rng_;
     bool seen_round_ = false;
     int last_round_ = -1;
+    bool fast_armed_ = false;
     bool ready_ = false;
 
     void* ort_handle_ = nullptr;
@@ -389,7 +452,7 @@ private:
     OrtValue* rand_ko_ = nullptr;
     OrtValue* rand_vp_ = nullptr;
     OrtValue* rand_action_ = nullptr;
-    OrtValue* outputs_[4] = {{nullptr, nullptr, nullptr, nullptr}};
+    OrtValue* outputs_[kOutputCount] = {{}};
 
     float actor_planes_data_[kFeaturePlaneCount] = {{}};
     float actor_scalars_data_[kFeatureScalarCount] = {{}};
@@ -404,7 +467,7 @@ private:
     int64_t rand_vp_dims_[2] = {{1, kVpCount}};
     int64_t rand_action_dims_[3] = {{1, kMoveBudget, kActionCount}};
     const char* input_names_[6] = {{"actor_planes", "actor_scalars", "fast_scalars", "rand_ko", "rand_vp", "rand_action"}};
-    const char* output_names_[4] = {{"actions", "k", "order", "vp"}};
+    const char* output_names_[kOutputCount] = {{"actions", "k", "order", "vp", "threshold_mu_raw", "threshold_log_std"}};
     const char* ort_libraries_[3] = {{"libonnxruntime.so", "libonnxruntime.so.1", "libonnxruntime.so.1.20.1"}};
 }};
 

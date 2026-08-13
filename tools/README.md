@@ -86,8 +86,11 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
   python tools/submission/build_cpp_policy.py \
   --onnx temp/submission_builds/example/actor.onnx \
   --output-dir temp/submission_builds/example/cpp \
-  --module-name PlayerExample
+  --module-name PlayerExample \
+  --fast-runtime-mode release
 ```
+
+`--fast-runtime-mode` 必须显式填写。正式平台提交使用 `release`；训练、eval 或本地调试需要保留 fast debug 结果时使用 `debug`。
 
 `smoke_cpp_policy.py` 在本地 simulator 中加载 `.so` 做短局 smoke，不会访问平台。
 

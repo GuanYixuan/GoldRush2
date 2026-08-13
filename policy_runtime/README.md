@@ -19,6 +19,8 @@
 conda run --no-capture-output -n goldrush python setup.py build_ext --inplace
 ```
 
+`setup.py` 会显式以 `POLICY_RUNTIME_FAST_DEBUG=1` 构建 Python binding，供训练、eval 和本地调试使用。正式平台 `.so` 由 `tools/submission/build_cpp_policy.py --fast-runtime-mode release` 生成，并使用 `POLICY_RUNTIME_FAST_DEBUG=0`；`fast_option.h` 要求该宏必须显式设置，避免混用训练调试版和正式导出版。
+
 ## Python 用法
 
 ```python
