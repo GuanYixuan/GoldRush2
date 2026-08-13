@@ -137,6 +137,7 @@ namespace {{
 
 constexpr int kFeaturePlaneCount = policy_runtime::FEATURE_CHANNELS * GRID_SIZE * GRID_SIZE;
 constexpr int kFeatureScalarCount = policy_runtime::FEATURE_SCALARS;
+constexpr int kFastScalarCount = 2;
 constexpr int kKoCount = 14;
 constexpr int kVpCount = 3;
 constexpr int kActionCount = 5;
@@ -171,6 +172,7 @@ public:
         release_outputs();
         if (actor_planes_) api_->ReleaseValue(actor_planes_);
         if (actor_scalars_) api_->ReleaseValue(actor_scalars_);
+        if (fast_scalars_) api_->ReleaseValue(fast_scalars_);
         if (rand_ko_) api_->ReleaseValue(rand_ko_);
         if (rand_vp_) api_->ReleaseValue(rand_vp_);
         if (rand_action_) api_->ReleaseValue(rand_action_);
@@ -194,16 +196,18 @@ public:
             }}
             std::copy(features.planes.begin(), features.planes.end(), actor_planes_data_);
             std::copy(features.scalars.begin(), features.scalars.end(), actor_scalars_data_);
+            fast_scalars_data_[0] = 0.8F;
+            fast_scalars_data_[1] = 0.25F;
             fill_random_inputs();
 
             release_outputs();
-            const OrtValue* inputs[] = {{actor_planes_, actor_scalars_, rand_ko_, rand_vp_, rand_action_}};
+            const OrtValue* inputs[] = {{actor_planes_, actor_scalars_, fast_scalars_, rand_ko_, rand_vp_, rand_action_}};
             OrtStatus* status = api_->Run(
                 session_,
                 nullptr,
                 input_names_,
                 inputs,
-                5,
+                6,
                 output_names_,
                 4,
                 outputs_);
@@ -281,6 +285,10 @@ private:
         if (ok) {{
             ok = create_tensor(actor_scalars_data_, sizeof(actor_scalars_data_), actor_scalars_dims_, 2,
                                ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &actor_scalars_);
+        }}
+        if (ok) {{
+            ok = create_tensor(fast_scalars_data_, sizeof(fast_scalars_data_), fast_scalars_dims_, 2,
+                               ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, &fast_scalars_);
         }}
         if (ok) {{
             ok = create_tensor(rand_ko_data_, sizeof(rand_ko_data_), rand_ko_dims_, 2,
@@ -377,6 +385,7 @@ private:
     OrtMemoryInfo* memory_info_ = nullptr;
     OrtValue* actor_planes_ = nullptr;
     OrtValue* actor_scalars_ = nullptr;
+    OrtValue* fast_scalars_ = nullptr;
     OrtValue* rand_ko_ = nullptr;
     OrtValue* rand_vp_ = nullptr;
     OrtValue* rand_action_ = nullptr;
@@ -384,15 +393,17 @@ private:
 
     float actor_planes_data_[kFeaturePlaneCount] = {{}};
     float actor_scalars_data_[kFeatureScalarCount] = {{}};
+    float fast_scalars_data_[kFastScalarCount] = {{0.8F, 0.25F}};
     float rand_ko_data_[kKoCount] = {{}};
     float rand_vp_data_[kVpCount] = {{}};
     float rand_action_data_[kMoveBudget * kActionCount] = {{}};
     int64_t actor_planes_dims_[4] = {{1, policy_runtime::FEATURE_CHANNELS, GRID_SIZE, GRID_SIZE}};
     int64_t actor_scalars_dims_[2] = {{1, policy_runtime::FEATURE_SCALARS}};
+    int64_t fast_scalars_dims_[2] = {{1, kFastScalarCount}};
     int64_t rand_ko_dims_[2] = {{1, kKoCount}};
     int64_t rand_vp_dims_[2] = {{1, kVpCount}};
     int64_t rand_action_dims_[3] = {{1, kMoveBudget, kActionCount}};
-    const char* input_names_[5] = {{"actor_planes", "actor_scalars", "rand_ko", "rand_vp", "rand_action"}};
+    const char* input_names_[6] = {{"actor_planes", "actor_scalars", "fast_scalars", "rand_ko", "rand_vp", "rand_action"}};
     const char* output_names_[4] = {{"actions", "k", "order", "vp"}};
     const char* ort_libraries_[3] = {{"libonnxruntime.so", "libonnxruntime.so.1", "libonnxruntime.so.1.20.1"}};
 }};

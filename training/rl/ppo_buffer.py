@@ -12,6 +12,7 @@ from simulator.errors import SimulatorRuleError
 
 ACTOR_SPATIAL_CHANNELS = 43
 ACTOR_SCALAR_FEATURES = 10
+FAST_SCALAR_FEATURES = 2
 CRITIC_SPATIAL_CHANNELS = 26
 CRITIC_SCALAR_FEATURES = 17
 GRID_SIZE = 17
@@ -22,12 +23,15 @@ MOVE_BUDGET = 6
 class PpoTransition:
     spatial_planes: Tensor
     scalars: Tensor
+    fast_scalars: Tensor
     critic_planes: Tensor
     critic_scalars: Tensor
     actions: Tensor
     k: Tensor
     order: Tensor
     vp: Tensor
+    threshold_raw: Tensor
+    threshold_int: Tensor
     old_logprob: Tensor
     value: Tensor
     reward: float
@@ -43,12 +47,15 @@ class PpoTransition:
 class PpoMiniBatch:
     spatial_planes: Tensor
     scalars: Tensor
+    fast_scalars: Tensor
     critic_planes: Tensor
     critic_scalars: Tensor
     actions: Tensor
     k: Tensor
     order: Tensor
     vp: Tensor
+    threshold_raw: Tensor
+    threshold_int: Tensor
     old_logprob: Tensor
     old_values: Tensor
     advantages: Tensor
@@ -63,12 +70,15 @@ class PpoMiniBatch:
 class PpoBatch:
     spatial_planes: Tensor
     scalars: Tensor
+    fast_scalars: Tensor
     critic_planes: Tensor
     critic_scalars: Tensor
     actions: Tensor
     k: Tensor
     order: Tensor
     vp: Tensor
+    threshold_raw: Tensor
+    threshold_int: Tensor
     old_logprob: Tensor
     old_values: Tensor
     rewards: Tensor
@@ -90,12 +100,15 @@ class PpoBatch:
         return PpoBatch(
             spatial_planes=torch.stack([transition.spatial_planes.float() for transition in transitions]),
             scalars=torch.stack([transition.scalars.float() for transition in transitions]),
+            fast_scalars=torch.stack([transition.fast_scalars.float() for transition in transitions]),
             critic_planes=torch.stack([transition.critic_planes.float() for transition in transitions]),
             critic_scalars=torch.stack([transition.critic_scalars.float() for transition in transitions]),
             actions=torch.stack([transition.actions.long() for transition in transitions]),
             k=torch.stack([transition.k.long().reshape(()) for transition in transitions]),
             order=torch.stack([transition.order.long().reshape(()) for transition in transitions]),
             vp=torch.stack([transition.vp.long().reshape(()) for transition in transitions]),
+            threshold_raw=torch.stack([transition.threshold_raw.float().reshape(()) for transition in transitions]),
+            threshold_int=torch.stack([transition.threshold_int.long().reshape(()) for transition in transitions]),
             old_logprob=torch.stack([transition.old_logprob.float().reshape(()) for transition in transitions]),
             old_values=torch.stack([transition.value.float().reshape(()) for transition in transitions]),
             rewards=torch.tensor([transition.reward for transition in transitions], dtype=torch.float32),
@@ -112,12 +125,15 @@ class PpoBatch:
         *,
         spatial_planes: Any,
         scalars: Any,
+        fast_scalars: Any,
         critic_planes: Any,
         critic_scalars: Any,
         actions: Any,
         k: Any,
         order: Any,
         vp: Any,
+        threshold_raw: Any,
+        threshold_int: Any,
         old_logprob: Any,
         values: Any,
         rewards: Any,
@@ -131,12 +147,15 @@ class PpoBatch:
         batch = PpoBatch(
             spatial_planes=torch.as_tensor(spatial_planes, dtype=torch.float32),
             scalars=torch.as_tensor(scalars, dtype=torch.float32),
+            fast_scalars=torch.as_tensor(fast_scalars, dtype=torch.float32),
             critic_planes=torch.as_tensor(critic_planes, dtype=torch.float32),
             critic_scalars=torch.as_tensor(critic_scalars, dtype=torch.float32),
             actions=torch.as_tensor(actions, dtype=torch.long),
             k=torch.as_tensor(k, dtype=torch.long),
             order=torch.as_tensor(order, dtype=torch.long),
             vp=torch.as_tensor(vp, dtype=torch.long),
+            threshold_raw=torch.as_tensor(threshold_raw, dtype=torch.float32),
+            threshold_int=torch.as_tensor(threshold_int, dtype=torch.long),
             old_logprob=torch.as_tensor(old_logprob, dtype=torch.float32),
             old_values=torch.as_tensor(values, dtype=torch.float32),
             rewards=torch.as_tensor(rewards, dtype=torch.float32),
@@ -215,12 +234,15 @@ class PpoBatch:
             self,
             spatial_planes=self.spatial_planes.to(device),
             scalars=self.scalars.to(device),
+            fast_scalars=self.fast_scalars.to(device),
             critic_planes=self.critic_planes.to(device),
             critic_scalars=self.critic_scalars.to(device),
             actions=self.actions.to(device),
             k=self.k.to(device),
             order=self.order.to(device),
             vp=self.vp.to(device),
+            threshold_raw=self.threshold_raw.to(device),
+            threshold_int=self.threshold_int.to(device),
             old_logprob=self.old_logprob.to(device),
             old_values=self.old_values.to(device),
             rewards=self.rewards.to(device),
@@ -237,12 +259,15 @@ class PpoBatch:
         return PpoMiniBatch(
             spatial_planes=self.spatial_planes[indices],
             scalars=self.scalars[indices],
+            fast_scalars=self.fast_scalars[indices],
             critic_planes=self.critic_planes[indices],
             critic_scalars=self.critic_scalars[indices],
             actions=self.actions[indices],
             k=self.k[indices],
             order=self.order[indices],
             vp=self.vp[indices],
+            threshold_raw=self.threshold_raw[indices],
+            threshold_int=self.threshold_int[indices],
             old_logprob=self.old_logprob[indices],
             old_values=self.old_values[indices],
             advantages=self.advantages[indices],
@@ -256,6 +281,8 @@ def _validate_transitions(transitions: list[PpoTransition] | tuple[PpoTransition
             raise ValueError(f"transition {idx} spatial_planes must have shape 43x17x17")
         if tuple(transition.scalars.shape) != (ACTOR_SCALAR_FEATURES,):
             raise ValueError(f"transition {idx} scalars must have shape 10")
+        if tuple(transition.fast_scalars.shape) != (FAST_SCALAR_FEATURES,):
+            raise ValueError(f"transition {idx} fast_scalars must have shape 2")
         if tuple(transition.critic_planes.shape) != (CRITIC_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
             raise ValueError(f"transition {idx} critic_planes must have shape 26x17x17")
         if tuple(transition.critic_scalars.shape) != (CRITIC_SCALAR_FEATURES,):
@@ -274,6 +301,8 @@ def _validate_batch_arrays(batch: PpoBatch) -> None:
         raise ValueError(f"spatial_planes must have shape Nx43x17x17, got {tuple(batch.spatial_planes.shape)}")
     if tuple(batch.scalars.shape) != (transition_count, ACTOR_SCALAR_FEATURES):
         raise ValueError(f"scalars must have shape Nx10, got {tuple(batch.scalars.shape)}")
+    if tuple(batch.fast_scalars.shape) != (transition_count, FAST_SCALAR_FEATURES):
+        raise ValueError(f"fast_scalars must have shape Nx2, got {tuple(batch.fast_scalars.shape)}")
     if tuple(batch.critic_planes.shape) != (transition_count, CRITIC_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
         raise ValueError(f"critic_planes must have shape Nx26x17x17, got {tuple(batch.critic_planes.shape)}")
     if tuple(batch.critic_scalars.shape) != (transition_count, CRITIC_SCALAR_FEATURES):
@@ -284,6 +313,8 @@ def _validate_batch_arrays(batch: PpoBatch) -> None:
         ("k", batch.k),
         ("order", batch.order),
         ("vp", batch.vp),
+        ("threshold_raw", batch.threshold_raw),
+        ("threshold_int", batch.threshold_int),
         ("old_logprob", batch.old_logprob),
         ("old_values", batch.old_values),
         ("rewards", batch.rewards),

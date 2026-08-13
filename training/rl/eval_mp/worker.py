@@ -9,6 +9,7 @@ from typing import Any
 from policy_runtime import FeatureExtractor
 from simulator.errors import SimulatorRuleError
 from simulator.types import GameOutput
+from training.models import INITIAL_FAST_SCALARS
 from training.rl.env import SingleAgentEnvConfig, SingleAgentGoldRushEnv
 from training.rl.privileged_critic_features import extract_privileged_critic_features
 from training.rl.rollout_mp.shared_memory import FeatureSharedMemory, attach_feature_shared_memory
@@ -99,6 +100,7 @@ def run_worker_episode(
         critic_features = _extract_critic_features(env, task.agent_player_id, task.round_count)
         feature_shared.actor_planes[worker_id, ...] = np.asarray(actor_features["planes"], dtype=np.float32)
         feature_shared.actor_scalars[worker_id, ...] = np.asarray(actor_features["scalars"], dtype=np.float32)
+        feature_shared.fast_scalars[worker_id, ...] = np.asarray(INITIAL_FAST_SCALARS, dtype=np.float32)
         feature_shared.critic_planes[worker_id, ...] = np.asarray(critic_features["planes"], dtype=np.float32)
         feature_shared.critic_scalars[worker_id, ...] = np.asarray(critic_features["scalars"], dtype=np.float32)
 

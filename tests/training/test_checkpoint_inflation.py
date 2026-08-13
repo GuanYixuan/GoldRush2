@@ -7,6 +7,9 @@ from training.scripts.inflate_candidate_cell_residual_head_checkpoint import (
     inflate_checkpoint_payload as inflate_action_head_checkpoint_payload,
 )
 from training.scripts.inflate_actor_feature_v2_checkpoint import inflate_checkpoint_payload
+from training.scripts.inflate_fast_threshold_head_checkpoint import (
+    inflate_checkpoint_payload as inflate_fast_threshold_checkpoint_payload,
+)
 
 
 def test_inflate_bc_checkpoint_to_actor_feature_v2() -> None:
@@ -133,6 +136,85 @@ def test_inflate_candidate_residual_head_rejects_non_v2_feature_shape() -> None:
         raise AssertionError("expected ValueError")
 
 
+def test_inflate_fast_threshold_checkpoint_loads_and_preserves_old_value() -> None:
+    candidate_config = _small_config()
+    candidate_config = PolicyNetworkConfig(
+        width=candidate_config.width,
+        residual_blocks=candidate_config.residual_blocks,
+        se_reduction=candidate_config.se_reduction,
+        scalar_hidden=candidate_config.scalar_hidden,
+        actor_hidden=candidate_config.actor_hidden,
+        critic_hidden=candidate_config.critic_hidden,
+        decoder_hidden=candidate_config.decoder_hidden,
+        decoder_embedding=candidate_config.decoder_embedding,
+        action_head_schema="candidate_cell_residual_v1",
+    )
+    old_model = GoldRushPolicyNetwork(candidate_config)
+    old_state = {
+        key: value
+        for key, value in old_model.state_dict().items()
+        if not (key.startswith("threshold_mlp.") or key == "threshold_log_std")
+    }
+    old_state["critic_mlp.0.weight"] = old_state["critic_mlp.0.weight"][:, :-2].clone()
+    checkpoint = {
+        "schema": "ppo_train_v1",
+        "train_config": {"model": _candidate_model_config()},
+        "model_state_dict": old_state,
+        "optimizer_state_dict": {"state": {"stale": True}},
+    }
+    critic_planes = torch.zeros(2, 26, 17, 17)
+    critic_scalars = torch.zeros(2, 17)
+    critic_planes[:, 9, 1, 1] = 1.0
+    critic_planes[:, 10, 15, 15] = 1.0
+    critic_planes[:, 11, 2, 14] = 1.0
+    critic_planes[:, 12, 14, 2] = 1.0
+    old_context = old_model.critic_encoder(critic_planes, critic_scalars)
+    old_input = torch.cat(
+        (
+            old_context.avg,
+            old_context.max_pool,
+            old_context.own_unit0,
+            old_context.own_unit1,
+            old_context.enemy_unit0,
+            old_context.enemy_unit1,
+        ),
+        dim=1,
+    )
+    old_hidden0 = torch.nn.functional.linear(old_input, old_state["critic_mlp.0.weight"], old_state["critic_mlp.0.bias"])
+    old_hidden0 = torch.nn.functional.silu(old_hidden0)
+    old_hidden1 = torch.nn.functional.linear(old_hidden0, old_state["critic_mlp.2.weight"], old_state["critic_mlp.2.bias"])
+    old_hidden1 = torch.nn.functional.silu(old_hidden1)
+    old_value = torch.nn.functional.linear(old_hidden1, old_state["critic_mlp.4.weight"], old_state["critic_mlp.4.bias"])
+
+    inflated = inflate_fast_threshold_checkpoint_payload(checkpoint)
+    model = GoldRushPolicyNetwork(_small_config())
+    model.load_state_dict(inflated["model_state_dict"])
+    new_value = model._critic_value(critic_planes, critic_scalars, torch.zeros(2, 2)).unsqueeze(1)
+
+    assert inflated["train_config"]["model"]["action_head_schema"] == "candidate_cell_residual_v1_fast_threshold_v1"
+    assert "optimizer_state_dict" not in inflated
+    assert inflated["optimizer_state_dict_dropped_for_fast_threshold_inflation"] is True
+    assert "threshold_mlp.4.weight" in inflated["model_state_dict"]
+    assert "threshold_log_std" in inflated["model_state_dict"]
+    assert inflated["model_state_dict"]["critic_mlp.0.weight"].shape[1] == old_state["critic_mlp.0.weight"].shape[1] + 2
+    assert torch.allclose(old_value, new_value, atol=1e-7, rtol=1e-7)
+
+
+def test_inflate_fast_threshold_rejects_non_candidate_schema() -> None:
+    checkpoint = {
+        "schema": "ppo_train_v1",
+        "train_config": {"model": {**_candidate_model_config(), "action_head_schema": "autoregressive_head_v1"}},
+        "model_state_dict": {},
+    }
+
+    try:
+        inflate_fast_threshold_checkpoint_payload(checkpoint)
+    except ValueError as exc:
+        assert "action_head_schema" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
 def _small_config() -> PolicyNetworkConfig:
     return PolicyNetworkConfig(
         width=16,
@@ -162,5 +244,25 @@ def _legacy_model_config() -> dict[str, object]:
         "decoder_hidden": config.decoder_hidden,
         "decoder_embedding": config.decoder_embedding,
         "action_head_schema": "autoregressive_head_v1",
+        "activation": config.activation,
+    }
+
+
+def _candidate_model_config() -> dict[str, object]:
+    config = _small_config()
+    return {
+        "actor_spatial_channels": config.actor_spatial_channels,
+        "actor_scalar_features": config.actor_scalar_features,
+        "critic_spatial_channels": config.critic_spatial_channels,
+        "critic_scalar_features": config.critic_scalar_features,
+        "width": config.width,
+        "residual_blocks": config.residual_blocks,
+        "se_reduction": config.se_reduction,
+        "scalar_hidden": config.scalar_hidden,
+        "actor_hidden": config.actor_hidden,
+        "critic_hidden": config.critic_hidden,
+        "decoder_hidden": config.decoder_hidden,
+        "decoder_embedding": config.decoder_embedding,
+        "action_head_schema": "candidate_cell_residual_v1",
         "activation": config.activation,
     }

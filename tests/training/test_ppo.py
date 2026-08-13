@@ -116,21 +116,25 @@ def _small_model() -> GoldRushPolicyNetwork:
 def _batch_from_model(model: GoldRushPolicyNetwork) -> PpoBatch:
     transitions: list[PpoTransition] = []
     spatial, scalars = _feature_tensors(batch_size=4)
+    fast_scalars = torch.tensor([[0.8, 0.25]], dtype=torch.float32).expand(4, -1).clone()
     critic_spatial, critic_scalars = _critic_feature_tensors(batch_size=4)
     with torch.no_grad():
-        action = model.act(spatial, scalars, critic_spatial, critic_scalars)
+        action = model.act(spatial, scalars, fast_scalars, critic_spatial, critic_scalars)
     rewards = (1.0, -1.0, 0.5, -0.5)
     for idx, reward in enumerate(rewards):
         transitions.append(
             PpoTransition(
                 spatial_planes=spatial[idx],
                 scalars=scalars[idx],
+                fast_scalars=fast_scalars[idx],
                 critic_planes=critic_spatial[idx],
                 critic_scalars=critic_scalars[idx],
                 actions=action.actions[idx],
                 k=action.k[idx],
                 order=action.order[idx],
                 vp=action.vp[idx],
+                threshold_raw=action.threshold_raw[idx],
+                threshold_int=action.threshold_int[idx],
                 old_logprob=action.logprob[idx],
                 value=action.value[idx],
                 reward=reward,

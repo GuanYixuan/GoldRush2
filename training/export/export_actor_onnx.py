@@ -15,6 +15,7 @@ from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.models.policy_network import (
     ACTION_COUNT,
     FEATURE_SCHEMA,
+    INITIAL_FAST_SCALARS,
     GRID_SIZE,
     KO_COUNT,
     MOVE_BUDGET,
@@ -34,24 +35,28 @@ class StochasticActorExport(nn.Module):
         self,
         actor_planes: Tensor,
         actor_scalars: Tensor,
+        fast_scalars: Tensor,
         rand_ko: Tensor,
         rand_vp: Tensor,
         rand_action: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
         actor_planes = actor_planes.float()
         actor_scalars = actor_scalars.float()
+        fast_scalars = fast_scalars.float()
         encoded = self.model._encode_actor(actor_planes, actor_scalars)
 
         ko_logits = self.model.ko_head(encoded.actor_context)
         vp_logits = self.model.vp_head(encoded.actor_context)
         ko = _gumbel_argmax(ko_logits, rand_ko)
         vp = _gumbel_argmax(vp_logits, rand_vp)
-        actions = self._decode(encoded, ko, rand_action)
+        actions, final_unit0_position, final_unit1_position = self._decode(encoded, ko, rand_action)
+        threshold_mu_raw = self._threshold_mu(encoded, final_unit0_position, final_unit1_position, fast_scalars)
+        threshold_log_std = self.model._threshold_log_std().expand_as(threshold_mu_raw)
         k = torch.div(ko, 2, rounding_mode="floor")
         order = torch.remainder(ko, 2)
-        return actions, k, order, vp
+        return actions, k, order, vp, threshold_mu_raw, threshold_log_std
 
-    def _decode(self, encoded: _EncodedState, ko: Tensor, rand_action: Tensor) -> Tensor:
+    def _decode(self, encoded: _EncodedState, ko: Tensor, rand_action: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         batch_size = encoded.actor_context.shape[0]
         roles = self.model.execution_role_table[ko]
         official_slots = self.model.official_slot_table[ko]
@@ -104,7 +109,24 @@ class StochasticActorExport(nn.Module):
             previous_action = selected
 
         actions_in_execution_order = torch.stack(execution_actions, dim=1)
-        return torch.zeros_like(actions_in_execution_order).scatter(1, official_slots, actions_in_execution_order)
+        return (
+            torch.zeros_like(actions_in_execution_order).scatter(1, official_slots, actions_in_execution_order),
+            unit0_position,
+            unit1_position,
+        )
+
+    def _threshold_mu(
+        self,
+        encoded: _EncodedState,
+        final_unit0_position: Tensor,
+        final_unit1_position: Tensor,
+        fast_scalars: Tensor,
+    ) -> Tensor:
+        final_unit0_local = _gather_position(encoded.spatial_features, final_unit0_position)
+        final_unit1_local = _gather_position(encoded.spatial_features, final_unit1_position)
+        return self.model.threshold_mlp(
+            torch.cat((encoded.actor_context, final_unit0_local, final_unit1_local, fast_scalars), dim=1)
+        ).squeeze(-1)
 
 
 def _gumbel_argmax(logits: Tensor, rand: Tensor) -> Tensor:
@@ -136,8 +158,8 @@ def main() -> None:
         wrapper,
         sample,
         output_path,
-        input_names=["actor_planes", "actor_scalars", "rand_ko", "rand_vp", "rand_action"],
-        output_names=["actions", "k", "order", "vp"],
+        input_names=["actor_planes", "actor_scalars", "fast_scalars", "rand_ko", "rand_vp", "rand_action"],
+        output_names=["actions", "k", "order", "vp", "threshold_mu_raw", "threshold_log_std"],
         opset_version=int(args.opset),
         do_constant_folding=True,
         dynamic_axes=None,
@@ -164,6 +186,7 @@ def main() -> None:
         "inputs": {
             "actor_planes": [1, SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE],
             "actor_scalars": [1, SCALAR_FEATURES],
+            "fast_scalars": [1, 2],
             "rand_ko": [1, KO_COUNT],
             "rand_vp": [1, 3],
             "rand_action": [1, MOVE_BUDGET, ACTION_COUNT],
@@ -173,6 +196,8 @@ def main() -> None:
             "k": [1],
             "order": [1],
             "vp": [1],
+            "threshold_mu_raw": [1],
+            "threshold_log_std": [1],
         },
     }
     metadata_path = output_path.with_suffix(".metadata.json")
@@ -201,6 +226,13 @@ def _load_model(path: Path) -> tuple[GoldRushPolicyNetwork, dict[str, Any]]:
         decoder_hidden=int(raw_config["decoder_hidden"]),
         decoder_embedding=int(raw_config["decoder_embedding"]),
         action_head_schema=str(raw_config.get("action_head_schema", "autoregressive_head_v1")),
+        fast_scalar_features=int(raw_config.get("fast_scalar_features", 2)),
+        threshold_initial=float(raw_config.get("threshold_initial", 12.0)),
+        threshold_hidden=tuple(int(v) for v in raw_config.get("threshold_hidden", (128, 64))),
+        threshold_log_std_initial=float(raw_config.get("threshold_log_std_initial", -1.3)),
+        threshold_log_std_min=float(raw_config.get("threshold_log_std_min", -3.0)),
+        threshold_log_std_max=float(raw_config.get("threshold_log_std_max", 0.0)),
+        threshold_entropy_coef=float(raw_config.get("threshold_entropy_coef", 0.0)),
         activation=str(raw_config["activation"]),
     )
     if config.actor_spatial_channels != SPATIAL_CHANNELS or config.actor_scalar_features != SCALAR_FEATURES:
@@ -211,22 +243,23 @@ def _load_model(path: Path) -> tuple[GoldRushPolicyNetwork, dict[str, Any]]:
     return model, checkpoint
 
 
-def _sample_inputs(generator: torch.Generator) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+def _sample_inputs(generator: torch.Generator) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     actor_planes = torch.randn((1, SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE), generator=generator)
     actor_scalars = torch.randn((1, SCALAR_FEATURES), generator=generator)
+    fast_scalars = torch.tensor([INITIAL_FAST_SCALARS], dtype=torch.float32)
     rand_ko = torch.rand((1, KO_COUNT), generator=generator).clamp(1.0e-6, 1.0 - 1.0e-6)
     rand_vp = torch.rand((1, 3), generator=generator).clamp(1.0e-6, 1.0 - 1.0e-6)
     rand_action = torch.rand((1, MOVE_BUDGET, ACTION_COUNT), generator=generator).clamp(1.0e-6, 1.0 - 1.0e-6)
-    return actor_planes, actor_scalars, rand_ko, rand_vp, rand_action
+    return actor_planes, actor_scalars, fast_scalars, rand_ko, rand_vp, rand_action
 
 
-def _run_onnx(path: Path, inputs: tuple[Tensor, Tensor, Tensor, Tensor, Tensor]) -> list[np.ndarray]:
+def _run_onnx(path: Path, inputs: tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]) -> list[np.ndarray]:
     import onnxruntime as ort
 
     session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-    names = ["actor_planes", "actor_scalars", "rand_ko", "rand_vp", "rand_action"]
+    names = ["actor_planes", "actor_scalars", "fast_scalars", "rand_ko", "rand_vp", "rand_action"]
     feed = {name: tensor.detach().cpu().numpy().astype(np.float32) for name, tensor in zip(names, inputs)}
-    return session.run(["actions", "k", "order", "vp"], feed)
+    return session.run(["actions", "k", "order", "vp", "threshold_mu_raw", "threshold_log_std"], feed)
 
 
 def _require_deployable_onnx(path: Path) -> list[str]:
@@ -241,10 +274,13 @@ def _require_deployable_onnx(path: Path) -> list[str]:
     return ops
 
 
-def _require_equal_outputs(torch_outputs: tuple[Tensor, Tensor, Tensor, Tensor], ort_outputs: list[np.ndarray]) -> None:
-    for name, torch_value, ort_value in zip(("actions", "k", "order", "vp"), torch_outputs, ort_outputs):
+def _require_equal_outputs(torch_outputs: tuple[Tensor, ...], ort_outputs: list[np.ndarray]) -> None:
+    for name, torch_value, ort_value in zip(("actions", "k", "order", "vp", "threshold_mu_raw", "threshold_log_std"), torch_outputs, ort_outputs):
         expected = torch_value.detach().cpu().numpy()
-        if not np.array_equal(expected, ort_value):
+        if name in {"threshold_mu_raw", "threshold_log_std"}:
+            if not np.allclose(expected, ort_value, atol=1e-5, rtol=1e-5):
+                raise RuntimeError(f"ONNX output mismatch for {name}: torch={expected.tolist()} ort={ort_value.tolist()}")
+        elif not np.array_equal(expected, ort_value):
             raise RuntimeError(f"ONNX output mismatch for {name}: torch={expected.tolist()} ort={ort_value.tolist()}")
 
 

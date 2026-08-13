@@ -13,15 +13,20 @@ from simulator.types import Action, GameOutput
 FEATURE_SCHEMA = "goldrush2_feature_v2"
 SPATIAL_CHANNELS = 43
 SCALAR_FEATURES = 10
-ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1"
+ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1_fast_threshold_v1"
+CANDIDATE_ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1"
 LEGACY_ACTION_HEAD_SCHEMA = "autoregressive_head_v1"
 CRITIC_FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v1"
 CRITIC_SPATIAL_CHANNELS = 26
 CRITIC_SCALAR_FEATURES = 17
+FAST_SCALAR_FEATURES = 2
+INITIAL_FAST_SCALARS = (0.8, 0.25)
 GRID_SIZE = 17
 MOVE_BUDGET = 6
 ACTION_COUNT = 5
 KO_COUNT = 14
+THRESHOLD_LOW = 4.0
+THRESHOLD_HIGH = 30.0
 OBSTACLE_KNOWN_CHANNEL = 20
 OBSTACLE_CHANNEL = 21
 OWN_UNIT0_CHANNEL = 24
@@ -47,6 +52,13 @@ class PolicyNetworkConfig:
     decoder_hidden: int = 128
     decoder_embedding: int = 16
     action_head_schema: str = ACTION_HEAD_SCHEMA
+    fast_scalar_features: int = FAST_SCALAR_FEATURES
+    threshold_initial: float = 12.0
+    threshold_hidden: tuple[int, int] = (128, 64)
+    threshold_log_std_initial: float = -1.3
+    threshold_log_std_min: float = -3.0
+    threshold_log_std_max: float = 0.0
+    threshold_entropy_coef: float = 0.0
     activation: str = "silu"
 
     @property
@@ -64,12 +76,15 @@ class PolicyAction:
     k: Tensor
     order: Tensor
     vp: Tensor
+    threshold_raw: Tensor
+    threshold_int: Tensor
     logprob: Tensor
     value: Tensor
     normalized_entropy: Tensor
     action_entropy: Tensor
     ko_entropy: Tensor
     vp_entropy: Tensor
+    threshold_entropy: Tensor
 
 
 @dataclass(frozen=True)
@@ -80,6 +95,7 @@ class PolicyEvaluation:
     action_entropy: Tensor
     ko_entropy: Tensor
     vp_entropy: Tensor
+    threshold_entropy: Tensor
 
 
 @dataclass(frozen=True)
@@ -87,15 +103,17 @@ class PolicyBcEvaluation:
     ko_logprob: Tensor
     action_logprob: Tensor
     vp_logprob: Tensor
+    threshold_logprob: Tensor
     value: Tensor
     normalized_entropy: Tensor
     action_entropy: Tensor
     ko_entropy: Tensor
     vp_entropy: Tensor
+    threshold_entropy: Tensor
 
     @property
     def logprob(self) -> Tensor:
-        return self.ko_logprob + self.action_logprob + self.vp_logprob
+        return self.ko_logprob + self.action_logprob + self.vp_logprob + self.threshold_logprob
 
 
 @dataclass(frozen=True)
@@ -138,6 +156,14 @@ class _DecodedActions:
     all_forced_actions_valid: Tensor
     final_unit0_position: Tensor
     final_unit1_position: Tensor
+
+
+@dataclass(frozen=True)
+class _ThresholdAction:
+    raw: Tensor
+    threshold_int: Tensor
+    logprob: Tensor
+    entropy: Tensor
 
 
 class SEResidualBlock(nn.Module):
@@ -302,9 +328,17 @@ class GoldRushPolicyNetwork(nn.Module):
             _activation(activation),
             nn.Linear(self.config.decoder_hidden, 1),
         )
+        threshold_layers: list[nn.Module] = []
+        threshold_input = self.config.actor_hidden + width * 2 + self.config.fast_scalar_features
+        for hidden_dim in self.config.threshold_hidden:
+            threshold_layers.extend((nn.Linear(threshold_input, hidden_dim), _activation(activation)))
+            threshold_input = hidden_dim
+        threshold_layers.append(nn.Linear(threshold_input, 1))
+        self.threshold_mlp = nn.Sequential(*threshold_layers)
+        self.threshold_log_std = nn.Parameter(torch.tensor(float(self.config.threshold_log_std_initial)))
 
         self.critic_mlp = nn.Sequential(
-            nn.Linear(width * 6, self.config.critic_hidden[0]),
+            nn.Linear(width * 6 + self.config.fast_scalar_features, self.config.critic_hidden[0]),
             _activation(activation),
             nn.Linear(self.config.critic_hidden[0], self.config.critic_hidden[1]),
             _activation(activation),
@@ -342,6 +376,13 @@ class GoldRushPolicyNetwork(nn.Module):
             raise TypeError("candidate_action_head final module must be nn.Linear")
         nn.init.zeros_(candidate_output.weight)
         nn.init.zeros_(candidate_output.bias)
+        threshold_output = self.threshold_mlp[-1]
+        if not isinstance(threshold_output, nn.Linear):
+            raise TypeError("threshold_mlp final module must be nn.Linear")
+        nn.init.zeros_(threshold_output.weight)
+        with torch.no_grad():
+            threshold_output.bias.fill_(_threshold_to_raw(float(self.config.threshold_initial)))
+            self.threshold_log_std.fill_(float(self.config.threshold_log_std_initial))
 
         vp_prior = torch.log(torch.tensor([0.90, 0.07, 0.03], dtype=self.vp_head.bias.dtype))
         with torch.no_grad():
@@ -367,7 +408,7 @@ class GoldRushPolicyNetwork(nn.Module):
             nn.init.zeros_(block.se_fc2.weight)
             nn.init.zeros_(block.se_fc2.bias)
 
-    def actor_parameters(self) -> tuple[nn.Parameter, ...]:
+    def ordinary_actor_parameters(self) -> tuple[nn.Parameter, ...]:
         modules = (
             self.actor_encoder,
             self.actor_mlp,
@@ -385,37 +426,54 @@ class GoldRushPolicyNetwork(nn.Module):
         )
         return tuple(parameter for module in modules for parameter in module.parameters())
 
+    def threshold_parameters(self) -> tuple[nn.Parameter, ...]:
+        return tuple(self.threshold_mlp.parameters()) + (self.threshold_log_std,)
+
+    def actor_parameters(self) -> tuple[nn.Parameter, ...]:
+        return self.ordinary_actor_parameters() + self.threshold_parameters()
+
     def critic_parameters(self) -> tuple[nn.Parameter, ...]:
         return tuple(self.critic_encoder.parameters()) + tuple(self.critic_mlp.parameters())
 
     def copy_actor_encoder_to_critic(self) -> None:
         raise RuntimeError("actor and privileged critic encoders use different feature schemas")
 
-    def forward(self, spatial_planes: Tensor, scalars: Tensor) -> PolicyAction:
-        return self.act_actor_only(spatial_planes, scalars, deterministic=True)
+    def forward(self, spatial_planes: Tensor, scalars: Tensor, fast_scalars: Tensor | None = None) -> PolicyAction:
+        return self.act_actor_only(spatial_planes, scalars, fast_scalars, deterministic=False)
 
     def act(
         self,
         spatial_planes: Tensor,
         scalars: Tensor,
-        critic_planes: Tensor,
-        critic_scalars: Tensor,
+        fast_scalars: Tensor,
+        critic_planes: Tensor | None = None,
+        critic_scalars: Tensor | None = None,
         *,
         deterministic: bool = False,
         generator: torch.Generator | None = None,
         sample_uniforms: Tensor | None = None,
     ) -> PolicyAction:
+        if critic_scalars is None:
+            if critic_planes is None:
+                raise TypeError("critic_planes and critic_scalars are required")
+            critic_scalars = critic_planes
+            critic_planes = fast_scalars
+            fast_scalars = self._default_fast_scalars(spatial_planes)
+        assert critic_planes is not None
         self._validate_actor_inputs(spatial_planes, scalars)
+        self._validate_fast_scalars(fast_scalars, spatial_planes)
         self._validate_critic_inputs(critic_planes, critic_scalars)
         self._validate_actor_critic_batch(spatial_planes, critic_planes)
         spatial_planes = spatial_planes.float()
         scalars = scalars.float()
+        fast_scalars = fast_scalars.float()
         critic_planes = critic_planes.float()
         critic_scalars = critic_scalars.float()
         encoded = self._encode_actor(spatial_planes, scalars)
-        value = self._critic_value(critic_planes, critic_scalars)
+        value = self._critic_value(critic_planes, critic_scalars, fast_scalars)
         return self._act_from_encoded(
             encoded,
+            fast_scalars=fast_scalars,
             value=value,
             deterministic=deterministic,
             generator=generator,
@@ -426,18 +484,23 @@ class GoldRushPolicyNetwork(nn.Module):
         self,
         spatial_planes: Tensor,
         scalars: Tensor,
+        fast_scalars: Tensor | None = None,
         *,
         deterministic: bool = False,
         generator: torch.Generator | None = None,
         sample_uniforms: Tensor | None = None,
     ) -> PolicyAction:
         self._validate_actor_inputs(spatial_planes, scalars)
+        fast_scalars = self._default_fast_scalars(spatial_planes) if fast_scalars is None else fast_scalars
+        self._validate_fast_scalars(fast_scalars, spatial_planes)
         spatial_planes = spatial_planes.float()
         scalars = scalars.float()
+        fast_scalars = fast_scalars.float()
         encoded = self._encode_actor(spatial_planes, scalars)
         value = torch.zeros(spatial_planes.shape[0], dtype=spatial_planes.dtype, device=spatial_planes.device)
         return self._act_from_encoded(
             encoded,
+            fast_scalars=fast_scalars,
             value=value,
             deterministic=deterministic,
             generator=generator,
@@ -448,14 +511,15 @@ class GoldRushPolicyNetwork(nn.Module):
         self,
         encoded: _EncodedState,
         *,
+        fast_scalars: Tensor,
         value: Tensor,
         deterministic: bool,
         generator: torch.Generator | None,
         sample_uniforms: Tensor | None,
     ) -> PolicyAction:
-        if sample_uniforms is not None and tuple(sample_uniforms.shape) != (encoded.actor_context.shape[0], MOVE_BUDGET + 2):
+        if sample_uniforms is not None and tuple(sample_uniforms.shape) != (encoded.actor_context.shape[0], MOVE_BUDGET + 3):
             raise ValueError(
-                f"sample_uniforms must have shape Bx{MOVE_BUDGET + 2}, got {tuple(sample_uniforms.shape)}"
+                f"sample_uniforms must have shape Bx{MOVE_BUDGET + 3}, got {tuple(sample_uniforms.shape)}"
             )
         ko_logits = self.ko_head(encoded.actor_context)
         vp_logits = self.vp_head(encoded.actor_context)
@@ -477,7 +541,15 @@ class GoldRushPolicyNetwork(nn.Module):
             deterministic=deterministic,
             forced_actions=None,
             generator=generator,
-            sample_uniforms=None if sample_uniforms is None else sample_uniforms[:, 2:],
+            sample_uniforms=None if sample_uniforms is None else sample_uniforms[:, 2 : 2 + MOVE_BUDGET],
+        )
+        threshold = self._select_threshold(
+            encoded,
+            decoded,
+            fast_scalars,
+            deterministic=deterministic,
+            generator=generator,
+            sample_uniform=None if sample_uniforms is None else sample_uniforms[:, -1],
         )
 
         ko_entropy = _normalized_entropy(ko_logits, math.log(KO_COUNT))
@@ -487,41 +559,63 @@ class GoldRushPolicyNetwork(nn.Module):
             k=torch.div(ko, 2, rounding_mode="floor"),
             order=torch.remainder(ko, 2),
             vp=vp,
-            logprob=ko_logprob + vp_logprob + decoded.logprob,
+            threshold_raw=threshold.raw,
+            threshold_int=threshold.threshold_int,
+            logprob=ko_logprob + vp_logprob + decoded.logprob + threshold.logprob,
             value=value,
-            normalized_entropy=0.0100 * decoded.entropy + 0.0040 * ko_entropy + 0.0003 * vp_entropy,
+            normalized_entropy=(
+                0.0100 * decoded.entropy
+                + 0.0040 * ko_entropy
+                + 0.0003 * vp_entropy
+                + self.config.threshold_entropy_coef * threshold.entropy
+            ),
             action_entropy=decoded.entropy,
             ko_entropy=ko_entropy,
             vp_entropy=vp_entropy,
+            threshold_entropy=threshold.entropy,
         )
 
     def evaluate_actions(
         self,
         spatial_planes: Tensor,
         scalars: Tensor,
+        fast_scalars: Tensor,
         critic_planes: Tensor,
         critic_scalars: Tensor,
         actions: Tensor,
         k: Tensor,
         order: Tensor,
         vp: Tensor,
+        threshold_raw: Tensor,
     ) -> PolicyEvaluation:
         self._validate_action_inputs(spatial_planes, actions, k, order, vp)
         self._validate_actor_inputs(spatial_planes, scalars)
+        self._validate_fast_scalars(fast_scalars, spatial_planes)
         self._validate_critic_inputs(critic_planes, critic_scalars)
         self._validate_actor_critic_batch(spatial_planes, critic_planes)
         spatial_planes = spatial_planes.float()
         scalars = scalars.float()
+        fast_scalars = fast_scalars.float()
         critic_planes = critic_planes.float()
         critic_scalars = critic_scalars.float()
-        evaluation = self._evaluate_actor_actions(spatial_planes, scalars, actions, k, order, vp)
+        evaluation = self._evaluate_actor_actions(
+            spatial_planes,
+            scalars,
+            actions,
+            k,
+            order,
+            vp,
+            fast_scalars=fast_scalars,
+            threshold_raw=threshold_raw,
+        )
         return PolicyEvaluation(
             logprob=evaluation.logprob,
-            value=self._critic_value(critic_planes, critic_scalars),
+            value=self._critic_value(critic_planes, critic_scalars, fast_scalars),
             normalized_entropy=evaluation.normalized_entropy,
             action_entropy=evaluation.action_entropy,
             ko_entropy=evaluation.ko_entropy,
             vp_entropy=evaluation.vp_entropy,
+            threshold_entropy=evaluation.threshold_entropy,
         )
 
     def evaluate_bc_actions(
@@ -547,6 +641,8 @@ class GoldRushPolicyNetwork(nn.Module):
         k: Tensor,
         order: Tensor,
         vp: Tensor,
+        fast_scalars: Tensor | None = None,
+        threshold_raw: Tensor | None = None,
     ) -> PolicyBcEvaluation:
         encoded = self._encode_actor(spatial_planes, scalars)
         ko = 2 * k.long() + order.long()
@@ -560,15 +656,30 @@ class GoldRushPolicyNetwork(nn.Module):
         vp_logprob = _logprob(vp_logits, vp.long())
         ko_entropy = _normalized_entropy(ko_logits, math.log(KO_COUNT))
         vp_entropy = _normalized_entropy(vp_logits, math.log(3.0))
+        threshold_logprob = torch.zeros(spatial_planes.shape[0], dtype=spatial_planes.dtype, device=spatial_planes.device)
+        threshold_entropy = torch.zeros_like(threshold_logprob)
+        if fast_scalars is not None:
+            if threshold_raw is None:
+                raise ValueError("threshold_raw is required when fast_scalars are provided")
+            threshold = self._evaluate_threshold(encoded, decoded, fast_scalars.float(), threshold_raw.float())
+            threshold_logprob = threshold.logprob
+            threshold_entropy = threshold.entropy
         return PolicyBcEvaluation(
             ko_logprob=ko_logprob,
             action_logprob=decoded.logprob,
             vp_logprob=vp_logprob,
+            threshold_logprob=threshold_logprob,
             value=torch.zeros(spatial_planes.shape[0], dtype=spatial_planes.dtype, device=spatial_planes.device),
-            normalized_entropy=0.0100 * decoded.entropy + 0.0040 * ko_entropy + 0.0003 * vp_entropy,
+            normalized_entropy=(
+                0.0100 * decoded.entropy
+                + 0.0040 * ko_entropy
+                + 0.0003 * vp_entropy
+                + self.config.threshold_entropy_coef * threshold_entropy
+            ),
             action_entropy=decoded.entropy,
             ko_entropy=ko_entropy,
             vp_entropy=vp_entropy,
+            threshold_entropy=threshold_entropy,
         )
 
     def _encode(self, spatial_planes: Tensor, scalars: Tensor) -> _EncodedState:
@@ -590,7 +701,7 @@ class GoldRushPolicyNetwork(nn.Module):
             unit1_position=encoded.unit1_position,
         )
 
-    def _critic_value(self, critic_planes: Tensor, critic_scalars: Tensor) -> Tensor:
+    def _critic_value(self, critic_planes: Tensor, critic_scalars: Tensor, fast_scalars: Tensor) -> Tensor:
         encoded = self.critic_encoder(critic_planes, critic_scalars)
         return self.critic_mlp(
             torch.cat(
@@ -601,10 +712,65 @@ class GoldRushPolicyNetwork(nn.Module):
                     encoded.own_unit1,
                     encoded.enemy_unit0,
                     encoded.enemy_unit1,
+                    fast_scalars,
                 ),
                 dim=1,
             )
         ).squeeze(-1)
+
+    def _select_threshold(
+        self,
+        encoded: _EncodedState,
+        decoded: _DecodedActions,
+        fast_scalars: Tensor,
+        *,
+        deterministic: bool,
+        generator: torch.Generator | None,
+        sample_uniform: Tensor | None,
+    ) -> _ThresholdAction:
+        mu = self._threshold_mu(encoded, decoded, fast_scalars)
+        log_std = self._threshold_log_std()
+        if deterministic:
+            raw = mu
+        elif sample_uniform is not None:
+            if sample_uniform.shape != mu.shape:
+                raise ValueError(f"threshold sample_uniform must have shape {tuple(mu.shape)}, got {tuple(sample_uniform.shape)}")
+            raw = mu + log_std.exp() * _standard_normal_icdf(sample_uniform.to(device=mu.device, dtype=mu.dtype))
+        else:
+            raw = mu + log_std.exp() * torch.randn(mu.shape, dtype=mu.dtype, device=mu.device, generator=generator)
+        return self._threshold_action(mu, log_std, raw)
+
+    def _evaluate_threshold(
+        self,
+        encoded: _EncodedState,
+        decoded: _DecodedActions,
+        fast_scalars: Tensor,
+        raw: Tensor,
+    ) -> _ThresholdAction:
+        mu = self._threshold_mu(encoded, decoded, fast_scalars)
+        log_std = self._threshold_log_std()
+        raw = raw.reshape(mu.shape).to(device=mu.device, dtype=mu.dtype)
+        return self._threshold_action(mu, log_std, raw)
+
+    def _threshold_mu(self, encoded: _EncodedState, decoded: _DecodedActions, fast_scalars: Tensor) -> Tensor:
+        final_unit0_local = _gather_position(encoded.spatial_features, decoded.final_unit0_position)
+        final_unit1_local = _gather_position(encoded.spatial_features, decoded.final_unit1_position)
+        return self.threshold_mlp(
+            torch.cat((encoded.actor_context, final_unit0_local, final_unit1_local, fast_scalars), dim=1)
+        ).squeeze(-1)
+
+    def _threshold_log_std(self) -> Tensor:
+        return self.threshold_log_std.clamp(
+            min=float(self.config.threshold_log_std_min),
+            max=float(self.config.threshold_log_std_max),
+        )
+
+    def _threshold_action(self, mu: Tensor, log_std: Tensor, raw: Tensor) -> _ThresholdAction:
+        threshold = THRESHOLD_LOW + (THRESHOLD_HIGH - THRESHOLD_LOW) * torch.sigmoid(raw)
+        threshold_int = torch.floor(threshold + 0.5).clamp(int(THRESHOLD_LOW), int(THRESHOLD_HIGH)).long()
+        logprob = _normal_logprob(raw, mu, log_std)
+        entropy = (0.5 * (1.0 + math.log(2.0 * math.pi)) + log_std).expand_as(mu)
+        return _ThresholdAction(raw=raw, threshold_int=threshold_int, logprob=logprob, entropy=entropy)
 
     def _decode(
         self,
@@ -777,6 +943,25 @@ class GoldRushPolicyNetwork(nn.Module):
                 f"critic_scalars is on {critic_scalars.device}"
             )
 
+    def _validate_fast_scalars(self, fast_scalars: Tensor, spatial_planes: Tensor) -> None:
+        if fast_scalars.ndim != 2:
+            raise ValueError(f"fast_scalars must have shape Bx{self.config.fast_scalar_features}, got {tuple(fast_scalars.shape)}")
+        if fast_scalars.shape != (spatial_planes.shape[0], self.config.fast_scalar_features):
+            raise ValueError(
+                f"fast_scalars must have shape Bx{self.config.fast_scalar_features}, got {tuple(fast_scalars.shape)}"
+            )
+        if fast_scalars.device != spatial_planes.device:
+            raise ValueError(
+                f"device mismatch: fast_scalars is on {fast_scalars.device}, spatial_planes is on {spatial_planes.device}"
+            )
+
+    def _default_fast_scalars(self, spatial_planes: Tensor) -> Tensor:
+        return torch.tensor(
+            INITIAL_FAST_SCALARS,
+            dtype=spatial_planes.dtype,
+            device=spatial_planes.device,
+        ).expand(spatial_planes.shape[0], -1)
+
     @staticmethod
     def _validate_actor_critic_batch(spatial_planes: Tensor, critic_planes: Tensor) -> None:
         if spatial_planes.shape[0] != critic_planes.shape[0]:
@@ -877,6 +1062,9 @@ def policy_action_is_finite(action: PolicyAction) -> bool:
                 action.action_entropy,
                 action.ko_entropy,
                 action.vp_entropy,
+                action.threshold_raw,
+                action.threshold_int.float(),
+                action.threshold_entropy,
             )
         ]
     )
@@ -935,6 +1123,24 @@ def _normalized_entropy(logits: Tensor, denominator: float) -> Tensor:
     return -(probabilities * log_probabilities).sum(dim=-1) / denominator
 
 
+def _normal_logprob(value: Tensor, mean: Tensor, log_std: Tensor) -> Tensor:
+    variance = torch.exp(2.0 * log_std)
+    return -0.5 * ((value - mean).pow(2) / variance + 2.0 * log_std + math.log(2.0 * math.pi))
+
+
+def _standard_normal_icdf(uniform: Tensor) -> Tensor:
+    eps = torch.finfo(uniform.dtype).eps
+    u = uniform.clamp(eps, 1.0 - eps)
+    return math.sqrt(2.0) * torch.erfinv(2.0 * u - 1.0)
+
+
+def _threshold_to_raw(threshold: float) -> float:
+    if not THRESHOLD_LOW < threshold < THRESHOLD_HIGH:
+        raise ValueError(f"threshold_initial must be in ({THRESHOLD_LOW}, {THRESHOLD_HIGH}), got {threshold}")
+    ratio = (threshold - THRESHOLD_LOW) / (THRESHOLD_HIGH - THRESHOLD_LOW)
+    return math.log(ratio / (1.0 - ratio))
+
+
 def _gather_unit(h: Tensor, unit_mask: Tensor) -> Tensor:
     mask = unit_mask.unsqueeze(1)
     numerator = (h * mask).sum(dim=(-2, -1))
@@ -967,8 +1173,30 @@ def _validate_config(config: PolicyNetworkConfig) -> None:
         raise ValueError(
             f"critic_scalar_features must be {CRITIC_SCALAR_FEATURES}, got {config.critic_scalar_features}"
         )
-    if config.action_head_schema != ACTION_HEAD_SCHEMA:
-        raise ValueError(f"action_head_schema must be {ACTION_HEAD_SCHEMA!r}, got {config.action_head_schema!r}")
+    if config.action_head_schema not in {ACTION_HEAD_SCHEMA, CANDIDATE_ACTION_HEAD_SCHEMA}:
+        raise ValueError(
+            f"action_head_schema must be {ACTION_HEAD_SCHEMA!r} or {CANDIDATE_ACTION_HEAD_SCHEMA!r}, "
+            f"got {config.action_head_schema!r}"
+        )
+    if config.fast_scalar_features != FAST_SCALAR_FEATURES:
+        raise ValueError(f"fast_scalar_features must be {FAST_SCALAR_FEATURES}, got {config.fast_scalar_features}")
+    if not THRESHOLD_LOW < float(config.threshold_initial) < THRESHOLD_HIGH:
+        raise ValueError(
+            f"threshold_initial must be in ({THRESHOLD_LOW}, {THRESHOLD_HIGH}), got {config.threshold_initial}"
+        )
+    if len(config.threshold_hidden) != 2:
+        raise ValueError("threshold_hidden must contain exactly two hidden sizes")
+    if any(int(value) <= 0 for value in config.threshold_hidden):
+        raise ValueError(f"threshold_hidden values must be positive, got {config.threshold_hidden}")
+    if config.threshold_log_std_min > config.threshold_log_std_max:
+        raise ValueError("threshold_log_std_min must be <= threshold_log_std_max")
+    if not config.threshold_log_std_min <= config.threshold_log_std_initial <= config.threshold_log_std_max:
+        raise ValueError(
+            "threshold_log_std_initial must be within "
+            f"[{config.threshold_log_std_min}, {config.threshold_log_std_max}], got {config.threshold_log_std_initial}"
+        )
+    if config.threshold_entropy_coef < 0.0:
+        raise ValueError(f"threshold_entropy_coef must be non-negative, got {config.threshold_entropy_coef}")
     if config.width <= 0:
         raise ValueError(f"width must be positive, got {config.width}")
     if config.residual_blocks <= 0:

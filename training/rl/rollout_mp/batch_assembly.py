@@ -45,12 +45,15 @@ def episode_payloads_to_batch(payloads: list[dict[str, Any]], transition_shared:
 
     actor_planes: list[Any] = []
     actor_scalars: list[Any] = []
+    fast_scalars: list[Any] = []
     critic_planes: list[Any] = []
     critic_scalars: list[Any] = []
     actions: list[Any] = []
     k: list[Any] = []
     order: list[Any] = []
     vp: list[Any] = []
+    threshold_raw: list[Any] = []
+    threshold_int: list[Any] = []
     old_logprob: list[Any] = []
     values: list[Any] = []
     rewards: list[Any] = []
@@ -75,12 +78,15 @@ def episode_payloads_to_batch(payloads: list[dict[str, Any]], transition_shared:
             )
         actor_planes.append(transition_shared.actor_planes[transition_slot, :episode_length])
         actor_scalars.append(transition_shared.actor_scalars[transition_slot, :episode_length])
+        fast_scalars.append(transition_shared.fast_scalars[transition_slot, :episode_length])
         critic_planes.append(transition_shared.critic_planes[transition_slot, :episode_length])
         critic_scalars.append(transition_shared.critic_scalars[transition_slot, :episode_length])
         actions.append(transition_shared.actions[transition_slot, :episode_length])
         k.append(transition_shared.k[transition_slot, :episode_length])
         order.append(transition_shared.order[transition_slot, :episode_length])
         vp.append(transition_shared.vp[transition_slot, :episode_length])
+        threshold_raw.append(transition_shared.threshold_raw[transition_slot, :episode_length])
+        threshold_int.append(transition_shared.threshold_int[transition_slot, :episode_length])
         old_logprob.append(transition_shared.old_logprob[transition_slot, :episode_length])
         values.append(transition_shared.value[transition_slot, :episode_length])
         rewards.append(transition_shared.reward[transition_slot, :episode_length])
@@ -99,12 +105,15 @@ def episode_payloads_to_batch(payloads: list[dict[str, Any]], transition_shared:
     return PpoBatch.from_arrays(
         spatial_planes=np.concatenate(actor_planes, axis=0),
         scalars=np.concatenate(actor_scalars, axis=0),
+        fast_scalars=np.concatenate(fast_scalars, axis=0),
         critic_planes=np.concatenate(critic_planes, axis=0),
         critic_scalars=np.concatenate(critic_scalars, axis=0),
         actions=np.concatenate(actions, axis=0),
         k=np.concatenate(k, axis=0),
         order=np.concatenate(order, axis=0),
         vp=np.concatenate(vp, axis=0),
+        threshold_raw=np.concatenate(threshold_raw, axis=0),
+        threshold_int=np.concatenate(threshold_int, axis=0),
         old_logprob=np.concatenate(old_logprob, axis=0),
         values=np.concatenate(values, axis=0),
         rewards=np.concatenate(rewards, axis=0),

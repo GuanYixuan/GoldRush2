@@ -47,10 +47,10 @@ threshold = low + (high - low) * sigmoid(threshold_raw)
 ```text
 low = 4
 high = 30
-initial_threshold ~= 8
+initial_threshold ~= 12
 ```
 
-`threshold=8` 已在 fast option 预研中显示较高触发率和 episode 层正收益；把 head 初始化到 8 可以让接入初期接近已有强 baseline。可见金币 `>30` 的情况很少，`high=30` 已基本能表达“关闭普通抢金 fast path”，同时比 `64/80` 保留更宽的有效 sigmoid 梯度区间。
+`threshold=8` 已在 fast option 预研中显示较高触发率和 episode 层正收益，但作为可学习 head 的默认初始化略偏激进。第一版默认初始化到 `12` 左右，使接入初期触发率更保守，同时仍保留从数据中下调 threshold 的空间。可见金币 `>30` 的情况很少，`high=30` 已基本能表达“关闭普通抢金 fast path”，同时比 `64/80` 保留更宽的有效 sigmoid 梯度区间。
 
 训练时把 `threshold_raw` 作为一个连续 stochastic action：
 
@@ -416,7 +416,7 @@ belief 更新发生在当前 neural model 推理前，使 `fast_scalars_now` 能
    - 先做 CRN eval，确认 wrapper on/off 的收益、炸弹损失和触发率。
 
 2. 连续 threshold head。
-   - 初始化到 `threshold ~= 8`。
+   - 初始化到 `threshold ~= 12`。
    - 只训练 threshold head 或使用较小学习率。
    - 记录 threshold 分布、触发率、fast effective score 和 regret。
 

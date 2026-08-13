@@ -115,6 +115,31 @@ def test_train_bc_and_init_ppo_from_checkpoint(tmp_path: Path) -> None:
     assert ppo_result.latest_checkpoint.exists()
 
 
+def test_bc_training_freezes_threshold_head(tmp_path: Path) -> None:
+    collect_dataset(
+        tmp_path / "dataset",
+        _collection_config(train_seeds=(140,), round_count=3, num_workers=1),
+    )
+    config = TrainBcConfig(
+        dataset_dir=tmp_path / "dataset",
+        output_dir=tmp_path / "bc_run",
+        epochs=1,
+        batch_size=4,
+        learning_rate=1.0e-3,
+        model=_small_model_config(),
+    )
+    torch.manual_seed(config.seed)
+    initial_model = GoldRushPolicyNetwork(config.model)
+
+    result = run_bc_training(config)
+    checkpoint = torch.load(result.latest_checkpoint, map_location="cpu", weights_only=False)
+    trained_state = checkpoint["model_state_dict"]
+
+    for key, value in initial_model.state_dict().items():
+        if key.startswith("threshold_mlp.") or key == "threshold_log_std":
+            assert torch.equal(trained_state[key], value)
+
+
 def _collection_config(
     *,
     train_seeds: tuple[int, ...],

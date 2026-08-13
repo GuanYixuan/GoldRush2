@@ -198,6 +198,7 @@ def run_eval_inference_batch(
     slots = [request.feature_slot for request in requests]
     spatial = torch.as_tensor(np.asarray(feature_shared.actor_planes[slots]), dtype=torch.float32, device=device)
     scalars = torch.as_tensor(np.asarray(feature_shared.actor_scalars[slots]), dtype=torch.float32, device=device)
+    fast_scalars = torch.as_tensor(np.asarray(feature_shared.fast_scalars[slots]), dtype=torch.float32, device=device)
     critic_spatial = torch.as_tensor(np.asarray(feature_shared.critic_planes[slots]), dtype=torch.float32, device=device)
     critic_scalars = torch.as_tensor(np.asarray(feature_shared.critic_scalars[slots]), dtype=torch.float32, device=device)
     stack_ns = time.perf_counter_ns() - stack_start
@@ -206,6 +207,7 @@ def run_eval_inference_batch(
         action = model.act(
             spatial,
             scalars,
+            fast_scalars,
             critic_spatial,
             critic_scalars,
             deterministic=deterministic,
@@ -257,11 +259,11 @@ def _request_uniform_row(request: EvalFeatureRequest) -> list[float]:
     if request.policy_sample_key is None:
         return []
     seed = _request_seed(request)
-    digest = hashlib.blake2b(str(seed).encode("utf-8"), digest_size=64).digest()
-    return [
-        (int.from_bytes(digest[index * 8 : (index + 1) * 8], byteorder="little", signed=False) + 0.5) / 2**64
-        for index in range(8)
-    ]
+    values: list[float] = []
+    for index in range(9):
+        digest = hashlib.blake2b(f"{seed}|{index}".encode("utf-8"), digest_size=8).digest()
+        values.append((int.from_bytes(digest, byteorder="little", signed=False) + 0.5) / 2**64)
+    return values
 
 
 def _request_seed(request: EvalFeatureRequest) -> int:

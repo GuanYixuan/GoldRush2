@@ -212,6 +212,7 @@ def run_inference_batch(
     feature_slots = [request.feature_slot for request in requests]
     spatial = torch.as_tensor(np.asarray(feature_shared.actor_planes[feature_slots]), dtype=torch.float32, device=device)
     scalars = torch.as_tensor(np.asarray(feature_shared.actor_scalars[feature_slots]), dtype=torch.float32, device=device)
+    fast_scalars = torch.as_tensor(np.asarray(feature_shared.fast_scalars[feature_slots]), dtype=torch.float32, device=device)
     critic_spatial = torch.as_tensor(
         np.asarray(feature_shared.critic_planes[feature_slots]), dtype=torch.float32, device=device
     )
@@ -221,7 +222,7 @@ def run_inference_batch(
     stack_ns = time.perf_counter_ns() - stack_start
     model_sample_start = time.perf_counter_ns()
     with torch.no_grad():
-        action = model.act(spatial, scalars, critic_spatial, critic_scalars)
+        action = model.act(spatial, scalars, fast_scalars, critic_spatial, critic_scalars)
         if not policy_action_is_finite(action):
             raise SimulatorRuleError("multiprocess rollout model produced NaN or Inf")
     sync(device)
@@ -232,6 +233,8 @@ def run_inference_batch(
     k_cpu = action.k.detach().cpu().tolist()
     order_cpu = action.order.detach().cpu().tolist()
     vp_cpu = action.vp.detach().cpu().tolist()
+    threshold_raw_cpu = action.threshold_raw.detach().cpu().tolist()
+    threshold_int_cpu = action.threshold_int.detach().cpu().tolist()
     logprob_cpu = action.logprob.detach().cpu().tolist()
     value_cpu = action.value.detach().cpu().tolist()
     for batch_index, request in enumerate(requests):
@@ -246,6 +249,8 @@ def run_inference_batch(
                     "order": int(order_cpu[batch_index]),
                     "vp": int(vp_cpu[batch_index]),
                 },
+                "threshold_raw": float(threshold_raw_cpu[batch_index]),
+                "threshold_int": int(threshold_int_cpu[batch_index]),
                 "old_logprob": float(logprob_cpu[batch_index]),
                 "value": float(value_cpu[batch_index]),
             }

@@ -31,6 +31,8 @@ class PolicyNetworkTests(unittest.TestCase):
         self.assertEqual(tuple(output.k.shape), (2,))
         self.assertEqual(tuple(output.order.shape), (2,))
         self.assertEqual(tuple(output.vp.shape), (2,))
+        self.assertEqual(tuple(output.threshold_raw.shape), (2,))
+        self.assertEqual(tuple(output.threshold_int.shape), (2,))
         self.assertEqual(tuple(output.logprob.shape), (2,))
         self.assertEqual(tuple(output.value.shape), (2,))
 
@@ -63,6 +65,10 @@ class PolicyNetworkTests(unittest.TestCase):
         candidate_output = model.candidate_action_head[-1]
         self.assertEqual(torch.count_nonzero(candidate_output.weight).item(), 0)
         self.assertEqual(torch.count_nonzero(candidate_output.bias).item(), 0)
+        threshold_output = model.threshold_mlp[-1]
+        self.assertEqual(torch.count_nonzero(threshold_output.weight).item(), 0)
+        threshold_int = model.act_actor_only(*_feature_tensors(batch_size=1), deterministic=True).threshold_int.item()
+        self.assertEqual(threshold_int, 12)
 
         vp_prior = torch.softmax(model.vp_head.bias.detach(), dim=0)
         self.assertTrue(torch.allclose(vp_prior, torch.tensor([0.90, 0.07, 0.03]), atol=1e-6))
@@ -119,6 +125,8 @@ class PolicyNetworkTests(unittest.TestCase):
 
         self.assertIsInstance(game_output, GameOutput)
         self.assertEqual(tuple(action.actions.shape), (4, 6))
+        self.assertEqual(tuple(action.threshold_raw.shape), (4,))
+        self.assertEqual(tuple(action.threshold_int.shape), (4,))
         self.assertEqual(tuple(action.logprob.shape), (4,))
         self.assertEqual(tuple(action.normalized_entropy.shape), (4,))
         self.assertTrue(torch.isfinite(action.logprob).all().item())
@@ -153,7 +161,7 @@ class PolicyNetworkTests(unittest.TestCase):
         model = _small_model()
         spatial, scalars = _feature_tensors(batch_size=2)
         critic_spatial, critic_scalars = _critic_feature_tensors(batch_size=2)
-        uniforms = torch.rand(2, 8, generator=torch.Generator().manual_seed(456))
+        uniforms = torch.rand(2, 9, generator=torch.Generator().manual_seed(456))
 
         first = model.act(spatial, scalars, critic_spatial, critic_scalars, sample_uniforms=uniforms)
         second = model.act(spatial, scalars, critic_spatial, critic_scalars, sample_uniforms=uniforms)
@@ -185,12 +193,14 @@ class PolicyNetworkTests(unittest.TestCase):
             evaluation = model.evaluate_actions(
                 spatial,
                 scalars,
+                _fast_scalars(batch_size=8),
                 critic_spatial,
                 critic_scalars,
                 action.actions,
                 action.k,
                 action.order,
                 action.vp,
+                action.threshold_raw,
             )
 
         self.assertTrue(torch.allclose(action.logprob, evaluation.logprob, atol=1e-6, rtol=1e-6))
@@ -212,22 +222,26 @@ class PolicyNetworkTests(unittest.TestCase):
             actor_changed_eval = model.evaluate_actions(
                 changed_actor,
                 scalars,
+                _fast_scalars(batch_size=2),
                 critic_spatial,
                 critic_scalars,
                 base.actions,
                 base.k,
                 base.order,
                 base.vp,
+                base.threshold_raw,
             )
             base_eval = model.evaluate_actions(
                 spatial,
                 scalars,
+                _fast_scalars(batch_size=2),
                 critic_spatial,
                 critic_scalars,
                 base.actions,
                 base.k,
                 base.order,
                 base.vp,
+                base.threshold_raw,
             )
 
         self.assertTrue(torch.equal(base.actions, critic_changed.actions))
@@ -335,11 +349,13 @@ class PolicyNetworkTests(unittest.TestCase):
             model.evaluate_actions(
                 spatial,
                 scalars,
+                _fast_scalars(batch_size=1),
                 *_critic_feature_tensors(batch_size=1),
                 actions,
                 torch.tensor([6]),
                 torch.tensor([0]),
                 torch.tensor([0]),
+                torch.tensor([0.0]),
             )
 
     def test_blocked_forced_step_keeps_position_before_later_step(self) -> None:
@@ -449,6 +465,10 @@ def _critic_feature_tensors(
     spatial[:, 11, 2, 14] = 1.0
     spatial[:, 12, 14, 2] = 1.0
     return spatial, scalars
+
+
+def _fast_scalars(*, batch_size: int) -> torch.Tensor:
+    return torch.tensor([[0.8, 0.25]], dtype=torch.float32).expand(batch_size, -1).clone()
 
 
 def _feature_dict() -> dict[str, object]:

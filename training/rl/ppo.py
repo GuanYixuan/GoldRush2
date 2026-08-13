@@ -12,6 +12,7 @@ from policy_runtime import FeatureExtractor
 from simulator.errors import SimulatorRuleError
 from simulator.types import GameOutput
 from training.models import (
+    INITIAL_FAST_SCALARS,
     GoldRushPolicyNetwork,
     PolicyEvaluation,
     policy_action_to_game_output,
@@ -122,12 +123,14 @@ def evaluate_actions(model: GoldRushPolicyNetwork, batch: PpoBatch | PpoMiniBatc
     return model.evaluate_actions(
         batch.spatial_planes,
         batch.scalars,
+        batch.fast_scalars,
         batch.critic_planes,
         batch.critic_scalars,
         batch.actions,
         batch.k,
         batch.order,
         batch.vp,
+        batch.threshold_raw,
     )
 
 
@@ -349,8 +352,9 @@ def _collect_one_ppo_episode(
         critic_features = _extract_critic_features(env, agent_player_id)
         critic_planes = torch.as_tensor(critic_features["planes"], dtype=torch.float32, device=device).unsqueeze(0)
         critic_scalars = torch.as_tensor(critic_features["scalars"], dtype=torch.float32, device=device).unsqueeze(0)
+        fast_scalars = torch.tensor(INITIAL_FAST_SCALARS, dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
-            policy_action = model.act(spatial_planes, scalars, critic_planes, critic_scalars)
+            policy_action = model.act(spatial_planes, scalars, fast_scalars, critic_planes, critic_scalars)
             if not policy_action_is_finite(policy_action):
                 raise SimulatorRuleError("PPO rollout model produced NaN or Inf")
         game_output = policy_action_to_game_output(policy_action)
@@ -360,12 +364,15 @@ def _collect_one_ppo_episode(
             PpoTransition(
                 spatial_planes=spatial_planes.squeeze(0).detach().cpu(),
                 scalars=scalars.squeeze(0).detach().cpu(),
+                fast_scalars=fast_scalars.squeeze(0).detach().cpu(),
                 critic_planes=critic_planes.squeeze(0).detach().cpu(),
                 critic_scalars=critic_scalars.squeeze(0).detach().cpu(),
                 actions=policy_action.actions.squeeze(0).detach().cpu(),
                 k=policy_action.k.squeeze(0).detach().cpu(),
                 order=policy_action.order.squeeze(0).detach().cpu(),
                 vp=policy_action.vp.squeeze(0).detach().cpu(),
+                threshold_raw=policy_action.threshold_raw.squeeze(0).detach().cpu(),
+                threshold_int=policy_action.threshold_int.squeeze(0).detach().cpu(),
                 old_logprob=policy_action.logprob.squeeze(0).detach().cpu(),
                 value=policy_action.value.squeeze(0).detach().cpu(),
                 reward=float(step.reward),

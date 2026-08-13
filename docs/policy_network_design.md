@@ -238,12 +238,12 @@ threshold_int = clamp(threshold_int, 4, 30)
 第一版使用全局 learnable `threshold_log_std`，不做 state-dependent std。推荐初始化：
 
 ```text
-initial_threshold = 8
-mu_bias = logit((8 - 4) / (30 - 4)) ~= -1.705
+initial_threshold = 12
+mu_bias = logit((12 - 4) / (30 - 4)) ~= -0.811
 threshold_log_std ~= -1.3
 ```
 
-`threshold_mlp` 最后一层权重为 `0`，bias 为 `mu_bias`，使接入初期 `threshold ~= 8`。`threshold_log_std` 训练和导出时应 clamp 到稳定范围，例如 `[-3.0, 0.0]`。
+`threshold_mlp` 最后一层权重为 `0`，bias 为 `mu_bias`，使接入初期 `threshold ~= 12`。`threshold_log_std` 训练和导出时应 clamp 到稳定范围，例如 `[-3.0, 0.0]`。
 
 部署默认也使用 stochastic action 口径。C++ runtime 应从模型输出的分布参数采样普通动作和 `threshold_raw`，再执行同一 sigmoid 与整数化逻辑；随机流必须由 runtime 显式维护，避免训练、评估和平台提交之间出现隐式语义漂移。
 
@@ -383,7 +383,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 
 - `ko/vp/decoder_action` 输出层使用 `std=0.01` 小初始化。
 - `candidate_action_head` 最后一层权重和 bias 为 0，使 residual 初始严格为 0。
-- `threshold_mlp` 最后一层权重为 0，bias 为 `logit((8 - 4) / (30 - 4)) ~= -1.705`。
+- `threshold_mlp` 最后一层权重为 0，bias 为 `logit((12 - 4) / (30 - 4)) ~= -0.811`。
 - `threshold_log_std` 初始约为 `-1.3`，训练时 clamp 到稳定范围。
 - `vp` bias 保持初始先验 `(0.90,0.07,0.03)`。
 - GRU input weight 使用 Xavier，hidden weight 使用 orthogonal，bias 为 0。
@@ -406,7 +406,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - 非法动作不更新位置的规则参考对照。
 - rollout 与 teacher forcing logprob 等价。
 - candidate-cell residual head 初始为零扰动；旧 head checkpoint inflation 后在同一随机种子或 deterministic 检查下官方动作完全等价。
-- fast threshold head 初始 `threshold ~= 8`，旧 checkpoint inflation 后官方动作完全等价且 threshold 输出固定在 8 附近。
+- fast threshold head 初始 `threshold ~= 12`，旧 checkpoint inflation 后官方动作完全等价且 threshold 输出固定在 12 附近。
 - threshold raw teacher forcing logprob 等价，部署 stochastic 采样语义与训练分布一致。
 - PPO 双输入中 actor feature 只影响 policy/logprob，critic feature 只影响 value。
 - critic 四角色 gather 的 channel index、shape 和 P1/P2 视角。

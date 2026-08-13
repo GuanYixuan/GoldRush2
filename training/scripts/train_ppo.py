@@ -888,7 +888,12 @@ def _map_bc_actor_key(key: str) -> str | None:
 
 
 def _is_actor_state_key(key: str) -> bool:
-    return not (key.startswith("critic_encoder.") or key.startswith("critic_mlp."))
+    return not (
+        key.startswith("critic_encoder.")
+        or key.startswith("critic_mlp.")
+        or key.startswith("threshold_mlp.")
+        or key == "threshold_log_std"
+    )
 
 
 def _model_config_from_checkpoint(checkpoint: dict[str, Any]) -> PolicyNetworkConfig:
@@ -909,6 +914,13 @@ def _model_config_from_checkpoint(checkpoint: dict[str, Any]) -> PolicyNetworkCo
         decoder_hidden=int(raw["decoder_hidden"]),
         decoder_embedding=int(raw["decoder_embedding"]),
         action_head_schema=str(raw.get("action_head_schema", "autoregressive_head_v1")),
+        fast_scalar_features=int(raw.get("fast_scalar_features", 2)),
+        threshold_initial=float(raw.get("threshold_initial", 12.0)),
+        threshold_hidden=tuple(int(value) for value in raw.get("threshold_hidden", (128, 64))),
+        threshold_log_std_initial=float(raw.get("threshold_log_std_initial", -1.3)),
+        threshold_log_std_min=float(raw.get("threshold_log_std_min", -3.0)),
+        threshold_log_std_max=float(raw.get("threshold_log_std_max", 0.0)),
+        threshold_entropy_coef=float(raw.get("threshold_entropy_coef", 0.0)),
         activation=str(raw["activation"]),
     )
 

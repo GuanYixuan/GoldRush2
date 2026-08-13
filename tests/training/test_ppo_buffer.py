@@ -14,6 +14,7 @@ class PpoBufferTests(unittest.TestCase):
         self.assertEqual(batch.transition_count, 1)
         self.assertEqual(tuple(batch.spatial_planes.shape), (1, 43, 17, 17))
         self.assertEqual(tuple(batch.scalars.shape), (1, 10))
+        self.assertEqual(tuple(batch.fast_scalars.shape), (1, 2))
         self.assertEqual(tuple(batch.critic_planes.shape), (1, 26, 17, 17))
         self.assertEqual(tuple(batch.critic_scalars.shape), (1, 17))
         self.assertEqual(tuple(batch.actions.shape), (1, 6))
@@ -24,12 +25,15 @@ class PpoBufferTests(unittest.TestCase):
         batch = PpoBatch.from_arrays(
             spatial_planes=torch.zeros(2, 43, 17, 17),
             scalars=torch.zeros(2, 10),
+            fast_scalars=torch.zeros(2, 2),
             critic_planes=torch.zeros(2, 26, 17, 17),
             critic_scalars=torch.zeros(2, 17),
             actions=torch.tensor([[4, 4, 4, 4, 4, 4], [0, 1, 2, 3, 4, 0]]),
             k=torch.tensor([3, 2]),
             order=torch.tensor([0, 1]),
             vp=torch.tensor([0, 2]),
+            threshold_raw=torch.tensor([-1.0, 0.0]),
+            threshold_int=torch.tensor([12, 17]),
             old_logprob=torch.tensor([-1.0, -2.0]),
             values=torch.tensor([0.0, 0.5]),
             rewards=torch.tensor([0.0, 1.0]),
@@ -52,12 +56,15 @@ class PpoBufferTests(unittest.TestCase):
         batch = PpoBatch.from_arrays(
             spatial_planes=torch.zeros(3, 43, 17, 17),
             scalars=torch.zeros(3, 10),
+            fast_scalars=torch.zeros(3, 2),
             critic_planes=torch.zeros(3, 26, 17, 17),
             critic_scalars=torch.zeros(3, 17),
             actions=torch.zeros(3, 6),
             k=torch.zeros(3),
             order=torch.zeros(3),
             vp=torch.zeros(3),
+            threshold_raw=torch.zeros(3),
+            threshold_int=torch.full((3,), 12),
             old_logprob=torch.zeros(3),
             values=torch.zeros(3),
             rewards=torch.tensor([1.0, 0.0, 2.0]),
@@ -136,12 +143,15 @@ def _transition(
     return PpoTransition(
         spatial_planes=torch.zeros(43, 17, 17),
         scalars=torch.zeros(10),
+        fast_scalars=torch.tensor([0.8, 0.25]),
         critic_planes=torch.zeros(26, 17, 17),
         critic_scalars=torch.zeros(17),
         actions=torch.tensor([4, 4, 4, 4, 4, 4]),
         k=torch.tensor(3),
         order=torch.tensor(0),
         vp=torch.tensor(0),
+        threshold_raw=torch.tensor(-1.0),
+        threshold_int=torch.tensor(12),
         old_logprob=torch.tensor(-1.0),
         value=torch.tensor(value),
         reward=reward,

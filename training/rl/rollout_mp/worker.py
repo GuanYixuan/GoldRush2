@@ -9,6 +9,7 @@ from typing import Any
 from policy_runtime import FeatureExtractor
 from simulator.errors import SimulatorRuleError
 from simulator.types import GameOutput
+from training.models import INITIAL_FAST_SCALARS
 from training.rl.env import SingleAgentGoldRushEnv
 from training.rl.privileged_critic_features import extract_privileged_critic_features
 
@@ -135,10 +136,12 @@ def run_worker_episode(
         critic_features = _extract_critic_features(env, task.agent_player_id, int(static_config["round_count"]))
         actor_planes = np.asarray(actor_features["planes"], dtype=np.float32)
         actor_scalars = np.asarray(actor_features["scalars"], dtype=np.float32)
+        fast_scalars = np.asarray(INITIAL_FAST_SCALARS, dtype=np.float32)
         critic_planes = np.asarray(critic_features["planes"], dtype=np.float32)
         critic_scalars = np.asarray(critic_features["scalars"], dtype=np.float32)
         feature_shared.actor_planes[worker_id, ...] = actor_planes
         feature_shared.actor_scalars[worker_id, ...] = actor_scalars
+        feature_shared.fast_scalars[worker_id, ...] = fast_scalars
         feature_shared.critic_planes[worker_id, ...] = critic_planes
         feature_shared.critic_scalars[worker_id, ...] = critic_scalars
         request_id = f"{task.task_id}-round-{request_index:04d}"
@@ -185,12 +188,15 @@ def run_worker_episode(
         _add_event_counts(episode_events, step.info["events"])
         transition_shared.actor_planes[transition_slot, request_index, ...] = actor_planes
         transition_shared.actor_scalars[transition_slot, request_index, ...] = actor_scalars
+        transition_shared.fast_scalars[transition_slot, request_index, ...] = fast_scalars
         transition_shared.critic_planes[transition_slot, request_index, ...] = critic_planes
         transition_shared.critic_scalars[transition_slot, request_index, ...] = critic_scalars
         transition_shared.actions[transition_slot, request_index, :] = tuple(int(value) for value in game_output.actions)
         transition_shared.k[transition_slot, request_index] = int(game_output.k)
         transition_shared.order[transition_slot, request_index] = int(game_output.order)
         transition_shared.vp[transition_slot, request_index] = int(game_output.vp)
+        transition_shared.threshold_raw[transition_slot, request_index] = float(action_msg["threshold_raw"])
+        transition_shared.threshold_int[transition_slot, request_index] = int(action_msg["threshold_int"])
         transition_shared.old_logprob[transition_slot, request_index] = float(action_msg["old_logprob"])
         transition_shared.value[transition_slot, request_index] = float(action_msg["value"])
         transition_shared.reward[transition_slot, request_index] = float(step.reward)
