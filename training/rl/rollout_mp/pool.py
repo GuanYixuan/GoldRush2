@@ -293,6 +293,7 @@ def _worker_static_config(
         "spawn": sampler.spawn,
         "reward_fn": sampler.reward_fn,
         "transition_info_mode": config.transition_info_mode,
+        "enable_fast_runtime_features": bool(config.enable_fast_runtime_features),
         "feature_shared_memory": feature_shared.config(),
         "round_count": sampler.env_config.episode.rules.round_count,
     }

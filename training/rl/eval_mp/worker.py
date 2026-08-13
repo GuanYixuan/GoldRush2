@@ -6,7 +6,7 @@ import traceback
 from dataclasses import replace
 from typing import Any
 
-from policy_runtime import FeatureExtractor
+from policy_runtime import FastRuntimeState, FeatureExtractor
 from simulator.errors import SimulatorRuleError
 from simulator.types import GameOutput
 from training.models import INITIAL_FAST_SCALARS
@@ -88,19 +88,28 @@ def run_worker_episode(
             "opponent_spec": reset.info["opponent_spec"],
         }
     )
-    extractor = FeatureExtractor(player_id=task.agent_player_id)
+    use_fast_runtime_features = bool(static_config.get("enable_fast_runtime_features", False))
+    extractor = None if use_fast_runtime_features else FeatureExtractor(player_id=task.agent_player_id)
+    fast_runtime = FastRuntimeState(player_id=task.agent_player_id) if use_fast_runtime_features else None
     observation = reset.observation
     episode_events = _empty_event_counts()
     request_index = 0
 
     while observation is not None:
-        actor_features = extractor.observe(observation)
+        if fast_runtime is None:
+            assert extractor is not None
+            actor_features = extractor.observe(observation)
+            fast_scalars = np.asarray(INITIAL_FAST_SCALARS, dtype=np.float32)
+        else:
+            prepared = fast_runtime.prepare_neural(observation)
+            actor_features = prepared["actor_features"]
+            fast_scalars = np.asarray(prepared["fast_scalars"], dtype=np.float32)
         if actor_features["feature_schema"] != "goldrush2_feature_v2":
             raise SimulatorRuleError(f"unexpected feature schema: {actor_features['feature_schema']!r}")
         critic_features = _extract_critic_features(env, task.agent_player_id, task.round_count)
         feature_shared.actor_planes[worker_id, ...] = np.asarray(actor_features["planes"], dtype=np.float32)
         feature_shared.actor_scalars[worker_id, ...] = np.asarray(actor_features["scalars"], dtype=np.float32)
-        feature_shared.fast_scalars[worker_id, ...] = np.asarray(INITIAL_FAST_SCALARS, dtype=np.float32)
+        feature_shared.fast_scalars[worker_id, ...] = fast_scalars
         feature_shared.critic_planes[worker_id, ...] = np.asarray(critic_features["planes"], dtype=np.float32)
         feature_shared.critic_scalars[worker_id, ...] = np.asarray(critic_features["scalars"], dtype=np.float32)
 
@@ -137,7 +146,11 @@ def run_worker_episode(
             order=int(payload["order"]),
             vp=int(payload["vp"]),
         )
-        extractor.commit_action(output)
+        if fast_runtime is None:
+            assert extractor is not None
+            extractor.commit_action(output)
+        else:
+            fast_runtime.commit_neural(output)
         env_step_start = time.perf_counter_ns()
         step = env.step(output)
         profile_stats["env_step_ns"] = profile_stats.get("env_step_ns", 0) + (time.perf_counter_ns() - env_step_start)

@@ -119,6 +119,7 @@ class ParallelEvalPool:
                 "map_pool": self.map_pool,
                 "spawn": self.spawn,
                 "reward_fn": self.reward_fn,
+                "enable_fast_runtime_features": bool(self.config.enable_fast_runtime_features),
                 "feature_shared_memory": self.feature_shared.config(),
             }
             self.processes = [

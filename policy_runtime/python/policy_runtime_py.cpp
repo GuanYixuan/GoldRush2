@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include "policy_runtime/fast_option.h"
 #include "policy_runtime/feature_extractor.h"
 
 namespace py = pybind11;
@@ -187,6 +188,65 @@ py::dict feature_output_to_python(const policy_runtime::FeatureOutput& output) {
     return result;
 }
 
+py::dict game_output_to_python(const GameOutput& output) {
+    py::tuple actions(S);
+    for (int i = 0; i < S; ++i) {
+        actions[i] = output.actions[i];
+    }
+    py::dict result;
+    result["actions"] = actions;
+    result["k"] = output.k;
+    result["order"] = output.order;
+    result["vp"] = output.vp;
+    return result;
+}
+
+py::dict fast_diagnostics_to_python(const policy_runtime::FastDiagnostics& diagnostics) {
+    py::dict result;
+    result["fast_success"] = diagnostics.fast_success;
+    result["fast_miss_no_target"] = diagnostics.fast_miss_no_target;
+    result["fast_path_fail"] = diagnostics.fast_path_fail;
+    result["neural_fallback"] = diagnostics.neural_fallback;
+    result["fast_nonstay"] = diagnostics.fast_nonstay;
+    result["fast_effective_updates"] = diagnostics.fast_effective_updates;
+    result["fast_effective_score_sum"] = diagnostics.fast_effective_score_sum;
+    result["fast_expected_gain_sum"] = diagnostics.fast_expected_gain_sum;
+    result["fast_actual_delta_sum"] = diagnostics.fast_actual_delta_sum;
+    result["one_step_fast_delta_sum"] = diagnostics.one_step_fast_delta_sum;
+    return result;
+}
+
+const char* fast_status_name(policy_runtime::FastStatus status) {
+    switch (status) {
+        case policy_runtime::FastStatus::Success:
+            return "success";
+        case policy_runtime::FastStatus::MissNoTarget:
+            return "miss_no_target";
+        case policy_runtime::FastStatus::PathFail:
+            return "path_fail";
+    }
+    return "unknown";
+}
+
+py::dict fast_try_result_to_python(const policy_runtime::FastTryResult& result) {
+    py::dict payload;
+    payload["status"] = fast_status_name(result.status);
+    payload["success"] = result.status == policy_runtime::FastStatus::Success;
+    payload["output"] = game_output_to_python(result.output);
+    payload["role"] = result.role;
+    payload["target"] = py::make_tuple(result.target.row, result.target.col);
+    payload["action_count"] = result.action_count;
+    return payload;
+}
+
+py::dict neural_prepare_result_to_python(const policy_runtime::NeuralPrepareResult& result) {
+    py::dict payload;
+    payload["actor_features"] = feature_output_to_python(result.actor_features);
+    payload["fast_scalars"] = py::make_tuple(result.fast_scalars[0], result.fast_scalars[1]);
+    payload["diagnostics"] = fast_diagnostics_to_python(result.diagnostics);
+    return payload;
+}
+
 }  // namespace
 
 PYBIND11_MODULE(_runtime, module) {
@@ -210,4 +270,64 @@ PYBIND11_MODULE(_runtime, module) {
                 extractor.commit_action(game_output_from_python(game_output));
             },
             py::arg("game_output"));
+
+    py::class_<policy_runtime::FastRuntimeState>(module, "FastRuntimeState")
+        .def(py::init<int>(), py::arg("player_id") = 1)
+        .def("reset", &policy_runtime::FastRuntimeState::reset, py::arg("player_id"))
+        .def("fast_scalars", &policy_runtime::FastRuntimeState::fast_scalars)
+        .def("threshold_int", &policy_runtime::FastRuntimeState::threshold_int)
+        .def("pending_valid", &policy_runtime::FastRuntimeState::pending_valid)
+        .def(
+            "diagnostics",
+            [](const policy_runtime::FastRuntimeState& state) {
+                return fast_diagnostics_to_python(state.diagnostics());
+            })
+        .def("set_next_threshold", &policy_runtime::FastRuntimeState::set_next_threshold, py::arg("threshold_int"))
+        .def(
+            "try_fast",
+            [](policy_runtime::FastRuntimeState& state, const py::object& game_input) {
+                return fast_try_result_to_python(state.try_fast(game_input_from_python(game_input)));
+            },
+            py::arg("game_input"))
+        .def(
+            "prepare_neural",
+            [](policy_runtime::FastRuntimeState& state, const py::object& game_input) {
+                return neural_prepare_result_to_python(state.prepare_neural(game_input_from_python(game_input)));
+            },
+            py::arg("game_input"))
+        .def(
+            "commit_neural",
+            [](policy_runtime::FastRuntimeState& state, const py::object& game_output) {
+                state.commit_neural(game_output_from_python(game_output));
+            },
+            py::arg("game_output"));
+
+    module.def(
+        "try_fast_gold_grab",
+        [](const py::object& game_input, int threshold_int) {
+            GameOutput output{};
+            policy_runtime::FastTryResult result{};
+            policy_runtime::try_fast_gold_grab(game_input_from_python(game_input), threshold_int, &output, &result);
+            return fast_try_result_to_python(result);
+        },
+        py::arg("game_input"),
+        py::arg("threshold_int"));
+    module.def(
+        "simulate_known_gold_pickups",
+        [](const py::object& game_input, const py::object& game_output, int role) {
+            return policy_runtime::simulate_known_gold_pickups(
+                game_input_from_python(game_input),
+                game_output_from_python(game_output),
+                role);
+        },
+        py::arg("game_input"),
+        py::arg("game_output"),
+        py::arg("role"));
+    module.def(
+        "infer_fast_role",
+        [](const py::object& game_input, const py::object& game_output) {
+            return policy_runtime::infer_fast_role(game_input_from_python(game_input), game_output_from_python(game_output));
+        },
+        py::arg("game_input"),
+        py::arg("game_output"));
 }

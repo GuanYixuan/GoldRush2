@@ -95,6 +95,26 @@ class ParallelEvalTests(unittest.TestCase):
         self.assertEqual(second_stats["eval_worker_all_ready_ms"], 0.0)
         self.assertEqual(second_stats["eval_worker_ready_count"], 2)
 
+    def test_parallel_eval_fast_runtime_feature_mode_runs(self) -> None:
+        model = _small_model()
+        summaries, stats = evaluate_parallel(
+            model,
+            _tasks(seed=7),
+            env_config=SingleAgentEnvConfig(episode=_one_round_episode(), opponent_spec=_stay_opponent_spec()),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+            device="cpu",
+            config=ParallelEvalConfig(
+                num_workers=2,
+                max_inference_batch_size=4,
+                inference_timeout_ms=1.0,
+                enable_fast_runtime_features=True,
+            ),
+        )
+
+        self.assertEqual(len(summaries), 2)
+        self.assertEqual(stats["eval_episode_count"], 2)
+
     def test_crn_uniform_row_covers_threshold_sample(self) -> None:
         request = EvalFeatureRequest(
             worker_id=0,

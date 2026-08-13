@@ -17,6 +17,7 @@ setup(
         Pybind11Extension(
             "policy_runtime._runtime",
             [
+                str(ROOT / "policy_runtime" / "src" / "fast_option.cpp"),
                 str(ROOT / "policy_runtime" / "src" / "feature_extractor.cpp"),
                 str(ROOT / "policy_runtime" / "python" / "policy_runtime_py.cpp"),
             ],

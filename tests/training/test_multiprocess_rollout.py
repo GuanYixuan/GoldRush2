@@ -147,6 +147,34 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertEqual(second_stats["worker_all_ready_ms"], 0.0)
         self.assertEqual(second_stats["worker_ready_count"], 2)
 
+    def test_fast_runtime_feature_mode_runs_without_enabling_fast_action_skip(self) -> None:
+        model = _small_model()
+        sampler = BatchRolloutSampler(
+            env_config=SingleAgentEnvConfig(episode=_one_round_episode(), opponent_spec=_stay_opponent_spec()),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+        )
+
+        batch, _stats = collect_multiprocess_ppo_rollouts(
+            model,
+            sampler,
+            pair_count=1,
+            seed=5,
+            map_ids=(1,),
+            opponent_specs=(_stay_opponent_spec(),),
+            device="cpu",
+            config=MultiprocessRolloutConfig(
+                num_workers=2,
+                max_inference_batch_size=4,
+                inference_timeout_ms=1.0,
+                enable_fast_runtime_features=True,
+            ),
+        )
+
+        self.assertEqual(batch.transition_count, 2)
+        self.assertTrue(torch.allclose(batch.fast_scalars, torch.tensor(INITIAL_FAST_SCALARS).expand(2, -1)))
+        self.assertTrue(((batch.threshold_int >= 4) & (batch.threshold_int <= 30)).all().item())
+
     def test_training_info_mode_keeps_only_light_non_terminal_infos(self) -> None:
         model = _small_model()
         sampler = BatchRolloutSampler(
