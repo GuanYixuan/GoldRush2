@@ -175,6 +175,16 @@ if static2_high_batch_triggered:
 
 因此模拟器生成器应允许在已有金币格上产生新增金额，并由状态推进层把新增金额叠加到原地面金币。当前有数据支撑的动态排除条件是炸弹和玩家/NPC 占用；不要把 `prev_gold > 0` 当作候选格不可用。
 
+## 绝对 Round 分桶
+
+用四批 `cell_transitions.csv` 和 static2 专题表按 `50` round 分桶检查后，当前没有观察到金币生成随绝对 round 单调漂移或分段变参的证据。
+
+- 中心区小额生成在按格子全局 rate 校正后，各分桶 `obs/expected` 基本围绕 `1` 小幅波动；触发后金额仍稳定约为 `6`。
+- `static_map=2` high batch 的 observed 触发率在各分桶内接近整体均值；首个分桶略高可由首次触发集中在 `round=8..14` 与后续 gap 机制解释。
+- 外围 `static_map=0` 伴随事件在 high round 条件下的事件数基本稳定，no-high 背景仍接近 `0`。
+
+因此第一版生成器不需要额外加入绝对 round drift 项；保留初始化特殊处理、中心区同质后续生成，以及 static2 的首次触发分布和 gap 状态机即可。
+
 ## 建模建议
 
 金币生成属于 `simulator/` 的机制近似层，不应写死在官方规则层中。第一版建议使用 `GoldGenerationConfig` 驱动：对齐 replay 时使用 `fit` 配置，RL 主训练时每局由 `EpisodeConfig` 采样一组参数，固定评估时使用若干 `eval_holdout` 配置。
