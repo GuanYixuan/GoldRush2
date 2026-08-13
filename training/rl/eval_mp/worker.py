@@ -94,8 +94,24 @@ def run_worker_episode(
     observation = reset.observation
     episode_events = _empty_event_counts()
     request_index = 0
+    pending_output: GameOutput | None = None
 
-    while observation is not None:
+    while True:
+        if pending_output is not None:
+            if fast_runtime is not None and observation is not None:
+                fast_try = fast_runtime.try_fast(observation)
+                if fast_try["status"] == "success":
+                    output = _game_output_from_payload(fast_try["output"])
+                    step = env.step(output, agent_decision_mode="fast")
+                    _add_event_counts(episode_events, step.info["events"])
+                    pending_output = None
+                    observation = step.observation
+                    request_index += 1
+                    profile_stats["steps"] = request_index
+                    continue
+            pending_output = None
+        if observation is None:
+            break
         if fast_runtime is None:
             assert extractor is not None
             actor_features = extractor.observe(observation)
@@ -151,6 +167,7 @@ def run_worker_episode(
             extractor.commit_action(output)
         else:
             fast_runtime.commit_neural(output)
+            fast_runtime.set_next_threshold(int(action_msg["threshold_int"]))
         env_step_start = time.perf_counter_ns()
         step = env.step(output)
         profile_stats["env_step_ns"] = profile_stats.get("env_step_ns", 0) + (time.perf_counter_ns() - env_step_start)
@@ -158,6 +175,7 @@ def run_worker_episode(
         observation = step.observation
         request_index += 1
         profile_stats["steps"] = request_index
+        pending_output = output
 
     if request_index <= 0:
         raise SimulatorRuleError(f"eval task {task.task_id!r} produced no transitions")

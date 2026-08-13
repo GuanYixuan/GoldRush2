@@ -18,6 +18,11 @@ CRITIC_SCALAR_FEATURES = 17
 GRID_SIZE = 17
 MOVE_BUDGET = 6
 
+FAST_STATUS_NONE = 0
+FAST_STATUS_SUCCESS = 1
+FAST_STATUS_MISS_NO_TARGET = 2
+FAST_STATUS_PATH_FAIL = 3
+
 
 @dataclass(frozen=True)
 class PpoTransition:
@@ -35,7 +40,11 @@ class PpoTransition:
     old_logprob: Tensor
     value: Tensor
     reward: float
+    reward_sum: float
+    tau: int
     done: bool
+    fast_success: bool
+    fast_status: int
     episode_id: str
     round_index: int
     map_id: int | None
@@ -60,6 +69,10 @@ class PpoMiniBatch:
     old_values: Tensor
     advantages: Tensor
     returns: Tensor
+    reward_sum: Tensor
+    tau: Tensor
+    fast_success: Tensor
+    fast_status: Tensor
 
     @property
     def transition_count(self) -> int:
@@ -82,6 +95,10 @@ class PpoBatch:
     old_logprob: Tensor
     old_values: Tensor
     rewards: Tensor
+    reward_sums: Tensor
+    taus: Tensor
+    fast_success: Tensor
+    fast_status: Tensor
     dones: Tensor
     episode_ids: tuple[str, ...]
     round_indices: Tensor
@@ -112,6 +129,10 @@ class PpoBatch:
             old_logprob=torch.stack([transition.old_logprob.float().reshape(()) for transition in transitions]),
             old_values=torch.stack([transition.value.float().reshape(()) for transition in transitions]),
             rewards=torch.tensor([transition.reward for transition in transitions], dtype=torch.float32),
+            reward_sums=torch.tensor([transition.reward_sum for transition in transitions], dtype=torch.float32),
+            taus=torch.tensor([transition.tau for transition in transitions], dtype=torch.long),
+            fast_success=torch.tensor([transition.fast_success for transition in transitions], dtype=torch.bool),
+            fast_status=torch.tensor([transition.fast_status for transition in transitions], dtype=torch.long),
             dones=torch.tensor([transition.done for transition in transitions], dtype=torch.bool),
             episode_ids=tuple(transition.episode_id for transition in transitions),
             round_indices=torch.tensor([transition.round_index for transition in transitions], dtype=torch.long),
@@ -143,6 +164,10 @@ class PpoBatch:
         map_ids: tuple[int | None, ...],
         agent_player_ids: Any,
         infos: tuple[dict[str, Any], ...],
+        reward_sums: Any | None = None,
+        taus: Any | None = None,
+        fast_success: Any | None = None,
+        fast_status: Any | None = None,
     ) -> PpoBatch:
         batch = PpoBatch(
             spatial_planes=torch.as_tensor(spatial_planes, dtype=torch.float32),
@@ -159,6 +184,16 @@ class PpoBatch:
             old_logprob=torch.as_tensor(old_logprob, dtype=torch.float32),
             old_values=torch.as_tensor(values, dtype=torch.float32),
             rewards=torch.as_tensor(rewards, dtype=torch.float32),
+            reward_sums=torch.as_tensor(reward_sums if reward_sums is not None else rewards, dtype=torch.float32),
+            taus=torch.as_tensor(taus if taus is not None else torch.ones_like(torch.as_tensor(rewards, dtype=torch.long)), dtype=torch.long),
+            fast_success=torch.as_tensor(
+                fast_success if fast_success is not None else torch.zeros_like(torch.as_tensor(rewards, dtype=torch.bool)),
+                dtype=torch.bool,
+            ),
+            fast_status=torch.as_tensor(
+                fast_status if fast_status is not None else torch.zeros_like(torch.as_tensor(rewards, dtype=torch.long)),
+                dtype=torch.long,
+            ),
             dones=torch.as_tensor(dones, dtype=torch.bool),
             episode_ids=tuple(episode_ids),
             round_indices=torch.as_tensor(round_indices, dtype=torch.long),
@@ -190,12 +225,19 @@ class PpoBatch:
         advantages = torch.zeros_like(self.rewards)
         next_advantage = torch.tensor(0.0, dtype=self.rewards.dtype, device=self.rewards.device)
         for idx in range(self.transition_count - 1, -1, -1):
-            non_terminal = 0.0 if bool(self.dones[idx].item()) else 1.0
+            tau = int(self.taus[idx].item())
+            if tau <= 0:
+                raise SimulatorRuleError(f"tau must be positive, got {tau} at transition {idx}")
+            same_episode_next = idx + 1 < self.transition_count and self.episode_ids[idx + 1] == self.episode_ids[idx]
+            non_terminal = 0.0 if bool(self.dones[idx].item()) or not same_episode_next else 1.0
             next_value = torch.tensor(0.0, dtype=self.old_values.dtype, device=self.old_values.device)
-            if idx + 1 < self.transition_count and non_terminal:
+            if non_terminal:
                 next_value = self.old_values[idx + 1]
-            delta = self.rewards[idx] + gamma * next_value * non_terminal - self.old_values[idx]
-            next_advantage = delta + gamma * gae_lambda * non_terminal * next_advantage
+            reward_sum = self.reward_sums[idx]
+            gamma_tau = gamma**tau
+            lambda_tau = gae_lambda**tau
+            delta = reward_sum + gamma_tau * next_value * non_terminal - self.old_values[idx]
+            next_advantage = delta + gamma_tau * lambda_tau * non_terminal * next_advantage
             advantages[idx] = next_advantage
 
         returns = advantages + self.old_values
@@ -246,6 +288,10 @@ class PpoBatch:
             old_logprob=self.old_logprob.to(device),
             old_values=self.old_values.to(device),
             rewards=self.rewards.to(device),
+            reward_sums=self.reward_sums.to(device),
+            taus=self.taus.to(device),
+            fast_success=self.fast_success.to(device),
+            fast_status=self.fast_status.to(device),
             dones=self.dones.to(device),
             round_indices=self.round_indices.to(device),
             agent_player_ids=self.agent_player_ids.to(device),
@@ -272,6 +318,10 @@ class PpoBatch:
             old_values=self.old_values[indices],
             advantages=self.advantages[indices],
             returns=self.returns[indices],
+            reward_sum=self.reward_sums[indices],
+            tau=self.taus[indices],
+            fast_success=self.fast_success[indices],
+            fast_status=self.fast_status[indices],
         )
 
 
@@ -289,6 +339,10 @@ def _validate_transitions(transitions: list[PpoTransition] | tuple[PpoTransition
             raise ValueError(f"transition {idx} critic_scalars must have shape 17")
         if tuple(transition.actions.shape) != (MOVE_BUDGET,):
             raise ValueError(f"transition {idx} actions must have shape 6")
+        if transition.tau <= 0:
+            raise ValueError(f"transition {idx} tau must be positive, got {transition.tau}")
+        if transition.fast_success != (transition.fast_status == FAST_STATUS_SUCCESS):
+            raise ValueError(f"transition {idx} fast_success must match fast_status={FAST_STATUS_SUCCESS}")
         if transition.agent_player_id not in (1, 2):
             raise ValueError(f"transition {idx} agent_player_id must be 1 or 2")
 
@@ -309,6 +363,22 @@ def _validate_batch_arrays(batch: PpoBatch) -> None:
         raise ValueError(f"critic_scalars must have shape Nx17, got {tuple(batch.critic_scalars.shape)}")
     if tuple(batch.actions.shape) != (transition_count, MOVE_BUDGET):
         raise ValueError(f"actions must have shape Nx6, got {tuple(batch.actions.shape)}")
+    if tuple(batch.reward_sums.shape) != (transition_count,):
+        raise ValueError(f"reward_sums must have shape N, got {tuple(batch.reward_sums.shape)}")
+    if tuple(batch.taus.shape) != (transition_count,):
+        raise ValueError(f"taus must have shape N, got {tuple(batch.taus.shape)}")
+    if tuple(batch.fast_success.shape) != (transition_count,):
+        raise ValueError(f"fast_success must have shape N, got {tuple(batch.fast_success.shape)}")
+    if tuple(batch.fast_status.shape) != (transition_count,):
+        raise ValueError(f"fast_status must have shape N, got {tuple(batch.fast_status.shape)}")
+    if bool((batch.taus <= 0).any().item()):
+        raise ValueError("taus must all be positive")
+    invalid_fast_status = (batch.fast_status < FAST_STATUS_NONE) | (batch.fast_status > FAST_STATUS_PATH_FAIL)
+    if bool(invalid_fast_status.any().item()):
+        raise ValueError("fast_status contains invalid status code")
+    inconsistent_fast_success = batch.fast_success != (batch.fast_status == FAST_STATUS_SUCCESS)
+    if bool(inconsistent_fast_success.any().item()):
+        raise ValueError(f"fast_success must match fast_status={FAST_STATUS_SUCCESS}")
     for name, tensor in (
         ("k", batch.k),
         ("order", batch.order),

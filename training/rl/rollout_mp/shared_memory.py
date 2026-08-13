@@ -70,6 +70,10 @@ class TransitionSharedMemory:
     old_logprob_shm: shared_memory.SharedMemory
     value_shm: shared_memory.SharedMemory
     reward_shm: shared_memory.SharedMemory
+    reward_sum_shm: shared_memory.SharedMemory
+    tau_shm: shared_memory.SharedMemory
+    fast_success_shm: shared_memory.SharedMemory
+    fast_status_shm: shared_memory.SharedMemory
     done_shm: shared_memory.SharedMemory
     round_index_shm: shared_memory.SharedMemory
     actor_planes: Any
@@ -86,6 +90,10 @@ class TransitionSharedMemory:
     old_logprob: Any
     value: Any
     reward: Any
+    reward_sum: Any
+    tau: Any
+    fast_success: Any
+    fast_status: Any
     done: Any
     round_index: Any
 
@@ -105,6 +113,10 @@ class TransitionSharedMemory:
             "old_logprob": shared_array_config(self.old_logprob_shm, self.old_logprob),
             "value": shared_array_config(self.value_shm, self.value),
             "reward": shared_array_config(self.reward_shm, self.reward),
+            "reward_sum": shared_array_config(self.reward_sum_shm, self.reward_sum),
+            "tau": shared_array_config(self.tau_shm, self.tau),
+            "fast_success": shared_array_config(self.fast_success_shm, self.fast_success),
+            "fast_status": shared_array_config(self.fast_status_shm, self.fast_status),
             "done": shared_array_config(self.done_shm, self.done),
             "round_index": shared_array_config(self.round_index_shm, self.round_index),
         }
@@ -133,6 +145,10 @@ class TransitionSharedMemory:
             self.old_logprob_shm,
             self.value_shm,
             self.reward_shm,
+            self.reward_sum_shm,
+            self.tau_shm,
+            self.fast_success_shm,
+            self.fast_status_shm,
             self.done_shm,
             self.round_index_shm,
         )
@@ -230,6 +246,10 @@ def create_transition_shared_memory(*, episode_count: int, round_count: int) -> 
         old_logprob_shm, old_logprob = create_array((episode_count, round_count), np.float32)
         value_shm, value = create_array((episode_count, round_count), np.float32)
         reward_shm, reward = create_array((episode_count, round_count), np.float32)
+        reward_sum_shm, reward_sum = create_array((episode_count, round_count), np.float32)
+        tau_shm, tau = create_array((episode_count, round_count), np.int64)
+        fast_success_shm, fast_success = create_array((episode_count, round_count), np.bool_)
+        fast_status_shm, fast_status = create_array((episode_count, round_count), np.int64)
         done_shm, done = create_array((episode_count, round_count), np.bool_)
         round_index_shm, round_index = create_array((episode_count, round_count), np.int64)
     except Exception:
@@ -253,6 +273,10 @@ def create_transition_shared_memory(*, episode_count: int, round_count: int) -> 
         old_logprob_shm=old_logprob_shm,
         value_shm=value_shm,
         reward_shm=reward_shm,
+        reward_sum_shm=reward_sum_shm,
+        tau_shm=tau_shm,
+        fast_success_shm=fast_success_shm,
+        fast_status_shm=fast_status_shm,
         done_shm=done_shm,
         round_index_shm=round_index_shm,
         actor_planes=actor_planes,
@@ -269,6 +293,10 @@ def create_transition_shared_memory(*, episode_count: int, round_count: int) -> 
         old_logprob=old_logprob,
         value=value,
         reward=reward,
+        reward_sum=reward_sum,
+        tau=tau,
+        fast_success=fast_success,
+        fast_status=fast_status,
         done=done,
         round_index=round_index,
     )
@@ -297,6 +325,10 @@ def attach_transition_shared_memory(config: dict[str, Any]) -> TransitionSharedM
         old_logprob_shm, old_logprob = attach("old_logprob")
         value_shm, value = attach("value")
         reward_shm, reward = attach("reward")
+        reward_sum_shm, reward_sum = attach("reward_sum")
+        tau_shm, tau = attach("tau")
+        fast_success_shm, fast_success = attach("fast_success")
+        fast_status_shm, fast_status = attach("fast_status")
         done_shm, done = attach("done")
         round_index_shm, round_index = attach("round_index")
     except Exception:
@@ -319,6 +351,10 @@ def attach_transition_shared_memory(config: dict[str, Any]) -> TransitionSharedM
         old_logprob_shm=old_logprob_shm,
         value_shm=value_shm,
         reward_shm=reward_shm,
+        reward_sum_shm=reward_sum_shm,
+        tau_shm=tau_shm,
+        fast_success_shm=fast_success_shm,
+        fast_status_shm=fast_status_shm,
         done_shm=done_shm,
         round_index_shm=round_index_shm,
         actor_planes=actor_planes,
@@ -335,6 +371,10 @@ def attach_transition_shared_memory(config: dict[str, Any]) -> TransitionSharedM
         old_logprob=old_logprob,
         value=value,
         reward=reward,
+        reward_sum=reward_sum,
+        tau=tau,
+        fast_success=fast_success,
+        fast_status=fast_status,
         done=done,
         round_index=round_index,
     )

@@ -9,8 +9,14 @@ from typing import Any
 from policy_runtime import FastRuntimeState, FeatureExtractor
 from simulator.errors import SimulatorRuleError
 from simulator.types import GameOutput
+from training.rl.ppo_buffer import (
+    FAST_STATUS_MISS_NO_TARGET,
+    FAST_STATUS_NONE,
+    FAST_STATUS_PATH_FAIL,
+    FAST_STATUS_SUCCESS,
+)
 from training.models import INITIAL_FAST_SCALARS
-from training.rl.env import SingleAgentGoldRushEnv
+from training.rl.env import AGENT_DECISION_FAST, SingleAgentGoldRushEnv
 from training.rl.privileged_critic_features import extract_privileged_critic_features
 
 from .shared_memory import FeatureSharedMemory, TransitionSharedMemory, attach_feature_shared_memory, attach_transition_shared_memory
@@ -94,6 +100,8 @@ def run_worker_episode(
     import numpy as np
 
     profile_stats: dict[str, int] = {"steps": 0}
+    episode_policy_steps = 0
+    episode_env_steps = 0
     episode_wall_start = time.perf_counter_ns()
     env = SingleAgentGoldRushEnv(
         config=static_config["env_config"],
@@ -126,12 +134,75 @@ def run_worker_episode(
     request_index = 0
     transition_slot = int(task.transition_slot)
     max_episode_length = int(transition_shared.done.shape[1])
+    pending_transition: dict[str, Any] | None = None
+    reward_fold_gamma = float(static_config.get("reward_fold_gamma", 0.97))
 
-    while observation is not None:
+    while True:
+        if pending_transition is not None:
+            if fast_runtime is not None and observation is not None:
+                fast_try = fast_runtime.try_fast(observation)
+                if fast_try["status"] == "success":
+                    fast_output = _game_output_from_payload(fast_try["output"])
+                    env_step_start = time.perf_counter_ns()
+                    step = env.step(fast_output, agent_decision_mode=AGENT_DECISION_FAST)
+                    profile_stats["env_step_ns"] = profile_stats.get("env_step_ns", 0) + (
+                        time.perf_counter_ns() - env_step_start
+                    )
+                    _add_event_counts(episode_events, step.info["events"])
+                    tau = int(pending_transition["tau"])
+                    pending_transition["reward_sum"] = float(pending_transition["reward_sum"]) + (reward_fold_gamma**tau) * float(step.reward)
+                    pending_transition["tau"] = tau + 1
+                    pending_transition["fast_success"] = True
+                    pending_transition["fast_status"] = FAST_STATUS_SUCCESS
+                    pending_transition["done"] = bool(step.terminated)
+                    pending_transition["info"] = transition_info(
+                        step.info,
+                        done=bool(step.terminated),
+                        mode=str(static_config["transition_info_mode"]),
+                        episode_events=episode_events,
+                    )
+                    _write_pending_transition(
+                        transition_shared,
+                        transition_slot=transition_slot,
+                        index=request_index,
+                        pending_transition=pending_transition,
+                    )
+                    info_items.append(pending_transition["info"])
+                    request_index += 1
+                    profile_stats["steps"] = request_index
+                    episode_policy_steps += 1
+                    episode_env_steps += 1
+                    pending_transition = None
+                    observation = step.observation
+                    continue
+                pending_transition["fast_success"] = False
+                pending_transition["fast_status"] = _fast_status_code(str(fast_try["status"]))
+            pending_transition["info"] = transition_info(
+                pending_transition["info"],
+                done=bool(pending_transition["done"]),
+                mode=str(static_config["transition_info_mode"]),
+                episode_events=episode_events,
+            )
+            _write_pending_transition(
+                transition_shared,
+                transition_slot=transition_slot,
+                index=request_index,
+                pending_transition=pending_transition,
+            )
+            info_items.append(pending_transition["info"])
+            request_index += 1
+            profile_stats["steps"] = request_index
+            episode_policy_steps += 1
+            pending_transition = None
+            continue
+
+        if observation is None:
+            break
         if request_index >= max_episode_length:
             raise SimulatorRuleError(
                 f"episode {task.task_id!r} exceeded transition shared memory length {max_episode_length}"
             )
+
         if fast_runtime is None:
             assert extractor is not None
             actor_features = extractor.observe(observation)
@@ -197,35 +268,50 @@ def run_worker_episode(
         env_step_start = time.perf_counter_ns()
         step = env.step(game_output)
         profile_stats["env_step_ns"] = profile_stats.get("env_step_ns", 0) + (time.perf_counter_ns() - env_step_start)
-        done = bool(step.terminated)
         _add_event_counts(episode_events, step.info["events"])
-        transition_shared.actor_planes[transition_slot, request_index, ...] = actor_planes
-        transition_shared.actor_scalars[transition_slot, request_index, ...] = actor_scalars
-        transition_shared.fast_scalars[transition_slot, request_index, ...] = fast_scalars
-        transition_shared.critic_planes[transition_slot, request_index, ...] = critic_planes
-        transition_shared.critic_scalars[transition_slot, request_index, ...] = critic_scalars
-        transition_shared.actions[transition_slot, request_index, :] = tuple(int(value) for value in game_output.actions)
-        transition_shared.k[transition_slot, request_index] = int(game_output.k)
-        transition_shared.order[transition_slot, request_index] = int(game_output.order)
-        transition_shared.vp[transition_slot, request_index] = int(game_output.vp)
-        transition_shared.threshold_raw[transition_slot, request_index] = float(action_msg["threshold_raw"])
-        transition_shared.threshold_int[transition_slot, request_index] = int(action_msg["threshold_int"])
-        transition_shared.old_logprob[transition_slot, request_index] = float(action_msg["old_logprob"])
-        transition_shared.value[transition_slot, request_index] = float(action_msg["value"])
-        transition_shared.reward[transition_slot, request_index] = float(step.reward)
-        transition_shared.done[transition_slot, request_index] = done
-        transition_shared.round_index[transition_slot, request_index] = int(observation.round)
-        info_items.append(
-            transition_info(
-                step.info,
-                done=done,
+        pending_transition = {
+            "actor_planes": actor_planes,
+            "actor_scalars": actor_scalars,
+            "fast_scalars": fast_scalars,
+            "critic_planes": critic_planes,
+            "critic_scalars": critic_scalars,
+            "actions": tuple(int(value) for value in game_output.actions),
+            "k": int(game_output.k),
+            "order": int(game_output.order),
+            "vp": int(game_output.vp),
+            "threshold_raw": float(action_msg["threshold_raw"]),
+            "threshold_int": int(action_msg["threshold_int"]),
+            "old_logprob": float(action_msg["old_logprob"]),
+            "value": float(action_msg["value"]),
+            "reward": float(step.reward),
+            "reward_sum": float(step.reward),
+            "tau": 1,
+            "fast_success": False,
+            "fast_status": FAST_STATUS_NONE,
+            "done": bool(step.terminated),
+            "round_index": int(observation.round),
+            "info": step.info,
+        }
+        observation = step.observation
+        episode_env_steps += 1
+        if fast_runtime is None or observation is None:
+            pending_transition["info"] = transition_info(
+                pending_transition["info"],
+                done=bool(pending_transition["done"]),
                 mode=str(static_config["transition_info_mode"]),
                 episode_events=episode_events,
             )
-        )
-        observation = step.observation
-        request_index += 1
-        profile_stats["steps"] = request_index
+            _write_pending_transition(
+                transition_shared,
+                transition_slot=transition_slot,
+                index=request_index,
+                pending_transition=pending_transition,
+            )
+            info_items.append(pending_transition["info"])
+            request_index += 1
+            profile_stats["steps"] = request_index
+            episode_policy_steps += 1
+            pending_transition = None
 
     if request_index <= 0:
         raise SimulatorRuleError(f"episode {task.task_id!r} produced no transitions")
@@ -244,6 +330,8 @@ def run_worker_episode(
             "opponent_spec": reset.info["opponent_spec"],
             "transition_slot": transition_slot,
             "episode_length": request_index,
+            "policy_step_count": episode_policy_steps,
+            "env_step_count": episode_env_steps,
             "infos": tuple(info_items),
             "worker_stats": profile_stats,
         }
@@ -278,6 +366,54 @@ def transition_info(
             payload["reward_components"] = reward_components
         return payload
     raise SimulatorRuleError(f"unknown transition_info_mode: {mode!r}")
+
+
+def _write_pending_transition(
+    transition_shared: TransitionSharedMemory,
+    *,
+    transition_slot: int,
+    index: int,
+    pending_transition: dict[str, Any],
+) -> None:
+    transition_shared.actor_planes[transition_slot, index, ...] = pending_transition["actor_planes"]
+    transition_shared.actor_scalars[transition_slot, index, ...] = pending_transition["actor_scalars"]
+    transition_shared.fast_scalars[transition_slot, index, ...] = pending_transition["fast_scalars"]
+    transition_shared.critic_planes[transition_slot, index, ...] = pending_transition["critic_planes"]
+    transition_shared.critic_scalars[transition_slot, index, ...] = pending_transition["critic_scalars"]
+    transition_shared.actions[transition_slot, index, :] = tuple(int(value) for value in pending_transition["actions"])
+    transition_shared.k[transition_slot, index] = int(pending_transition["k"])
+    transition_shared.order[transition_slot, index] = int(pending_transition["order"])
+    transition_shared.vp[transition_slot, index] = int(pending_transition["vp"])
+    transition_shared.threshold_raw[transition_slot, index] = float(pending_transition["threshold_raw"])
+    transition_shared.threshold_int[transition_slot, index] = int(pending_transition["threshold_int"])
+    transition_shared.old_logprob[transition_slot, index] = float(pending_transition["old_logprob"])
+    transition_shared.value[transition_slot, index] = float(pending_transition["value"])
+    transition_shared.reward[transition_slot, index] = float(pending_transition["reward"])
+    transition_shared.reward_sum[transition_slot, index] = float(pending_transition["reward_sum"])
+    transition_shared.tau[transition_slot, index] = int(pending_transition["tau"])
+    transition_shared.fast_success[transition_slot, index] = bool(pending_transition["fast_success"])
+    transition_shared.fast_status[transition_slot, index] = int(pending_transition["fast_status"])
+    transition_shared.done[transition_slot, index] = bool(pending_transition["done"])
+    transition_shared.round_index[transition_slot, index] = int(pending_transition["round_index"])
+
+
+def _game_output_from_payload(payload: Any) -> GameOutput:
+    if isinstance(payload, GameOutput):
+        return payload
+    return GameOutput(
+        actions=tuple(int(value) for value in payload["actions"]),
+        k=int(payload["k"]),
+        order=int(payload["order"]),
+        vp=int(payload["vp"]),
+    )
+
+
+def _fast_status_code(status: str) -> int:
+    if status == "miss_no_target":
+        return FAST_STATUS_MISS_NO_TARGET
+    if status == "path_fail":
+        return FAST_STATUS_PATH_FAIL
+    raise SimulatorRuleError(f"unexpected fast status while folding transition: {status!r}")
 
 
 def _order_info(step_info: dict[str, Any]) -> dict[str, Any]:

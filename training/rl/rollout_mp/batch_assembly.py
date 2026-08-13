@@ -57,6 +57,10 @@ def episode_payloads_to_batch(payloads: list[dict[str, Any]], transition_shared:
     old_logprob: list[Any] = []
     values: list[Any] = []
     rewards: list[Any] = []
+    reward_sums: list[Any] = []
+    taus: list[Any] = []
+    fast_success: list[Any] = []
+    fast_status: list[Any] = []
     dones: list[Any] = []
     round_indices: list[Any] = []
     episode_ids: list[str] = []
@@ -90,6 +94,10 @@ def episode_payloads_to_batch(payloads: list[dict[str, Any]], transition_shared:
         old_logprob.append(transition_shared.old_logprob[transition_slot, :episode_length])
         values.append(transition_shared.value[transition_slot, :episode_length])
         rewards.append(transition_shared.reward[transition_slot, :episode_length])
+        reward_sums.append(transition_shared.reward_sum[transition_slot, :episode_length])
+        taus.append(transition_shared.tau[transition_slot, :episode_length])
+        fast_success.append(transition_shared.fast_success[transition_slot, :episode_length])
+        fast_status.append(transition_shared.fast_status[transition_slot, :episode_length])
         dones.append(transition_shared.done[transition_slot, :episode_length])
         round_indices.append(transition_shared.round_index[transition_slot, :episode_length])
         episode_ids.extend((f"{payload['pair_id']}-{payload['pair_role']}",) * episode_length)
@@ -117,6 +125,10 @@ def episode_payloads_to_batch(payloads: list[dict[str, Any]], transition_shared:
         old_logprob=np.concatenate(old_logprob, axis=0),
         values=np.concatenate(values, axis=0),
         rewards=np.concatenate(rewards, axis=0),
+        reward_sums=np.concatenate(reward_sums, axis=0),
+        taus=np.concatenate(taus, axis=0),
+        fast_success=np.concatenate(fast_success, axis=0),
+        fast_status=np.concatenate(fast_status, axis=0),
         dones=np.concatenate(dones, axis=0),
         episode_ids=tuple(episode_ids),
         round_indices=np.concatenate(round_indices, axis=0),

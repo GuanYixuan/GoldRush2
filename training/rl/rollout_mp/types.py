@@ -17,6 +17,7 @@ class MultiprocessRolloutConfig:
     worker_join_timeout_s: float = 5.0
     transition_info_mode: Literal["training", "debug"] = "training"
     enable_fast_runtime_features: bool = False
+    reward_fold_gamma: float = 0.97
 
 
 @dataclass(frozen=True)

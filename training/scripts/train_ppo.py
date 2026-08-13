@@ -176,8 +176,8 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "freeze_ko_vp_heads": config.freeze_ko_vp_heads,
                 "critic_warmup_updates": config.critic_warmup_updates,
                 "transition_count": batch.transition_count,
-                "mean_reward": float(batch.rewards.mean().detach().cpu().item()),
-                "reward_sum": float(batch.rewards.sum().detach().cpu().item()),
+                "mean_reward": float(batch.reward_sums.mean().detach().cpu().item()),
+                "reward_sum": float(batch.reward_sums.sum().detach().cpu().item()),
                 "beta_win": config.beta_win,
                 "beta_margin": config.beta_margin,
                 "beta_gold_gain": config.beta_gold_gain,
@@ -374,6 +374,7 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         max_inference_batch_size=int(args.rollout_max_inference_batch_size),
         inference_timeout_ms=float(args.rollout_inference_timeout_ms),
         worker_join_timeout_s=float(args.worker_join_timeout_s),
+        reward_fold_gamma=float(args.ppo_gamma),
     )
     opponent_specs = tuple(opponent_spec_from_name(name) for name in args.opponents)
     eval_cases: tuple[EvaluationCase, ...] = ()
@@ -999,6 +1000,7 @@ def _training_diagnostics(batch) -> dict[str, float]:
     diagnostics["same_role_reverse_fraction"] = _same_role_reverse_fraction(actions, k)
 
     terminal_indices = [idx for idx, done in enumerate(batch.dones.detach().cpu().tolist()) if done]
+    diagnostics.update(_macro_step_diagnostics(batch, episode_count=len(terminal_indices)))
     diagnostics.update(_terminal_diagnostics(batch, terminal_indices))
     diagnostics.update(_per_episode_event_diagnostics(batch, episode_count=len(terminal_indices)))
     diagnostics.update(_fast_order_diagnostics(batch.infos, episode_count=len(terminal_indices)))
@@ -1013,6 +1015,21 @@ def _training_diagnostics(batch) -> dict[str, float]:
     diagnostics["advantage_std"] = _tensor_std(batch.advantages)
     diagnostics.update(_reward_component_diagnostics(batch.infos))
     return diagnostics
+
+
+def _macro_step_diagnostics(batch, *, episode_count: int) -> dict[str, float]:
+    taus = batch.taus.detach().cpu().float()
+    fast_success = batch.fast_success.detach().cpu()
+    skipped = torch.clamp(taus - 1.0, min=0.0)
+    return {
+        "policy_decision_count": float(batch.transition_count),
+        "env_step_count_estimated": float(taus.sum().item()),
+        "macro_tau_mean": _tensor_mean(taus),
+        "fast_success_count": float(fast_success.sum().item()),
+        "fast_success_per_episode": 0.0 if episode_count <= 0 else float(fast_success.sum().item()) / float(episode_count),
+        "fast_skipped_policy_steps": float(skipped.sum().item()),
+        "fast_skipped_policy_steps_per_episode": 0.0 if episode_count <= 0 else float(skipped.sum().item()) / float(episode_count),
+    }
 
 
 def _fast_order_diagnostics(infos: tuple[dict[str, Any], ...], *, episode_count: int) -> dict[str, float]:

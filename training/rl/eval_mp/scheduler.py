@@ -219,6 +219,7 @@ def run_eval_inference_batch(
         k_cpu = action.k.detach().cpu().tolist()
         order_cpu = action.order.detach().cpu().tolist()
         vp_cpu = action.vp.detach().cpu().tolist()
+        threshold_int_cpu = action.threshold_int.detach().cpu().tolist()
     sync(device)
     model_sample_ns = time.perf_counter_ns() - model_sample_start
     elapsed_ns = time.perf_counter_ns() - start
@@ -235,6 +236,7 @@ def run_eval_inference_batch(
                     "order": int(order_cpu[batch_index]),
                     "vp": int(vp_cpu[batch_index]),
                 },
+                "threshold_int": int(threshold_int_cpu[batch_index]),
             }
         )
     action_send_ns = time.perf_counter_ns() - action_send_start

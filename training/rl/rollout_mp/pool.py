@@ -294,6 +294,7 @@ def _worker_static_config(
         "reward_fn": sampler.reward_fn,
         "transition_info_mode": config.transition_info_mode,
         "enable_fast_runtime_features": bool(config.enable_fast_runtime_features),
+        "reward_fold_gamma": float(config.reward_fold_gamma),
         "feature_shared_memory": feature_shared.config(),
         "round_count": sampler.env_config.episode.rules.round_count,
     }
@@ -330,3 +331,5 @@ def _validate_pool_config(config: MultiprocessRolloutConfig) -> None:
         raise ValueError(f"worker_join_timeout_s must be positive, got {config.worker_join_timeout_s}")
     if config.transition_info_mode not in ("training", "debug"):
         raise ValueError(f"unknown transition_info_mode: {config.transition_info_mode!r}")
+    if not 0.0 <= config.reward_fold_gamma <= 1.0:
+        raise ValueError(f"reward_fold_gamma must be in [0, 1], got {config.reward_fold_gamma}")

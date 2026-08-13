@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import queue
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -9,6 +11,8 @@ from simulator.envs.round_step import RoundStepMechanisms
 from simulator.mechanisms.bombs import BernoulliBombRefresher, BombConfig
 from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, OuterGoldConfig, OuterGoldGenerator
 from simulator.mechanisms.maps import SpawnConfig
+from simulator.observation.sdk import GameInput
+from simulator.types import GameOutput
 from training.models import INITIAL_FAST_SCALARS, GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.opponents import OpponentSpec
 from training.rl import (
@@ -17,10 +21,14 @@ from training.rl import (
     MultiprocessRolloutPool,
     PpoConfig,
     SingleAgentEnvConfig,
+    ResetResult,
+    StepResult,
     collect_multiprocess_ppo_rollouts,
     ppo_update,
 )
-from training.rl.rollout_mp.worker import _add_event_counts, _empty_event_counts, transition_info
+from training.rl.ppo_buffer import FAST_STATUS_SUCCESS
+from training.rl.rollout_mp.types import EpisodeTask
+from training.rl.rollout_mp.worker import _add_event_counts, _empty_event_counts, run_worker_episode, transition_info
 from training.rl.rollout_mp.shared_memory import (
     attach_feature_shared_memory,
     attach_transition_shared_memory,
@@ -335,6 +343,79 @@ class MultiprocessRolloutTests(unittest.TestCase):
             transition_shared.close()
             transition_shared.unlink()
 
+    def test_worker_folds_successful_fast_step_into_previous_policy_transition(self) -> None:
+        feature_shared = create_feature_shared_memory(num_workers=1)
+        transition_shared = create_transition_shared_memory(episode_count=1, round_count=2)
+        command_queue = queue.Queue()
+        result_queue = queue.Queue()
+        command_queue.put(
+            {
+                "type": "action_result",
+                "rollout_id": "rollout",
+                "request_id": "task-round-0000",
+                "action": {"actions": (4, 4, 4, 4, 4, 4), "k": 0, "order": 0, "vp": 0},
+                "threshold_raw": 0.0,
+                "threshold_int": 12,
+                "old_logprob": -0.5,
+                "value": 0.25,
+            }
+        )
+        try:
+            with (
+                patch("training.rl.rollout_mp.worker.SingleAgentGoldRushEnv", _FastFoldEnv),
+                patch("training.rl.rollout_mp.worker.FastRuntimeState", _FastFoldRuntime),
+                patch("training.rl.rollout_mp.worker._extract_critic_features", _fake_critic_features),
+            ):
+                run_worker_episode(
+                    0,
+                    "rollout",
+                    EpisodeTask(
+                        task_id="task",
+                        pair_id="pair",
+                        pair_role="first",
+                        seed=1,
+                        map_id=1,
+                        agent_player_id=1,
+                        opponent_spec=_stay_opponent_spec(),
+                        transition_slot=0,
+                    ),
+                    command_queue,
+                    result_queue,
+                    {
+                        "env_config": SingleAgentEnvConfig(episode=_two_round_episode(), opponent_spec=_stay_opponent_spec()),
+                        "mechanisms": _quiet_mechanisms(),
+                        "map_pool": None,
+                        "spawn": SpawnConfig(npc_ids=()),
+                        "reward_fn": None,
+                        "transition_info_mode": "training",
+                        "enable_fast_runtime_features": True,
+                        "reward_fold_gamma": 0.5,
+                        "round_count": 2,
+                    },
+                    feature_shared,
+                    transition_shared,
+                )
+
+            messages = [result_queue.get_nowait(), result_queue.get_nowait(), result_queue.get_nowait()]
+            self.assertEqual([message["type"] for message in messages], ["episode_started", "feature_request", "episode_done"])
+            done_msg = messages[2]
+            self.assertEqual(done_msg["episode_length"], 1)
+            self.assertEqual(done_msg["policy_step_count"], 1)
+            self.assertEqual(done_msg["env_step_count"], 2)
+            self.assertEqual(transition_shared.reward[0, 0], 1.5)
+            self.assertEqual(transition_shared.reward_sum[0, 0], 2.75)
+            self.assertEqual(int(transition_shared.tau[0, 0]), 2)
+            self.assertTrue(bool(transition_shared.fast_success[0, 0]))
+            self.assertEqual(int(transition_shared.fast_status[0, 0]), FAST_STATUS_SUCCESS)
+            self.assertTrue(bool(transition_shared.done[0, 0]))
+            self.assertEqual(transition_shared.round_index[0, 0], 0)
+            self.assertEqual(done_msg["infos"][0]["agent_decision_mode"], "fast")
+        finally:
+            feature_shared.close()
+            feature_shared.unlink()
+            transition_shared.close()
+            transition_shared.unlink()
+
 
 def _small_model() -> GoldRushPolicyNetwork:
     return GoldRushPolicyNetwork(
@@ -367,6 +448,96 @@ def _quiet_mechanisms() -> RoundStepMechanisms:
 
 def _stay_opponent_spec() -> OpponentSpec:
     return OpponentSpec(kind="python", name="stay")
+
+
+class _FastFoldEnv:
+    def __init__(self, **_: object) -> None:
+        self.steps = 0
+        self.round_env = object()
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        map_id: int | None = None,
+        agent_player_id: int | None = None,
+        opponent_spec: OpponentSpec | None = None,
+    ) -> ResetResult:
+        return ResetResult(
+            observation=_fake_observation(0),
+            info={"map_id": 1, "opponent_spec": opponent_spec or _stay_opponent_spec()},
+        )
+
+    def step(self, agent_output: GameOutput, *, agent_decision_mode: str = "neural") -> StepResult:
+        self.steps += 1
+        terminated = self.steps >= 2
+        reward = 1.5 if agent_decision_mode == "neural" else 2.5
+        return StepResult(
+            observation=None if terminated else _fake_observation(self.steps),
+            reward=reward,
+            terminated=terminated,
+            truncated=False,
+            info={
+                "first_player_id": 1,
+                "agent_decision_mode": agent_decision_mode,
+                "latent_first_rate": 1.0,
+                "fast_order_sampled": agent_decision_mode == "fast",
+                "agent_first": agent_decision_mode == "fast",
+                "scores": {"net_gold": {1: 4, 2: 0}},
+                "events": _empty_event_counts(),
+                "game_result": object(),
+                "reward_components": {"total": reward},
+            },
+        )
+
+
+class _FastFoldRuntime:
+    def __init__(self, player_id: int) -> None:
+        self.player_id = player_id
+        self.threshold = 12
+
+    def prepare_neural(self, observation: GameInput) -> dict:
+        return {
+            "actor_features": {
+                "feature_schema": "goldrush2_feature_v2",
+                "planes": torch.zeros(43, 17, 17).numpy(),
+                "scalars": torch.zeros(10).numpy(),
+            },
+            "fast_scalars": tuple(INITIAL_FAST_SCALARS),
+        }
+
+    def commit_neural(self, output: GameOutput) -> None:
+        return None
+
+    def set_next_threshold(self, threshold_int: int) -> None:
+        self.threshold = int(threshold_int)
+
+    def try_fast(self, observation: GameInput) -> dict:
+        return {
+            "status": "success",
+            "output": {"actions": (4, 4, 4, 4, 4, 4), "k": 0, "order": 0, "vp": 0},
+        }
+
+
+def _fake_observation(round_index: int) -> GameInput:
+    return GameInput(
+        round=round_index,
+        grid=[[0 for _ in range(17)] for _ in range(17)],
+        my_units=[(0, 0), (16, 16)],
+        my_units_gold=(0, 0),
+        gold_opp=0,
+        visible_enemies=[(-1, -1), (-1, -1)],
+        visible_npcs=[],
+        snapshot_valid=False,
+        snapshot=None,
+    )
+
+
+def _fake_critic_features(*_: object, **__: object) -> dict:
+    return {
+        "planes": torch.zeros(26, 17, 17).numpy(),
+        "scalars": torch.zeros(17).numpy(),
+    }
 
 
 if __name__ == "__main__":

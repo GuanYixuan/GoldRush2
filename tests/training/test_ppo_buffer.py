@@ -37,6 +37,10 @@ class PpoBufferTests(unittest.TestCase):
             old_logprob=torch.tensor([-1.0, -2.0]),
             values=torch.tensor([0.0, 0.5]),
             rewards=torch.tensor([0.0, 1.0]),
+            reward_sums=torch.tensor([0.0, 1.0]),
+            taus=torch.tensor([1, 1]),
+            fast_success=torch.tensor([False, False]),
+            fast_status=torch.tensor([0, 0]),
             dones=torch.tensor([False, True]),
             episode_ids=("ep", "ep"),
             round_indices=torch.tensor([0, 1]),
@@ -68,6 +72,10 @@ class PpoBufferTests(unittest.TestCase):
             old_logprob=torch.zeros(3),
             values=torch.zeros(3),
             rewards=torch.tensor([1.0, 0.0, 2.0]),
+            reward_sums=torch.tensor([1.0, 0.0, 2.0]),
+            taus=torch.tensor([1, 1, 1]),
+            fast_success=torch.tensor([False, False, False]),
+            fast_status=torch.tensor([0, 0, 0]),
             dones=torch.tensor([True, False, True]),
             episode_ids=("a", "b", "b"),
             round_indices=torch.tensor([0, 0, 1]),
@@ -92,6 +100,38 @@ class PpoBufferTests(unittest.TestCase):
 
         self.assertTrue(torch.allclose(batch.advantages, torch.tensor([1.0, 1.0])))
         self.assertTrue(torch.allclose(batch.returns, torch.tensor([1.0, 1.0])))
+
+    def test_gae_uses_tau_for_fast_steps(self) -> None:
+        batch = PpoBatch.from_arrays(
+            spatial_planes=torch.zeros(2, 43, 17, 17),
+            scalars=torch.zeros(2, 10),
+            fast_scalars=torch.zeros(2, 2),
+            critic_planes=torch.zeros(2, 26, 17, 17),
+            critic_scalars=torch.zeros(2, 17),
+            actions=torch.zeros(2, 6),
+            k=torch.zeros(2),
+            order=torch.zeros(2),
+            vp=torch.zeros(2),
+            threshold_raw=torch.zeros(2),
+            threshold_int=torch.full((2,), 12),
+            old_logprob=torch.zeros(2),
+            values=torch.zeros(2),
+            rewards=torch.tensor([1.0, 2.0]),
+            reward_sums=torch.tensor([3.0, 2.0]),
+            taus=torch.tensor([2, 1]),
+            fast_success=torch.tensor([True, False]),
+            fast_status=torch.tensor([1, 0]),
+            dones=torch.tensor([False, True]),
+            episode_ids=("a", "a"),
+            round_indices=torch.tensor([0, 1]),
+            map_ids=(1, 1),
+            agent_player_ids=torch.tensor([1, 1]),
+            infos=({}, {}),
+        )
+
+        batch = batch.compute_gae(gamma=0.5, gae_lambda=1.0, normalize_advantage=False)
+
+        self.assertTrue(torch.allclose(batch.returns, torch.tensor([3.5, 2.0])))
 
     def test_gae_resets_at_episode_boundaries(self) -> None:
         batch = PpoBatch.from_transitions(
@@ -155,6 +195,10 @@ def _transition(
         old_logprob=torch.tensor(-1.0),
         value=torch.tensor(value),
         reward=reward,
+        reward_sum=reward,
+        tau=1,
+        fast_success=False,
+        fast_status=0,
         done=done,
         episode_id=episode_id,
         round_index=0,
