@@ -9,8 +9,9 @@
 ```text
 actor_spatial_planes: B x 43 x 17 x 17
 actor_scalars: B x 10
+fast_scalars: B x 2
 actor_feature_schema: goldrush2_feature_v2
-action_head_schema: candidate_cell_residual_v1
+action_head_schema: candidate_cell_residual_v1_fast_threshold_v1
 ```
 
 critic 输入使用训练期 privileged critic feature：
@@ -18,6 +19,7 @@ critic 输入使用训练期 privileged critic feature：
 ```text
 critic_spatial_planes: B x 26 x 17 x 17
 critic_scalars: B x 17
+fast_scalars: B x 2
 critic_feature_schema: goldrush2_privileged_critic_feature_v1
 ```
 
@@ -28,6 +30,8 @@ actions: B x 6，取值 0..4
 k: B，取值 0..6
 order: B，取值 0..1
 vp: B，取值 0..2
+threshold_raw: B，连续 stochastic action
+threshold: B，映射到 `[4, 30]` 后供 fast controller 使用
 logprob/value/entropy diagnostics: B
 ```
 
@@ -97,9 +101,18 @@ critic_context = MLP(concat(
     enemy_unit0_local,
     enemy_unit1_local,
 ))
-critic_mlp_input = width * 6
+critic_context_dim = width * 6
 critic_hidden = (256, 128)
 ```
+
+fast option 接入后，critic value MLP 额外接收 `fast_scalars`：
+
+```text
+critic_value_input = concat(critic_context, fast_scalars)
+critic_mlp_input = critic_context_dim + 2
+```
+
+这两个 scalar 只进入 threshold head 和 critic value，不进入 actor encoder FiLM 或普通动作 decoder。旧 critic checkpoint inflation 时，critic 第一层新增的 2 个输入列初始化为 `0`，使初始 value 输出与旧 checkpoint 完全一致；之后 PPO 再让 critic 学会使用 fast 有效性 belief。
 
 critic gather 使用 privileged critic schema 中的角色位置 channel：
 
@@ -127,10 +140,11 @@ order = ko % 2
 联合概率分解为：
 
 ```text
-p(ko, vp, a_exec[0:6] | state)
+p(ko, vp, a_exec[0:6], threshold_raw | state)
 = p(ko | state)
   * p(vp | state)
   * product_t p(a_exec[t] | state, ko, prefix[0:t], simulated_positions[t])
+  * p(threshold_raw | state, ko, vp, a_exec[0:6])
 ```
 
 `vp` 不影响本回合移动，首版保持独立。六步动作使用共享 GRU decoder，默认 `decoder_hidden=128`、embedding width `16`。每步输入：
@@ -173,6 +187,73 @@ logits = base_logits + candidate_delta
 
 六步共享同一 decoder 参数，禁止重新拆成六套独立 head。
 
+## Fast Threshold Head
+
+threshold 是下一回合 fast controller 的参数，第一版不进入 actor scalar schema，避免扰动现有 actor encoder FiLM。模型额外接收：
+
+```text
+fast_scalars: B x 2
+  p_fast_effective
+  fast_effective_confidence
+```
+
+这两个量来自部署侧同样可计算的 Fast Effective Belief，而不是 simulator 的隐藏真实先手率。
+
+threshold head 接在动作采样之后。六步 decoder 完成后，使用模拟出的两个己方最终位置从 `H_actor` gather 局部 feature：
+
+```text
+threshold_input = concat(
+    actor_context,
+    final_unit0_local,
+    final_unit1_local,
+    fast_scalars,
+)
+
+threshold_mlp:
+    Linear(256 + 96 + 96 + 2 -> 128)
+    SiLU
+    Linear(128 -> 64)
+    SiLU
+    Linear(64 -> 1)  # mu_raw
+```
+
+训练时采样 raw action：
+
+```text
+threshold_raw ~ Normal(mu_raw, std_raw)
+threshold = 4 + (30 - 4) * sigmoid(threshold_raw)
+```
+
+PPO logprob 在 `threshold_raw` 的 unbounded Normal 空间计算；`threshold` 只是 simulator/runtime 使用的确定性变换。这样 threshold 可以通过标准 policy gradient 学习，不依赖 `gold >= threshold` 的不可导触发条件。
+
+给 fast controller 的整数阈值统一为：
+
+```text
+threshold_int = floor(threshold + 0.5)
+threshold_int = clamp(threshold_int, 4, 30)
+```
+
+训练和 C++ runtime 必须使用同一口径，不能使用 Python `round()` 的 banker rounding。
+
+第一版使用全局 learnable `threshold_log_std`，不做 state-dependent std。推荐初始化：
+
+```text
+initial_threshold = 8
+mu_bias = logit((8 - 4) / (30 - 4)) ~= -1.705
+threshold_log_std ~= -1.3
+```
+
+`threshold_mlp` 最后一层权重为 `0`，bias 为 `mu_bias`，使接入初期 `threshold ~= 8`。`threshold_log_std` 训练和导出时应 clamp 到稳定范围，例如 `[-3.0, 0.0]`。
+
+部署默认使用均值路径：
+
+```text
+threshold_raw = mu_raw
+threshold = 4 + 26 * sigmoid(mu_raw)
+```
+
+若需要 stochastic threshold 部署，必须显式在 C++ runtime 中提供随机数输入并复现同一采样语义；第一版不作为默认提交路径。
+
 ## Belief 位置模拟
 
 decoder 从现有 planes 读取：
@@ -208,20 +289,22 @@ NPC 不阻挡玩家。可见敌人的执行时位置不确定，不进入 hard m
 ```text
 act(
     actor_spatial_planes, actor_scalars,
+    fast_scalars,
     critic_spatial_planes, critic_scalars,
     deterministic=False,
 ) -> PolicyAction
 
 evaluate_actions(
     actor_spatial_planes, actor_scalars,
+    fast_scalars,
     critic_spatial_planes, critic_scalars,
-    actions, k, order, vp,
+    actions, k, order, vp, threshold_raw,
 ) -> PolicyEvaluation
 ```
 
-`act()` 使用 actor feature 采样或逐步 argmax `ko/vp/actions`，并使用 critic feature 通过 critic encoder 输出 value。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder，并用 critic feature 重算 value。
+`act()` 使用 actor feature 采样或逐步 argmax `ko/vp/actions`，再基于采样动作后的模拟终点采样或取均值 `threshold_raw`，并使用 critic feature 通过 critic encoder 输出 value。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder，并用保存的 `threshold_raw` 重算 threshold logprob；value 由 critic feature 重算。
 
-部署/BC/ONNX 路径应保留 actor-only 入口。该入口只能返回 action/logprob/entropy 或使用占位 value，不得要求 privileged critic feature。PPO 训练路径必须使用双输入接口。
+部署/BC/ONNX 路径应保留 actor-only 入口。该入口只能返回 action、threshold、logprob/entropy 或使用占位 value，不得要求 privileged critic feature。PPO 训练路径必须使用双输入接口。
 
 `forward()` 是部署友好的 deterministic `act()` 包装，不用于 PPO 更新。
 
@@ -235,17 +318,21 @@ rollout 保存的联合 logprob：
 log p(ko | state)
 + log p(vp | state)
 + sum_t log p(a_exec[t] | prefix_t, simulated_positions[t])
++ log p(threshold_raw | state, ko, vp, a_exec[0:6])
 ```
 
 PPO buffer 和 multiprocess shared memory 保存：
 
 ```text
 actor_spatial_planes/actor_scalars
+fast_scalars
 critic_spatial_planes/critic_scalars
-actions/k/order/vp/old_logprob/value
+actions/k/order/vp/threshold_raw/threshold/old_logprob/value
 ```
 
-decoder hidden、执行顺序动作和 `ko` 均可由现有字段确定，不进入 buffer。PPO 更新必须 teacher force buffer 动作，禁止重新采样或用当前 argmax 作为 prefix。模型参数不变时，rollout logprob 与重算 logprob 必须在浮点误差内一致。
+decoder hidden、执行顺序动作、`ko` 和 threshold head 输入均可由现有字段确定，不进入 buffer。PPO 更新必须 teacher force buffer 动作和 `threshold_raw`，禁止重新采样或用当前 argmax/均值作为 prefix。模型参数不变时，rollout logprob 与重算 logprob 必须在浮点误差内一致。
+
+threshold 是 delayed action component：第 `t` 条 transition 保存 `threshold_raw_t` 和对应 logprob，第 `t+1` 回合 fast controller 的后果通过标准 reward/return/GAE 回传到 `advantage_t`。第一版不拆 `threshold_loss`，也不把 `threshold_logprob_t` 搬到第 `t+1` 条 transition；所有 actor component 共用同一个 PPO clipped objective 和同一个 `advantage_t`。
 
 policy loss、KL 和 entropy 只读取 actor feature；value loss、old value 对齐和 explained variance 只读取 critic feature。`old_logprob` 仍来自 actor 路径，`old_value` 来自 critic 路径。
 
@@ -255,14 +342,16 @@ policy loss、KL 和 entropy 只读取 actor feature；value loss、old value �
 action_entropy = mean_t H(action_t | prefix_t) / log(5)
 ko_entropy = H(ko) / log(14)
 vp_entropy = H(vp) / log(3)
+threshold_entropy = H(Normal(mu_raw, std_raw))
 
 entropy_bonus =
     0.0100 * action_entropy
   + 0.0040 * ko_entropy
   + 0.0003 * vp_entropy
+  + beta_threshold_entropy * threshold_entropy
 ```
 
-action entropy 暂以完整五类 `log(5)` 归一化；mask 后只有少量合法动作时指标会自然下降。masked logits 使用 dtype 有限最小值，避免 `0 * -inf` 产生 NaN。
+`beta_threshold_entropy` 第一版应很小或为 `0`，先通过 `threshold_log_std` 初始化提供探索，避免 threshold 噪声长期主导 fast 行为。action entropy 暂以完整五类 `log(5)` 归一化；mask 后只有少量合法动作时指标会自然下降。masked logits 使用 dtype 有限最小值，避免 `0 * -inf` 产生 NaN。
 
 ## Rollout 与性能
 
@@ -272,6 +361,7 @@ multiprocess rollout 的 worker 负责提取两套 feature：
 
 ```text
 policy_runtime.FeatureExtractor.observe(GameInput) -> actor feature
+Fast Effective Belief runtime state -> fast_scalars
 extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent_player_id) -> critic feature
 ```
 
@@ -279,6 +369,7 @@ extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent
 
 ```text
 actor:  43 x 17 x 17, scalars 10
+fast:   scalars 2
 critic: 26 x 17 x 17, scalars 17
 ```
 
@@ -297,17 +388,19 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 
 - `ko/vp/decoder_action` 输出层使用 `std=0.01` 小初始化。
 - `candidate_action_head` 最后一层权重和 bias 为 0，使 residual 初始严格为 0。
+- `threshold_mlp` 最后一层权重为 0，bias 为 `logit((8 - 4) / (30 - 4)) ~= -1.705`。
+- `threshold_log_std` 初始约为 `-1.3`，训练时 clamp 到稳定范围。
 - `vp` bias 保持初始先验 `(0.90,0.07,0.03)`。
 - GRU input weight 使用 Xavier，hidden weight 使用 orthogonal，bias 为 0。
 - embedding 使用小正态初始化。
 - value 输出层使用小初始化，使初始 value 接近 0。
 - BC 训练只优化 actor 参数。PPO 从 BC checkpoint 初始化时，只加载 actor 路径；critic encoder 与 critic head 按 privileged critic schema 随机初始化或从专门 critic checkpoint 加载，不能默认拷贝 actor encoder，因为 actor/critic 输入 channel 与语义不同。
 
-旧 factorized checkpoint、旧 shared-encoder PPO checkpoint 和缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint 不兼容当前模型。主线不维护隐式部分加载；旧 v2 autoregressive head checkpoint 需要先通过 `training.scripts.inflate_candidate_cell_residual_head_checkpoint` 显式补齐 residual head，且不继承旧 optimizer state。
+旧 factorized checkpoint、旧 shared-encoder PPO checkpoint、缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint，以及缺少 fast threshold head 的 checkpoint 不兼容当前模型。主线不维护隐式部分加载；旧 v2 autoregressive head checkpoint 需要先通过显式 inflation 工具补齐 residual head 和 fast threshold head，且不继承旧 optimizer state。
 
 ## 部署与验证
 
-部署使用逐步 argmax 路径。固定六步循环应在 ONNX 导出时展开，优先使用 Gather、ScatterElements、Where、ArgMax 和基础整数/布尔算子；训练用 `torch.multinomial` 不进入确定性部署图。
+部署使用逐步 argmax 路径，并对 threshold 使用 `mu_raw` 均值路径。固定六步循环应在 ONNX 导出时展开，优先使用 Gather、ScatterElements、Where、ArgMax、Sigmoid 和基础整数/布尔算子；训练用 `torch.multinomial`、Normal sampling 和 threshold logprob 不进入确定性部署图。
 
 最低测试要求：
 
@@ -316,6 +409,8 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - 非法动作不更新位置的规则参考对照。
 - rollout 与 teacher forcing logprob 等价。
 - candidate-cell residual head 初始为零扰动；旧 head checkpoint inflation 后 deterministic action 完全等价。
+- fast threshold head 初始 `threshold ~= 8`，旧 checkpoint inflation 后官方动作完全等价且 threshold 输出固定在 8 附近。
+- threshold raw teacher forcing logprob 等价，部署均值路径不会采样。
 - PPO 双输入中 actor feature 只影响 policy/logprob，critic feature 只影响 value。
 - critic 四角色 gather 的 channel index、shape 和 P1/P2 视角。
 - masked entropy、前向和反向 finite。
