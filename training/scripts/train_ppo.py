@@ -1001,6 +1001,7 @@ def _training_diagnostics(batch) -> dict[str, float]:
     terminal_indices = [idx for idx, done in enumerate(batch.dones.detach().cpu().tolist()) if done]
     diagnostics.update(_terminal_diagnostics(batch, terminal_indices))
     diagnostics.update(_per_episode_event_diagnostics(batch, episode_count=len(terminal_indices)))
+    diagnostics.update(_fast_order_diagnostics(batch.infos, episode_count=len(terminal_indices)))
 
     assert batch.returns is not None
     assert batch.advantages is not None
@@ -1012,6 +1013,17 @@ def _training_diagnostics(batch) -> dict[str, float]:
     diagnostics["advantage_std"] = _tensor_std(batch.advantages)
     diagnostics.update(_reward_component_diagnostics(batch.infos))
     return diagnostics
+
+
+def _fast_order_diagnostics(infos: tuple[dict[str, Any], ...], *, episode_count: int) -> dict[str, float]:
+    latent_rates = [float(info["latent_first_rate"]) for info in infos if "latent_first_rate" in info]
+    fast_samples = [info for info in infos if bool(info.get("fast_order_sampled", False))]
+    agent_first = [info for info in fast_samples if bool(info.get("agent_first", False))]
+    return {
+        "latent_first_rate_mean": _mean(latent_rates),
+        "actual_fast_first_rate": 0.0 if not fast_samples else float(len(agent_first)) / float(len(fast_samples)),
+        "fast_order_samples_per_episode": 0.0 if episode_count <= 0 else float(len(fast_samples)) / float(episode_count),
+    }
 
 
 def _terminal_diagnostics(batch, terminal_indices: list[int]) -> dict[str, float]:

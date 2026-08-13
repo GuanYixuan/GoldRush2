@@ -71,8 +71,14 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertEqual(int(batch.dones.sum().item()), 2)
         self.assertEqual(batch.episode_ids[0], "pair-000000-seed-5-first")
         self.assertEqual(batch.episode_ids[1], "pair-000000-seed-5-second")
-        self.assertEqual(set(batch.infos[0]), {"scores", "events", "game_result"})
-        self.assertEqual(set(batch.infos[1]), {"scores", "events", "game_result"})
+        self.assertIn("scores", batch.infos[0])
+        self.assertIn("events", batch.infos[0])
+        self.assertIn("game_result", batch.infos[0])
+        self.assertIn("latent_first_rate", batch.infos[0])
+        self.assertIn("scores", batch.infos[1])
+        self.assertIn("events", batch.infos[1])
+        self.assertIn("game_result", batch.infos[1])
+        self.assertIn("latent_first_rate", batch.infos[1])
         self.assertEqual(stats["rollout_mode"], "multiprocess")
         self.assertEqual(stats["first_started"], 1)
         self.assertEqual(stats["second_started"], 1)
@@ -141,7 +147,7 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertEqual(second_stats["worker_all_ready_ms"], 0.0)
         self.assertEqual(second_stats["worker_ready_count"], 2)
 
-    def test_training_info_mode_keeps_non_terminal_infos_empty(self) -> None:
+    def test_training_info_mode_keeps_only_light_non_terminal_infos(self) -> None:
         model = _small_model()
         sampler = BatchRolloutSampler(
             env_config=SingleAgentEnvConfig(episode=_two_round_episode(), opponent_spec=_stay_opponent_spec()),
@@ -161,10 +167,23 @@ class MultiprocessRolloutTests(unittest.TestCase):
         )
 
         self.assertEqual(batch.transition_count, 4)
-        self.assertEqual(batch.infos[0], {})
-        self.assertEqual(set(batch.infos[1]), {"scores", "events", "game_result"})
-        self.assertEqual(batch.infos[2], {})
-        self.assertEqual(set(batch.infos[3]), {"scores", "events", "game_result"})
+        self.assertEqual(
+            set(batch.infos[0]),
+            {"first_player_id", "agent_decision_mode", "latent_first_rate", "fast_order_sampled", "agent_first"},
+        )
+        self.assertEqual(batch.infos[0]["agent_decision_mode"], "neural")
+        self.assertFalse(batch.infos[0]["fast_order_sampled"])
+        self.assertIn("scores", batch.infos[1])
+        self.assertIn("events", batch.infos[1])
+        self.assertIn("game_result", batch.infos[1])
+        self.assertIn("latent_first_rate", batch.infos[1])
+        self.assertEqual(
+            set(batch.infos[2]),
+            {"first_player_id", "agent_decision_mode", "latent_first_rate", "fast_order_sampled", "agent_first"},
+        )
+        self.assertIn("scores", batch.infos[3])
+        self.assertIn("events", batch.infos[3])
+        self.assertIn("game_result", batch.infos[3])
 
     def test_training_info_mode_reports_episode_event_totals_on_terminal_step(self) -> None:
         episode_events = _empty_event_counts()
@@ -180,8 +199,15 @@ class MultiprocessRolloutTests(unittest.TestCase):
             },
         )
 
+        step_order_info = {
+            "first_player_id": 2,
+            "agent_decision_mode": "neural",
+            "latent_first_rate": 0.8,
+            "fast_order_sampled": False,
+            "agent_first": False,
+        }
         non_terminal = transition_info(
-            {"events": {"pickups": {1: 999}}, "reward_components": {"total": 0.25}},
+            {"events": {"pickups": {1: 999}}, "reward_components": {"total": 0.25}, **step_order_info},
             done=False,
             mode="training",
             episode_events=episode_events,
@@ -203,13 +229,19 @@ class MultiprocessRolloutTests(unittest.TestCase):
                 "scores": {"net_gold": {1: 10, 2: 5}},
                 "events": {"pickups": {1: 2, 2: 1}},
                 "game_result": object(),
+                **step_order_info,
             },
             done=True,
             mode="training",
             episode_events=episode_events,
         )
 
-        self.assertEqual(non_terminal, {"reward_components": {"total": 0.25}})
+        self.assertEqual(non_terminal, {**step_order_info, "reward_components": {"total": 0.25}})
+        self.assertEqual(terminal["first_player_id"], 2)
+        self.assertEqual(terminal["agent_decision_mode"], "neural")
+        self.assertEqual(terminal["latent_first_rate"], 0.8)
+        self.assertFalse(terminal["fast_order_sampled"])
+        self.assertFalse(terminal["agent_first"])
         self.assertEqual(terminal["events"]["pickups"], {1: 3, 2: 1})
         self.assertEqual(terminal["events"]["pickup_gold"], {1: 11, 2: 5})
         self.assertEqual(terminal["events"]["bomb_triggers"], {1: 1, 2: 1})

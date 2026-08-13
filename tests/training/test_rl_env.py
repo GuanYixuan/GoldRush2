@@ -10,7 +10,15 @@ from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, Out
 from simulator.mechanisms.maps import SpawnConfig
 from simulator.types import Action, GameOutput, GoldGenerationEvent, Position
 from training.opponents import OpponentSpec
-from training.rl import SingleAgentEnvConfig, SingleAgentGoldRushEnv
+from training.rl import (
+    AGENT_DECISION_FAST,
+    AGENT_DECISION_NEURAL,
+    FAST_ORDER_LATENT_FIRST_RATE_MIXTURE,
+    FastOrderConfig,
+    SingleAgentEnvConfig,
+    SingleAgentGoldRushEnv,
+)
+from training.rl.fast_order import make_fast_order_rng, make_latent_first_rate_rng, sample_latent_first_rate
 
 
 class RLEnvTests(unittest.TestCase):
@@ -31,6 +39,9 @@ class RLEnvTests(unittest.TestCase):
         self.assertFalse(step.truncated)
         self.assertEqual(step.reward, 1.0)
         self.assertEqual(step.info["first_player_id"], 2)
+        self.assertEqual(step.info["agent_decision_mode"], AGENT_DECISION_NEURAL)
+        self.assertFalse(step.info["fast_order_sampled"])
+        self.assertFalse(step.info["agent_first"])
         self.assertEqual(step.info["game_result"].winner_id, 1)
         self.assertEqual(step.info["scores"]["net_gold"][1], 4)
         self.assertEqual(step.info["events"]["pickups"][1], 1)
@@ -80,6 +91,64 @@ class RLEnvTests(unittest.TestCase):
 
         with self.assertRaisesRegex(Exception, "not reset"):
             env.step(_stay_output())
+
+    def test_fast_decision_mode_uses_latent_first_rate_for_order(self) -> None:
+        env_first = SingleAgentGoldRushEnv(
+            config=SingleAgentEnvConfig(
+                episode=_one_round_episode(),
+                opponent_spec=_stay_opponent_spec(),
+                fast_order=FastOrderConfig(((1.0, 1.0, 1.0),)),
+            ),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+        )
+        env_first.reset(seed=11, map_id=1, agent_player_id=1)
+        first_step = env_first.step(_stay_output(), agent_decision_mode=AGENT_DECISION_FAST)
+
+        env_second = SingleAgentGoldRushEnv(
+            config=SingleAgentEnvConfig(
+                episode=_one_round_episode(),
+                opponent_spec=_stay_opponent_spec(),
+                fast_order=FastOrderConfig(((1.0, 0.0, 0.0),)),
+            ),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+        )
+        env_second.reset(seed=11, map_id=1, agent_player_id=1)
+        second_step = env_second.step(_stay_output(), agent_decision_mode=AGENT_DECISION_FAST)
+
+        self.assertEqual(first_step.info["first_player_id"], 1)
+        self.assertTrue(first_step.info["fast_order_sampled"])
+        self.assertTrue(first_step.info["agent_first"])
+        self.assertEqual(first_step.info["latent_first_rate"], 1.0)
+        self.assertEqual(second_step.info["first_player_id"], 2)
+        self.assertTrue(second_step.info["fast_order_sampled"])
+        self.assertFalse(second_step.info["agent_first"])
+        self.assertEqual(second_step.info["latent_first_rate"], 0.0)
+
+    def test_fast_order_rng_streams_are_reproducible_and_independent(self) -> None:
+        config = FastOrderConfig(((1.0, 0.30, 0.70),))
+
+        first_rate = sample_latent_first_rate(make_latent_first_rate_rng(123), config)
+        second_rate = sample_latent_first_rate(make_latent_first_rate_rng(123), config)
+        p1_draw = make_fast_order_rng(123, agent_player_id=1).random()
+        p2_draw = make_fast_order_rng(123, agent_player_id=2).random()
+
+        self.assertEqual(first_rate, second_rate)
+        self.assertGreaterEqual(first_rate, 0.30)
+        self.assertLessEqual(first_rate, 0.70)
+        self.assertNotEqual(p1_draw, p2_draw)
+
+    def test_default_fast_order_mixture_matches_conservative_regimes(self) -> None:
+        self.assertEqual(
+            FAST_ORDER_LATENT_FIRST_RATE_MIXTURE,
+            (
+                (0.40, 0.95, 1.00),
+                (0.20, 0.70, 0.95),
+                (0.20, 0.30, 0.70),
+                (0.20, 0.02, 0.10),
+            ),
+        )
 
 
 def _one_round_episode() -> EpisodeConfig:

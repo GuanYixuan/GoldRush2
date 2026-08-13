@@ -246,13 +246,17 @@ def transition_info(
 ) -> dict[str, Any]:
     if mode == "debug":
         return step_info
+    order_payload = _order_info(step_info)
     if mode == "training":
         reward_components = step_info.get("reward_components")
         if not done:
-            return {} if reward_components is None else {"reward_components": reward_components}
+            if reward_components is not None:
+                order_payload["reward_components"] = reward_components
+            return order_payload
         if episode_events is None:
             raise SimulatorRuleError("training transition info requires episode event totals on terminal step")
         payload = {
+            **order_payload,
             "scores": step_info["scores"],
             "events": _copy_event_counts(episode_events),
             "game_result": step_info["game_result"],
@@ -261,6 +265,16 @@ def transition_info(
             payload["reward_components"] = reward_components
         return payload
     raise SimulatorRuleError(f"unknown transition_info_mode: {mode!r}")
+
+
+def _order_info(step_info: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "first_player_id": int(step_info["first_player_id"]),
+        "agent_decision_mode": str(step_info.get("agent_decision_mode", "neural")),
+        "latent_first_rate": float(step_info.get("latent_first_rate", 0.0)),
+        "fast_order_sampled": bool(step_info.get("fast_order_sampled", False)),
+        "agent_first": bool(step_info.get("agent_first", False)),
+    }
 
 
 def _empty_event_counts() -> dict[str, dict[int, int]]:

@@ -1,8 +1,9 @@
 """Minimal RL environment adapters for GoldRush2 training."""
 
-from .env import SingleAgentEnvConfig, SingleAgentGoldRushEnv
+from .env import AGENT_DECISION_FAST, AGENT_DECISION_NEURAL, SingleAgentEnvConfig, SingleAgentGoldRushEnv
 from .eval import EvaluationCase, EvaluationConfig, EvaluationResult, EvaluationSuite, evaluate_policy
 from .eval_mp import EvalEpisodeSummary, EvalTask, ParallelEvalConfig, ParallelEvalPool, evaluate_parallel
+from .fast_order import FAST_ORDER_LATENT_FIRST_RATE_MIXTURE, FastOrderConfig
 from .multiprocess_rollout import MultiprocessRolloutConfig, MultiprocessRolloutPool, collect_multiprocess_ppo_rollouts
 from .ppo import (
     PpoConfig,
@@ -28,6 +29,8 @@ from .types import ResetResult, StepResult
 
 __all__ = [
     "BatchRolloutSampler",
+    "AGENT_DECISION_FAST",
+    "AGENT_DECISION_NEURAL",
     "EpisodeBatch",
     "EvaluationCase",
     "EvaluationConfig",
@@ -35,6 +38,8 @@ __all__ = [
     "EvaluationSuite",
     "EvalEpisodeSummary",
     "EvalTask",
+    "FAST_ORDER_LATENT_FIRST_RATE_MIXTURE",
+    "FastOrderConfig",
     "MultiprocessRolloutConfig",
     "MultiprocessRolloutPool",
     "ParallelEvalConfig",

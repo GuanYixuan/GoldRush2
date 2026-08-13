@@ -15,8 +15,13 @@ from simulator.types import GameOutput
 from training.opponents import EpisodeContext, OpponentLeague, OpponentRunner, OpponentSpec, build_runner
 from training.opponents.league import LeagueSplit
 
+from .fast_order import FastOrderConfig, make_fast_order_rng, make_latent_first_rate_rng, sample_latent_first_rate
 from .rewards import RewardFn, WinLossReward
 from .types import ResetResult, StepResult
+
+
+AGENT_DECISION_NEURAL = "neural"
+AGENT_DECISION_FAST = "fast"
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,7 @@ class SingleAgentEnvConfig:
     opponent_league: OpponentLeague | None = None
     league_split: LeagueSplit = "train"
     record_replay: bool = False
+    fast_order: FastOrderConfig = field(default_factory=FastOrderConfig)
 
     def __post_init__(self) -> None:
         if self.agent_player_id not in (1, 2):
@@ -36,8 +42,9 @@ class SingleAgentEnvConfig:
 class SingleAgentGoldRushEnv:
     """Single-agent training adapter around RoundStepEnv.
 
-    The agent always acts after the opponent in this first version. Both sides
-    still receive observations from the same action-time state, matching the
+    Neural decisions use the slow-path ordering where the opponent acts first.
+    Fast decisions sample the first actor from the per-episode latent first
+    rate. Both sides still decide from the same action-time state, matching the
     platform semantics.
     """
 
@@ -62,6 +69,8 @@ class SingleAgentGoldRushEnv:
         self.opponent_runner: OpponentRunner | None = None
         self.round_env: RoundStepEnv | None = None
         self.observations: dict[int, GameInput] = {}
+        self.latent_first_rate = 0.0
+        self.fast_order_rng = random.Random()
         self.terminated = True
 
     def reset(
@@ -103,6 +112,11 @@ class SingleAgentGoldRushEnv:
             p90_latency_ns=_agent_slow_p90(self.agent_player_id),
         )
         self.observations = self.round_env.reset(seed=episode_seed, map_id=episode_map_id)
+        self.latent_first_rate = sample_latent_first_rate(
+            make_latent_first_rate_rng(episode_seed),
+            self.config.fast_order,
+        )
+        self.fast_order_rng = make_fast_order_rng(episode_seed, agent_player_id=self.agent_player_id)
         reset_reward = getattr(self.reward_fn, "reset", None)
         if callable(reset_reward):
             assert self.round_env.state is not None
@@ -110,19 +124,30 @@ class SingleAgentGoldRushEnv:
         self.terminated = False
         return ResetResult(observation=self.observations[self.agent_player_id], info=self._reset_info(episode_seed))
 
-    def step(self, agent_output: GameOutput | Sequence[int]) -> StepResult:
+    def step(
+        self,
+        agent_output: GameOutput | Sequence[int],
+        *,
+        agent_decision_mode: str = AGENT_DECISION_NEURAL,
+    ) -> StepResult:
         if self.round_env is None or self.opponent_runner is None or self.opponent_spec is None:
             raise SimulatorRuleError("single-agent RL environment is not reset")
         if self.terminated:
             raise SimulatorRuleError("cannot step a terminated single-agent RL environment; call reset() first")
 
+        if agent_decision_mode not in (AGENT_DECISION_NEURAL, AGENT_DECISION_FAST):
+            raise SimulatorRuleError(f"unknown agent_decision_mode: {agent_decision_mode!r}")
+
         opponent_output = self.opponent_runner.act(self.observations[self.opponent_player_id])
+        fast_order_sampled = agent_decision_mode == AGENT_DECISION_FAST
+        agent_first = bool(fast_order_sampled and self.fast_order_rng.random() < self.latent_first_rate)
+        first_player_id = self.agent_player_id if agent_first else self.opponent_player_id
         result = self.round_env.step(
             {
                 self.agent_player_id: agent_output,
                 self.opponent_player_id: opponent_output,
             },
-            first_player_id=self.opponent_player_id,
+            first_player_id=first_player_id,
         )
         reward = self.reward_fn(result, agent_player_id=self.agent_player_id)
         reward_components = getattr(self.reward_fn, "last_components", None)
@@ -142,6 +167,10 @@ class SingleAgentGoldRushEnv:
                 opponent_output=opponent_output,
                 opponent_spec=self.opponent_spec,
                 reward_components=reward_components,
+                agent_decision_mode=agent_decision_mode,
+                latent_first_rate=self.latent_first_rate,
+                fast_order_sampled=fast_order_sampled,
+                agent_first=agent_first,
             ),
         )
 
@@ -163,7 +192,8 @@ class SingleAgentGoldRushEnv:
             "agent_player_id": self.agent_player_id,
             "opponent_player_id": self.opponent_player_id,
             "opponent_spec": self.opponent_spec,
-            "order_mode": "agent_after_opponent",
+            "order_mode": "neural_after_opponent_fast_latent",
+            "latent_first_rate": self.latent_first_rate,
             "p90_latency_ns": _agent_slow_p90(self.agent_player_id),
         }
 
@@ -177,6 +207,10 @@ def _step_info(
     opponent_output: GameOutput,
     opponent_spec: OpponentSpec,
     reward_components: dict[str, float] | None,
+    agent_decision_mode: str,
+    latent_first_rate: float,
+    fast_order_sampled: bool,
+    agent_first: bool,
 ) -> dict[str, Any]:
     return {
         "round_index": result.trace.round_index,
@@ -186,6 +220,10 @@ def _step_info(
         "agent_output": agent_output,
         "opponent_output": opponent_output,
         "opponent_spec": opponent_spec,
+        "agent_decision_mode": agent_decision_mode,
+        "latent_first_rate": float(latent_first_rate),
+        "fast_order_sampled": bool(fast_order_sampled),
+        "agent_first": bool(agent_first),
         "scores": _scores(result),
         "events": _event_counts(result.trace),
         "reward_components": reward_components,
