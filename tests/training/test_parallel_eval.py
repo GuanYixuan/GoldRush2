@@ -10,6 +10,8 @@ from simulator.mechanisms.maps import SpawnConfig
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.opponents import OpponentSpec
 from training.rl import EvalTask, ParallelEvalConfig, ParallelEvalPool, SingleAgentEnvConfig, evaluate_parallel
+from training.rl.eval_mp.scheduler import _request_uniform_row
+from training.rl.eval_mp.types import EvalFeatureRequest
 
 
 class ParallelEvalTests(unittest.TestCase):
@@ -92,6 +94,25 @@ class ParallelEvalTests(unittest.TestCase):
         self.assertEqual(second_stats["eval_worker_startup_ms"], 0.0)
         self.assertEqual(second_stats["eval_worker_all_ready_ms"], 0.0)
         self.assertEqual(second_stats["eval_worker_ready_count"], 2)
+
+    def test_crn_uniform_row_covers_threshold_sample(self) -> None:
+        request = EvalFeatureRequest(
+            worker_id=0,
+            eval_id="eval",
+            task_id="task",
+            request_id="request",
+            round_index=3,
+            feature_slot=0,
+            policy_sample_key="policy",
+            policy_sample_seed=123,
+        )
+
+        first = _request_uniform_row(request)
+        second = _request_uniform_row(request)
+
+        self.assertEqual(len(first), 9)
+        self.assertEqual(first, second)
+        self.assertTrue(all(0.0 < value < 1.0 for value in first))
 
 
 def _tasks(seed: int) -> tuple[EvalTask, EvalTask]:

@@ -9,7 +9,7 @@ from simulator.envs.round_step import RoundStepMechanisms
 from simulator.mechanisms.bombs import BernoulliBombRefresher, BombConfig
 from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, OuterGoldConfig, OuterGoldGenerator
 from simulator.mechanisms.maps import SpawnConfig
-from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
+from training.models import INITIAL_FAST_SCALARS, GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.opponents import OpponentSpec
 from training.rl import (
     BatchRolloutSampler,
@@ -21,6 +21,12 @@ from training.rl import (
     ppo_update,
 )
 from training.rl.rollout_mp.worker import _add_event_counts, _empty_event_counts, transition_info
+from training.rl.rollout_mp.shared_memory import (
+    attach_feature_shared_memory,
+    attach_transition_shared_memory,
+    create_feature_shared_memory,
+    create_transition_shared_memory,
+)
 
 
 class MultiprocessRolloutTests(unittest.TestCase):
@@ -54,8 +60,14 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertEqual(batch.transition_count, 2)
         self.assertEqual(tuple(batch.spatial_planes.shape), (2, 43, 17, 17))
         self.assertEqual(tuple(batch.scalars.shape), (2, 10))
+        self.assertEqual(tuple(batch.fast_scalars.shape), (2, 2))
         self.assertEqual(tuple(batch.critic_planes.shape), (2, 26, 17, 17))
         self.assertEqual(tuple(batch.critic_scalars.shape), (2, 17))
+        self.assertTrue(torch.allclose(batch.fast_scalars, torch.tensor(INITIAL_FAST_SCALARS).expand(2, -1)))
+        self.assertEqual(tuple(batch.threshold_raw.shape), (2,))
+        self.assertEqual(tuple(batch.threshold_int.shape), (2,))
+        self.assertTrue(torch.isfinite(batch.threshold_raw).all().item())
+        self.assertTrue(((batch.threshold_int >= 4) & (batch.threshold_int <= 30)).all().item())
         self.assertEqual(int(batch.dones.sum().item()), 2)
         self.assertEqual(batch.episode_ids[0], "pair-000000-seed-5-first")
         self.assertEqual(batch.episode_ids[1], "pair-000000-seed-5-second")
@@ -233,6 +245,35 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertIn("trace", batch.infos[0])
         self.assertIn("agent_output", batch.infos[0])
         self.assertIn("opponent_output", batch.infos[0])
+
+    def test_rollout_shared_memory_roundtrip_includes_fast_threshold_fields(self) -> None:
+        feature_shared = create_feature_shared_memory(num_workers=1)
+        transition_shared = create_transition_shared_memory(episode_count=1, round_count=2)
+        try:
+            feature_shared.fast_scalars[0, :] = (0.75, 0.5)
+            transition_shared.fast_scalars[0, 1, :] = (0.6, 0.4)
+            transition_shared.threshold_raw[0, 1] = -0.25
+            transition_shared.threshold_int[0, 1] = 12
+
+            attached_feature = attach_feature_shared_memory(feature_shared.config())
+            attached_transition = attach_transition_shared_memory(transition_shared.config())
+            try:
+                self.assertEqual(tuple(attached_feature.fast_scalars.shape), (1, 2))
+                self.assertEqual(tuple(attached_transition.fast_scalars.shape), (1, 2, 2))
+                self.assertEqual(tuple(attached_transition.threshold_raw.shape), (1, 2))
+                self.assertEqual(tuple(attached_transition.threshold_int.shape), (1, 2))
+                self.assertTrue(torch.allclose(torch.as_tensor(attached_feature.fast_scalars[0]), torch.tensor([0.75, 0.5])))
+                self.assertTrue(torch.allclose(torch.as_tensor(attached_transition.fast_scalars[0, 1]), torch.tensor([0.6, 0.4])))
+                self.assertAlmostEqual(float(attached_transition.threshold_raw[0, 1]), -0.25)
+                self.assertEqual(int(attached_transition.threshold_int[0, 1]), 12)
+            finally:
+                attached_feature.close()
+                attached_transition.close()
+        finally:
+            feature_shared.close()
+            feature_shared.unlink()
+            transition_shared.close()
+            transition_shared.unlink()
 
 
 def _small_model() -> GoldRushPolicyNetwork:

@@ -10,7 +10,7 @@ from simulator.envs.round_step import RoundStepMechanisms
 from simulator.mechanisms.bombs import BernoulliBombRefresher, BombConfig
 from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, OuterGoldConfig, OuterGoldGenerator
 from simulator.mechanisms.maps import SpawnConfig
-from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
+from training.models import INITIAL_FAST_SCALARS, GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.opponents import OpponentSpec
 from training.rl import (
     BatchRolloutSampler,
@@ -93,8 +93,12 @@ class PpoTests(unittest.TestCase):
         self.assertEqual(batch.episode_ids[0], "pair-000000-seed-5-first")
         self.assertEqual(batch.episode_ids[1], "pair-000000-seed-5-second")
         self.assertEqual(tuple(batch.spatial_planes.shape), (2, 43, 17, 17))
+        self.assertEqual(tuple(batch.fast_scalars.shape), (2, 2))
         self.assertEqual(tuple(batch.critic_planes.shape), (2, 26, 17, 17))
         self.assertEqual(tuple(batch.critic_scalars.shape), (2, 17))
+        self.assertTrue(torch.allclose(batch.fast_scalars, torch.tensor(INITIAL_FAST_SCALARS).expand(2, -1)))
+        self.assertTrue(torch.isfinite(batch.threshold_raw).all().item())
+        self.assertTrue(((batch.threshold_int >= 4) & (batch.threshold_int <= 30)).all().item())
         self.assertEqual(stats.update_count, 1)
 
 
