@@ -406,6 +406,8 @@ belief 更新发生在当前 neural model 推理前，使 `fast_scalars_now` 能
 
 不允许网络输出任意程序。
 
+训练和部署必须复用同一套 C++ `policy_runtime` fast runtime core。Python rollout/eval 只允许通过 pybind 调用 C++ 的 `try_fast`、pending backfill、belief 更新和 feature restore；不得在 Python 侧另写一份 first-hit、path、belief 或 pending restore 逻辑。这样可以避免 threshold head 在训练中学习到与提交 `.so` 不一致的触发边界。
+
 ## 实验路线
 
 推荐分阶段推进：
