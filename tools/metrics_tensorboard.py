@@ -16,55 +16,6 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_METRICS = (
-    "actor_lr",
-    "critic_lr",
-    "approx_joint_kl",
-    "clip_fraction",
-    "policy_loss",
-    "value_loss",
-    "explained_variance",
-    "entropy_bonus",
-    "grad_norm",
-    "actor_grad_norm",
-    "critic_grad_norm",
-    "early_stopped",
-    "loss",
-    "mean_reward",
-    "return_mean",
-    "return_std",
-    "reward_sum",
-    "reward_clipped_net_gold_gain_mean",
-    "reward_net_gold_gain_mean",
-    "reward_net_gold_gain_reward_mean",
-    "advantage_mean",
-    "advantage_std",
-    "value_mean",
-    "value_std",
-    "train_win_rate",
-    "train_net_gold_margin_mean",
-    "train_agent_net_gold_mean",
-    "train_opponent_net_gold_mean",
-    "train_agent_pickups_mean",
-    "train_opponent_pickups_mean",
-    "train_agent_vision_spent_mean",
-    "train_agent_bomb_lost_gold_per_episode",
-    "train_agent_bomb_triggers_per_episode",
-    "train_agent_pickup_gold_per_episode",
-    "train_agent_trample_penalty_per_episode",
-    "train_agent_tramples_per_episode",
-    "train_opponent_bomb_lost_gold_per_episode",
-    "train_opponent_bomb_triggers_per_episode",
-    "train_opponent_pickup_gold_per_episode",
-    "train_opponent_trample_penalty_per_episode",
-    "train_opponent_tramples_per_episode",
-    "batch_assembly_ms",
-    "inference_total_with_action_send_ms",
-    "scheduler_ms",
-    "worker_per_transition_episode_wall_ms",
-    "update_wall_ms",
-)
-
 POLICY_METRICS = {
     "approx_joint_kl",
     "clip_fraction",
@@ -106,7 +57,34 @@ SYSTEM_METRICS = {
     "ppo_update_count",
     "trainable_param_count",
 }
+FAST_OPTION_PREFIXES = (
+    "fast_",
+    "threshold_",
+    "actual_fast_",
+    "latent_first_rate_",
+    "macro_tau_",
+)
+FAST_OPTION_METRICS = {
+    "policy_decision_count",
+    "env_step_count_estimated",
+}
+CONFIG_PREFIXES = ("beta_",)
+CONFIG_SUFFIXES = (
+    "_learning_rate",
+    "_scale",
+    "_updates",
+)
+CONFIG_METRICS = {
+    "enable_fast_runtime_features",
+    "fixed_rollout_seeds",
+    "fork_checkpoint_update",
+    "freeze_ko_vp_heads",
+    "rollout_num_workers",
+    "rollout_seed",
+    "update",
+}
 REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_EXPERIMENT_ROOT = REPO_ROOT / "temp/ppo_manual_lab/runs"
 
 
 @dataclass
@@ -114,6 +92,7 @@ class Source:
     path: Path
     series: str
     offset: int = 0
+    min_update: int | None = None
 
 
 @dataclass(frozen=True)
@@ -122,15 +101,15 @@ class Experiment:
     label: str
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="将选定实验目录内的 metrics.jsonl 导出为 TensorBoard。"
     )
     parser.add_argument(
         "experiments",
-        nargs="+",
+        nargs="*",
         type=Path,
-        help="递归扫描的一个或多个实验目录",
+        help=f"递归扫描的一个或多个实验目录；默认扫描 {DEFAULT_EXPERIMENT_ROOT.relative_to(REPO_ROOT)}",
     )
     parser.add_argument(
         "--logdir",
@@ -147,25 +126,61 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--all-metrics",
         action="store_true",
-        help="导出每个有限数值字段，而非默认的核心指标集合",
+        help="导出每个有限数值字段，包括默认会过滤的配置常量",
     )
     parser.add_argument(
         "--watch-seconds",
         type=float,
-        default=None,
+        default=10.0,
         metavar="SECONDS",
-        help="以此间隔持续读取追加的 JSONL 行",
+        help="以此间隔持续读取追加的 JSONL 行；默认 10 秒",
+    )
+    parser.add_argument(
+        "--no-watch",
+        action="store_true",
+        help="只导出当前已有记录后退出",
+    )
+    parser.add_argument(
+        "--start-update",
+        type=int,
+        default=None,
+        help="只导出 update 大于等于该值的记录，用于跳过长历史前缀",
+    )
+    parser.add_argument(
+        "--tail-updates",
+        type=int,
+        default=None,
+        help="每个 metrics 文件只导出最近 N 个 update；与 --start-update 不能同时使用",
+    )
+    parser.add_argument(
+        "--discover-interval",
+        type=float,
+        default=60.0,
+        metavar="SECONDS",
+        help="watch 模式下递归发现新 metrics.jsonl 的间隔；设为 0 表示每轮都扫描",
     )
     parser.add_argument(
         "--overwrite",
         action="store_true",
         help="导出前删除已有 --logdir",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if not args.experiments:
+        args.experiments = [DEFAULT_EXPERIMENT_ROOT]
+    if args.no_watch:
+        args.watch_seconds = None
     if args.all_metrics and args.metric:
         parser.error("--all-metrics 和 --metric 不能同时使用")
     if args.watch_seconds is not None and args.watch_seconds <= 0:
         parser.error("--watch-seconds 必须为正数")
+    if args.start_update is not None and args.start_update < 0:
+        parser.error("--start-update 不能为负数")
+    if args.tail_updates is not None and args.tail_updates <= 0:
+        parser.error("--tail-updates 必须为正数")
+    if args.start_update is not None and args.tail_updates is not None:
+        parser.error("--start-update 和 --tail-updates 不能同时使用")
+    if args.discover_interval < 0:
+        parser.error("--discover-interval 不能为负数")
     if args.overwrite and args.logdir is None:
         parser.error("--overwrite 必须与显式 --logdir 一起使用")
     return args
@@ -191,19 +206,32 @@ def main() -> None:
     logdir = default_logdir() if args.logdir is None else args.logdir.resolve()
     experiments = prepare_experiments(args.experiments, logdir)
     sources = discover_sources(experiments, require_any=args.watch_seconds is None)
+    configure_source_update_filters(sources, start_update=args.start_update, tail_updates=args.tail_updates)
     prepare_logdir(logdir, overwrite=args.overwrite)
     print(f"TensorBoard event 输出目录：{logdir}")
-    selected_metrics = None if args.all_metrics else set(args.metric or DEFAULT_METRICS)
+    selected_metrics = set(args.metric) if args.metric else None
     writers = {source.path: SummaryWriter(log_dir=str(logdir / source.series)) for source in sources}
     try:
-        export_once(sources, writers, selected_metrics)
+        export_once(sources, writers, selected_metrics, export_config_metrics=args.all_metrics)
         if args.watch_seconds is None:
             return
+        last_discovery = time.monotonic()
         print(f"每 {args.watch_seconds:g} 秒跟随 {len(sources)} 个 metrics 文件；Ctrl-C 停止。")
         while True:
             time.sleep(args.watch_seconds)
-            register_new_sources(experiments, sources, writers, SummaryWriter, logdir)
-            export_once(sources, writers, selected_metrics)
+            now = time.monotonic()
+            if args.discover_interval == 0 or now - last_discovery >= args.discover_interval:
+                register_new_sources(
+                    experiments,
+                    sources,
+                    writers,
+                    SummaryWriter,
+                    logdir,
+                    start_update=args.start_update,
+                    tail_updates=args.tail_updates,
+                )
+                last_discovery = now
+            export_once(sources, writers, selected_metrics, export_config_metrics=args.all_metrics)
     except KeyboardInterrupt:
         print("已停止。")
     finally:
@@ -243,11 +271,15 @@ def register_new_sources(
     writers: dict[Path, Any],
     summary_writer: Any,
     logdir: Path,
+    *,
+    start_update: int | None,
+    tail_updates: int | None,
 ) -> None:
     known_paths = {source.path for source in sources}
     for source in discover_sources_silently(experiments):
         if source.path in known_paths:
             continue
+        configure_source_update_filters([source], start_update=start_update, tail_updates=tail_updates)
         sources.append(source)
         writers[source.path] = summary_writer(log_dir=str(logdir / source.series))
         print(f"发现新 metrics 文件：{source.series}: {source.path}")
@@ -261,6 +293,50 @@ def discover_sources_silently(experiments: list[Experiment]) -> list[Source]:
             series = experiment.label if relative_parent == Path(".") else f"{experiment.label}/{relative_parent.as_posix()}"
             sources.append(Source(path=metrics_path, series=series))
     return sources
+
+
+def configure_source_update_filters(
+    sources: list[Source],
+    *,
+    start_update: int | None,
+    tail_updates: int | None,
+) -> None:
+    for source in sources:
+        if start_update is not None:
+            source.min_update = int(start_update)
+        elif tail_updates is not None:
+            latest_update = read_latest_update(source.path)
+            if latest_update is not None:
+                source.min_update = max(0, latest_update - int(tail_updates) + 1)
+
+
+def read_latest_update(path: Path) -> int | None:
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        end = handle.tell()
+        chunk_size = 64 * 1024
+        data = b""
+        while end > 0:
+            start = max(0, end - chunk_size)
+            handle.seek(start)
+            data = handle.read(end - start) + data
+            lines = data.splitlines()
+            if data.endswith(b"\n"):
+                candidates = lines
+            else:
+                candidates = lines[:-1]
+            for raw_line in reversed(candidates):
+                if not raw_line.strip():
+                    continue
+                try:
+                    row = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict) or "update" not in row:
+                    raise RuntimeError(f"JSONL 末行缺少 update 字段：{path}")
+                return int(row["update"])
+            end = start
+    return None
 
 
 def unique_series_label(label: str, used: set[str]) -> str:
@@ -293,49 +369,56 @@ def prepare_logdir(logdir: Path, *, overwrite: bool) -> None:
     logdir.mkdir(parents=True)
 
 
-def export_once(sources: list[Source], writers: dict[Path, Any], selected_metrics: set[str] | None) -> None:
+def export_once(
+    sources: list[Source],
+    writers: dict[Path, Any],
+    selected_metrics: set[str] | None,
+    *,
+    export_config_metrics: bool,
+) -> None:
     total_rows = 0
     for source in sources:
         if source.path.stat().st_size < source.offset:
             raise RuntimeError(f"跟随期间 metrics 文件被截断：{source.path}")
-        rows = read_complete_rows(source)
-        for row in rows:
-            write_row(writers[source.path], row, selected_metrics)
-        total_rows += len(rows)
+        for row in read_complete_rows(source):
+            if source.min_update is not None and int(row["update"]) < source.min_update:
+                continue
+            write_row(writers[source.path], row, selected_metrics, export_config_metrics=export_config_metrics)
+            total_rows += 1
     if total_rows:
         for writer in writers.values():
             writer.flush()
         print(f"已导出 {total_rows} 条新记录。")
 
 
-def read_complete_rows(source: Source) -> list[dict[str, Any]]:
+def read_complete_rows(source: Source):
     with source.path.open("rb") as handle:
         handle.seek(source.offset)
-        payload = handle.read()
-    rows: list[dict[str, Any]] = []
-    consumed = 0
-    for raw_line in payload.splitlines(keepends=True):
-        if not raw_line.endswith(b"\n"):
-            break
-        consumed += len(raw_line)
-        try:
-            row = json.loads(raw_line)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"JSONL 行无效，文件为 {source.path}，字节位置为 {source.offset + consumed}") from exc
-        if not isinstance(row, dict):
-            raise RuntimeError(f"JSONL 行必须是对象：{source.path}")
-        if "update" not in row:
-            raise RuntimeError(f"JSONL 行缺少 update 字段：{source.path}")
-        rows.append(row)
-    source.offset += consumed
-    return rows
+        for raw_line in handle:
+            if not raw_line.endswith(b"\n"):
+                break
+            line_offset = source.offset
+            try:
+                row = json.loads(raw_line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"JSONL 行无效，文件为 {source.path}，字节位置为 {line_offset}") from exc
+            if not isinstance(row, dict):
+                raise RuntimeError(f"JSONL 行必须是对象：{source.path}")
+            if "update" not in row:
+                raise RuntimeError(f"JSONL 行缺少 update 字段：{source.path}")
+            source.offset += len(raw_line)
+            yield row
 
 
-def write_row(writer: Any, row: dict[str, Any], selected_metrics: set[str] | None) -> None:
+def write_row(
+    writer: Any,
+    row: dict[str, Any],
+    selected_metrics: set[str] | None,
+    *,
+    export_config_metrics: bool,
+) -> None:
     step = int(row["update"])
     for field, value in row.items():
-        if selected_metrics is not None and field not in selected_metrics:
-            continue
         if isinstance(value, bool):
             scalar = float(value)
         elif isinstance(value, (int, float)):
@@ -344,11 +427,28 @@ def write_row(writer: Any, row: dict[str, Any], selected_metrics: set[str] | Non
             continue
         if not math.isfinite(scalar):
             continue
+        if selected_metrics is not None:
+            if field not in selected_metrics:
+                continue
+        elif not export_config_metrics and not is_default_export_metric(field):
+            continue
         writer.add_scalar(metric_tag(field), scalar, global_step=step)
 
 
+def is_default_export_metric(field: str) -> bool:
+    return not is_config_metric(field)
+
+
+def is_config_metric(field: str) -> bool:
+    if field in CONFIG_METRICS:
+        return True
+    if field.startswith(CONFIG_PREFIXES):
+        return True
+    return field.endswith(CONFIG_SUFFIXES)
+
+
 def metric_tag(field: str) -> str:
-    if field in {"actor_lr", "critic_lr"}:
+    if field.endswith("_lr"):
         return f"optimization/{field}"
     if field == "loss":
         return f"optimization/{field}"
@@ -360,6 +460,12 @@ def metric_tag(field: str) -> str:
         return f"critic/{field}"
     if field in RETURN_METRICS:
         return f"return/{field}"
+    if field.startswith("reward_"):
+        return f"return/{field}"
+    if is_config_metric(field):
+        return f"config/{field}"
+    if field.startswith(FAST_OPTION_PREFIXES) or field in FAST_OPTION_METRICS:
+        return f"fast_option/{field}"
     if field.startswith("train_agent_"):
         return f"agent_outcome/{field.removeprefix('train_agent_')}"
     if field.startswith("train_opponent_"):

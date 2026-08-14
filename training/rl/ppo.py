@@ -56,6 +56,8 @@ class PpoUpdateStats:
     grad_norm: float
     actor_grad_norm: float | None
     critic_grad_norm: float | None
+    threshold_entropy: float
+    threshold_approx_kl: float
     update_count: int
     early_stopped: bool
 
@@ -154,6 +156,7 @@ def ppo_update(
     grad_norms: list[float] = []
     actor_grad_norms: list[float] = []
     critic_grad_norms: list[float] = []
+    threshold_entropies: list[float] = []
     early_stopped = False
 
     for _epoch in range(config.update_epochs):
@@ -211,6 +214,7 @@ def ppo_update(
             )
             actor_grad_norms.append(float(torch.as_tensor(actor_grad_norm).detach().cpu().item()))
             critic_grad_norms.append(float(torch.as_tensor(critic_grad_norm).detach().cpu().item()))
+            threshold_entropies.append(float(evaluation.threshold_entropy.mean().detach().cpu().item()))
 
             if config.target_joint_kl is not None and float(approx_joint_kl.item()) > config.target_joint_kl:
                 early_stopped = True
@@ -229,6 +233,8 @@ def ppo_update(
         grad_norm=mean(grad_norms),
         actor_grad_norm=mean(actor_grad_norms),
         critic_grad_norm=mean(critic_grad_norms),
+        threshold_entropy=mean(threshold_entropies),
+        threshold_approx_kl=0.0,
         update_count=len(losses),
         early_stopped=early_stopped,
     )
@@ -282,6 +288,8 @@ def critic_only_update(
         grad_norm=mean(grad_norms),
         actor_grad_norm=None,
         critic_grad_norm=mean(grad_norms),
+        threshold_entropy=0.0,
+        threshold_approx_kl=0.0,
         update_count=len(losses),
         early_stopped=False,
     )

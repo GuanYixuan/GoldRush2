@@ -327,6 +327,17 @@ class TrainPpoTests(unittest.TestCase):
             self.assertIn("macro_tau_mean", result.train_metrics[0])
             records = _read_jsonl(Path(tmpdir) / "metrics.jsonl")
             self.assertTrue(records[0]["enable_fast_runtime_features"])
+            self.assertIn("threshold_raw_mean", records[0])
+            self.assertIn("threshold_raw_std", records[0])
+            self.assertIn("threshold_int_mean", records[0])
+            self.assertIn("threshold_int_p10", records[0])
+            self.assertIn("threshold_int_p50", records[0])
+            self.assertIn("threshold_int_p90", records[0])
+            self.assertIn("threshold_log_std", records[0])
+            self.assertIn("threshold_entropy", records[0])
+            self.assertIn("threshold_approx_kl", records[0])
+            self.assertGreaterEqual(records[0]["threshold_int_p10"], 4.0)
+            self.assertLessEqual(records[0]["threshold_int_p90"], 30.0)
 
     def test_cli_fast_runtime_sets_top_level_and_multiprocess_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -208,6 +208,9 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "grad_norm": stats.grad_norm,
                 "actor_grad_norm": stats.actor_grad_norm,
                 "critic_grad_norm": stats.critic_grad_norm,
+                "threshold_log_std": _threshold_log_std(model),
+                "threshold_entropy": stats.threshold_entropy,
+                "threshold_approx_kl": stats.threshold_approx_kl,
                 "ppo_update_count": stats.update_count,
                 "early_stopped": stats.early_stopped,
                 "trainable_param_count": _trainable_param_count(model),
@@ -1104,6 +1107,7 @@ def _training_diagnostics(batch) -> dict[str, float]:
     diagnostics["vp_nonzero_fraction"] = float((vp != 0).sum().item()) / float(vp.numel())
     diagnostics["k_edge_fraction"] = float(((k == 0) | (k == 6)).sum().item()) / float(k.numel())
     diagnostics["same_role_reverse_fraction"] = _same_role_reverse_fraction(actions, k)
+    diagnostics.update(_threshold_distribution_diagnostics(batch))
 
     terminal_indices = [idx for idx, done in enumerate(batch.dones.detach().cpu().tolist()) if done]
     diagnostics.update(_macro_step_diagnostics(batch, episode_count=len(terminal_indices)))
@@ -1121,6 +1125,19 @@ def _training_diagnostics(batch) -> dict[str, float]:
     diagnostics["advantage_std"] = _tensor_std(batch.advantages)
     diagnostics.update(_reward_component_diagnostics(batch.infos))
     return diagnostics
+
+
+def _threshold_distribution_diagnostics(batch) -> dict[str, float]:
+    threshold_raw = batch.threshold_raw.detach().cpu().float()
+    threshold_int = batch.threshold_int.detach().cpu().float()
+    return {
+        "threshold_raw_mean": _tensor_mean(threshold_raw),
+        "threshold_raw_std": _tensor_std(threshold_raw),
+        "threshold_int_mean": _tensor_mean(threshold_int),
+        "threshold_int_p10": _tensor_quantile(threshold_int, 0.10),
+        "threshold_int_p50": _tensor_quantile(threshold_int, 0.50),
+        "threshold_int_p90": _tensor_quantile(threshold_int, 0.90),
+    }
 
 
 def _macro_step_diagnostics(batch, *, episode_count: int) -> dict[str, float]:
@@ -1299,6 +1316,14 @@ def _tensor_mean(values: torch.Tensor) -> float:
 
 def _tensor_std(values: torch.Tensor) -> float:
     return float(values.detach().float().std(unbiased=False).cpu().item())
+
+
+def _tensor_quantile(values: torch.Tensor, quantile: float) -> float:
+    return float(torch.quantile(values.detach().float(), quantile).cpu().item())
+
+
+def _threshold_log_std(model: GoldRushPolicyNetwork) -> float:
+    return float(model._threshold_log_std().detach().cpu().item())
 
 
 def _mean(values: list[float]) -> float:

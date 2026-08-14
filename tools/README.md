@@ -125,7 +125,8 @@ conda run --no-capture-output -n goldrush python -m pip install \
 ```bash
 conda run --no-capture-output -n goldrush python tools/metrics_tensorboard.py \
   temp/ppo_separate_critic_calibration/runs/separate_critic_20260807_114240 \
-  temp/ppo_separate_critic_calibration/runs/linear_ramp_20260807_122717
+  temp/ppo_separate_critic_calibration/runs/linear_ramp_20260807_122717 \
+  --no-watch
 
 conda run --no-capture-output -n goldrush tensorboard \
   --logdir temp/tensorboards_logs/生成的时间戳目录
@@ -135,26 +136,27 @@ conda run --no-capture-output -n goldrush tensorboard \
 
 ```bash
 conda run --no-capture-output -n goldrush python tools/metrics_tensorboard.py \
-  temp/your_experiment/runs/current_run \
-  --watch-seconds 10
+  --tail-updates 200
 ```
 
-每个 `metrics.jsonl` 是一个 TensorBoard run，名称为 `实验目录名/相对日志目录`。未传 `--logdir` 时，工具会相对仓库根目录新建 `temp/tensorboards_logs/YYYYMMDD_HHMMSS`；无论从仓库根目录还是 `tools/` 启动，位置都一致。同秒发生冲突时自动添加序号。需要固定 event 目录时可显式传入 `--logdir`，覆盖旧 event 文件时才传入 `--overwrite`。默认集包含核心 PPO 指标、advantage/value 诊断、净金币 reward 分解、双方经济/交互事件，以及 batch assembly、总推理、总 scheduler、每 transition worker wall 四项性能汇总。`--metric FIELD` 可重复传入以选择特定字段；`--all-metrics` 用于专项排查全部有限数值与布尔字段。
+每个 `metrics.jsonl` 是一个 TensorBoard run，名称为 `实验目录名/相对日志目录`。不传实验目录时默认扫描 `temp/ppo_manual_lab/runs`，并以 `--watch-seconds 10` 持续跟随；需要一次性导出历史实验时传 `--no-watch`。未传 `--logdir` 时，工具会相对仓库根目录新建 `temp/tensorboards_logs/YYYYMMDD_HHMMSS`；无论从仓库根目录还是 `tools/` 启动，位置都一致。同秒发生冲突时自动添加序号。需要固定 event 目录时可显式传入 `--logdir`，覆盖旧 event 文件时才传入 `--overwrite`。默认会自动导出有限数值与布尔字段中的动态指标，并过滤 `beta_*`、`*_scale`、`*_learning_rate`、`*_updates`、seed、rollout seed、开关等配置常量；新增训练指标只要是数值字段，通常会自动出现在 TensorBoard 中。`--metric FIELD` 可重复传入以精确选择特定字段；`--all-metrics` 用于专项排查全部有限数值与布尔字段，包括默认过滤的配置常量。
 
-传入 `--watch-seconds` 时，工具除跟随已发现文件的追加行外，还会在每轮轮询递归扫描指定实验目录。训练中新出现的 `metrics.jsonl` 会自动注册为新的 TensorBoard run；已有文件保持读取 offset，不会被重复导出。输入实验目录在启动时必须已经存在，但可以暂时不含 `metrics.jsonl`。
+传入 `--watch-seconds` 时，工具会跟随已发现文件的追加行，并按 `--discover-interval` 递归扫描指定实验目录以发现新 `metrics.jsonl`；默认发现间隔为 60 秒，设为 `0` 表示每轮轮询都扫描。训练中新出现的 `metrics.jsonl` 会自动注册为新的 TensorBoard run；已有文件保持读取 offset，不会被重复导出。输入实验目录在启动时必须已经存在，但可以暂时不含 `metrics.jsonl`。长历史日志可用 `--start-update N` 或 `--tail-updates N` 跳过旧 update，减少启动时 TensorBoard event 写入量；`--tail-updates` 对每个 metrics 文件按各自最新 update 计算窗口。
 
 ### 曲线分类
 
 工具为每条标量写入稳定的 tag 前缀，TensorBoard 的 Scalars 页可按此折叠或筛选：
 
-- `optimization`：actor/critic 学习率。
+- `optimization`：各 optimizer group 的实际学习率和总 loss。
 - `policy`：KL、clip fraction、policy loss、熵项，以及 actor/critic/联合梯度范数。
 - `critic`：value loss、explained variance、value 统计。
 - `return`：reward、return、advantage 统计。
+- `fast_option`：fast runtime、threshold、fast 先手率、macro tau 和 policy decision 数等 fast-option 诊断。
 - `match_outcome`：rollout 内训练对局的胜率、净金币差等双方对局结果。
 - `agent_outcome`：agent 的净金币、视野花费、拾取、炸弹与踩踏事件。
 - `opponent_outcome`：opponent 的净金币、拾取、炸弹与踩踏事件。
 - `behavior`：动作、动作顺序、视野和移动相关分布。
 - `performance`：worker、scheduler、inference 与其它耗时/吞吐剖析。
 - `system`：transition 数、batch 数、可训练参数量等规模统计。
+- `config`：`--all-metrics` 下导出的配置常量。
 - `other`：尚未归类的数值字段，便于发现 metrics schema 新增项。
