@@ -28,7 +28,6 @@ from training.rl import (
     RuntimePolicyWrapper,
     SingleAgentEnvConfig,
     TerminalWinMarginGoldGainReward,
-    collect_ppo_rollouts,
     critic_only_update,
     evaluate_policy,
     ppo_update,
@@ -65,7 +64,7 @@ class TrainPpoConfig:
     actor_lr_ramp_updates: int = 100
     freeze_ko_vp_heads: bool = False
     adam_eps: float = 1.0e-5
-    rollout_mode: str = "serial"
+    rollout_mode: str = "multiprocess"
     enable_fast_runtime_features: bool = False
     multiprocess_rollout: MultiprocessRolloutConfig = field(default_factory=MultiprocessRolloutConfig)
     ppo: PpoConfig = field(default_factory=PpoConfig)
@@ -127,7 +126,7 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
     eval_metrics: list[dict[str, Any]] = []
     metrics_path = output_dir / "metrics.jsonl"
     sampler = _sampler(config)
-    rollout_pool = MultiprocessRolloutPool(sampler, config.multiprocess_rollout) if config.rollout_mode == "multiprocess" else None
+    rollout_pool = MultiprocessRolloutPool(sampler, config.multiprocess_rollout)
 
     try:
         for update_index in range(start_update + 1, config.total_updates + 1):
@@ -140,7 +139,6 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
             learning_rates = _set_learning_rates_for_update(optimizer, config=config, optimizer_phase=optimizer_phase, update_index=update_index)
             batch, rollout_stats = _collect_training_rollouts(
                 model,
-                sampler,
                 config=config,
                 update_index=update_index,
                 device=device,
@@ -237,8 +235,7 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 _append_jsonl(metrics_path, eval_record)
                 eval_metrics.append(eval_record)
     finally:
-        if rollout_pool is not None:
-            rollout_pool.close()
+        rollout_pool.close()
 
     latest_path = output_dir / "checkpoints" / "latest.pt"
     return TrainPpoResult(
@@ -324,7 +321,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume-checkpoint", type=Path, default=None)
     parser.add_argument("--init-model-checkpoint", type=Path, default=None)
     parser.add_argument("--fork-ppo-checkpoint", type=Path, default=None)
-    parser.add_argument("--rollout-mode", choices=["serial", "multiprocess"], default="serial")
+    parser.add_argument("--rollout-mode", choices=["multiprocess"], default="multiprocess")
     parser.add_argument("--enable-fast-runtime-features", action="store_true")
     parser.add_argument("--rollout-workers", type=int, default=8)
     parser.add_argument("--rollout-max-inference-batch-size", type=int, default=64)
@@ -457,37 +454,21 @@ def _sampler(config: TrainPpoConfig) -> BatchRolloutSampler:
 
 def _collect_training_rollouts(
     model: GoldRushPolicyNetwork,
-    sampler: BatchRolloutSampler,
     *,
     config: TrainPpoConfig,
     update_index: int,
     device: torch.device,
-    rollout_pool: MultiprocessRolloutPool | None = None,
+    rollout_pool: MultiprocessRolloutPool,
 ):
     seed = _rollout_seed(config, update_index)
-    if config.rollout_mode == "serial":
-        batch = collect_ppo_rollouts(
-            model,
-            sampler,
-            pair_count=config.pair_count,
-            seed=seed,
-            map_ids=config.map_ids,
-            opponent_specs=config.opponent_specs,
-            device=device,
-        )
-        return batch, {"rollout_mode": "serial"}
-    if config.rollout_mode == "multiprocess":
-        if rollout_pool is None:
-            raise ValueError("multiprocess rollout requires a MultiprocessRolloutPool")
-        return rollout_pool.collect(
-            model,
-            pair_count=config.pair_count,
-            seed=seed,
-            map_ids=config.map_ids,
-            opponent_specs=config.opponent_specs,
-            device=device,
-        )
-    raise ValueError(f"unknown rollout_mode: {config.rollout_mode!r}")
+    return rollout_pool.collect(
+        model,
+        pair_count=config.pair_count,
+        seed=seed,
+        map_ids=config.map_ids,
+        opponent_specs=config.opponent_specs,
+        device=device,
+    )
 
 
 def _rollout_seed(config: TrainPpoConfig, update_index: int) -> int:
@@ -947,16 +928,16 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError(f"save_updates must be non-negative, got {config.save_updates}")
     if config.eval_interval is not None and config.eval_interval <= 0:
         raise ValueError(f"eval_interval must be positive when set, got {config.eval_interval}")
-    if config.rollout_mode not in ("serial", "multiprocess"):
-        raise ValueError(f"rollout_mode must be serial or multiprocess, got {config.rollout_mode!r}")
+    if config.rollout_mode != "multiprocess":
+        raise ValueError(
+            f"rollout_mode must be 'multiprocess'; serial PPO training is retired, got {config.rollout_mode!r}"
+        )
     if config.multiprocess_rollout.enable_fast_runtime_features != config.enable_fast_runtime_features:
         raise ValueError(
             "TrainPpoConfig.enable_fast_runtime_features must match "
             "multiprocess_rollout.enable_fast_runtime_features"
         )
     if config.enable_fast_runtime_features:
-        if config.rollout_mode != "multiprocess":
-            raise ValueError("enable_fast_runtime_features requires rollout_mode='multiprocess'")
         if config.eval_interval is not None:
             raise ValueError(
                 "enable_fast_runtime_features does not support in-training serial eval; use eval_mp separately"

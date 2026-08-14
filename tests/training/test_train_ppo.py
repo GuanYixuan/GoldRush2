@@ -231,14 +231,14 @@ class TrainPpoTests(unittest.TestCase):
             self.assertEqual(result.train_metrics[1]["worker_startup_ms"], 0.0)
             self.assertTrue(result.latest_checkpoint.exists())
 
-    def test_fast_runtime_training_requires_multiprocess_rollout(self) -> None:
+    def test_serial_rollout_training_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _smoke_config(
                 output_dir=Path(tmpdir),
-                enable_fast_runtime_features=True,
+                rollout_mode="serial",
             )
 
-            with self.assertRaisesRegex(ValueError, "requires rollout_mode='multiprocess'"):
+            with self.assertRaisesRegex(ValueError, "serial PPO training is retired"):
                 run_training(config)
 
     def test_fast_runtime_config_mismatch_fails(self) -> None:
@@ -330,6 +330,12 @@ class TrainPpoTests(unittest.TestCase):
                 "1",
                 "--opponents",
                 "stay",
+                "--rollout-workers",
+                "1",
+                "--rollout-max-inference-batch-size",
+                "4",
+                "--rollout-inference-timeout-ms",
+                "1.0",
                 "--round-count",
                 "1",
                 "--beta-margin",
@@ -378,7 +384,7 @@ def _smoke_config(
     resume_checkpoint: Path | None = None,
     eval_interval: int | None = None,
     eval_cases: tuple[EvaluationCase, ...] = (),
-    rollout_mode: str = "serial",
+    rollout_mode: str = "multiprocess",
     multiprocess_rollout: MultiprocessRolloutConfig | None = None,
     enable_fast_runtime_features: bool = False,
     critic_warmup_updates: int = 0,
@@ -406,7 +412,12 @@ def _smoke_config(
         rollout_mode=rollout_mode,
         enable_fast_runtime_features=enable_fast_runtime_features,
         multiprocess_rollout=multiprocess_rollout
-        or MultiprocessRolloutConfig(enable_fast_runtime_features=enable_fast_runtime_features),
+        or MultiprocessRolloutConfig(
+            num_workers=1,
+            max_inference_batch_size=4,
+            inference_timeout_ms=1.0,
+            enable_fast_runtime_features=enable_fast_runtime_features,
+        ),
         beta_margin=0.0,
         actor_learning_rate=actor_learning_rate,
         candidate_action_learning_rate=candidate_action_learning_rate,

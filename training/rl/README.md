@@ -16,7 +16,7 @@
 - `env.py`：`SingleAgentGoldRushEnv`，把 `RoundStepEnv` 适配成单智能体 agent-vs-opponent 环境。
 - `rewards.py`：`WinLossReward` 与 `TerminalWinMarginGoldGainReward`。
 - `ppo_buffer.py`：`PpoTransition`、`PpoBatch`、GAE 和 minibatch iterator。
-- `ppo.py`：serial PPO rollout、`ppo_update()`、`critic_only_update()`、EV 和梯度统计。
+- `ppo.py`：`ppo_update()`、`critic_only_update()`、EV、梯度统计，以及 legacy 单进程 PPO rollout 测试辅助。
 - `multiprocess_rollout.py` / `rollout_mp/`：多进程 rollout pool、worker、shared memory、scheduler 和 batch assembly。
 - `privileged_critic_features.py`：训练期 critic full-state feature extractor。
 - `eval.py`：`EvaluationCase`、`EvaluationConfig` 和 `evaluate_policy()`。
@@ -30,7 +30,7 @@ PPO 主线 reward 为 `TerminalWinMarginGoldGainReward`，schema 为 `terminal_w
 
 ## Rollout
 
-serial rollout 使用 `collect_ppo_rollouts()`。多进程 rollout 使用 `MultiprocessRolloutPool`，主进程持有 model/GPU 并批量推理，worker 只运行 simulator、opponent 和 feature extractor。
+主线 PPO 训练只支持多进程 rollout，使用 `MultiprocessRolloutPool`。主进程持有 model/GPU 并批量推理，worker 只运行 simulator、opponent 和 feature extractor。`collect_ppo_rollouts()` 是早期单进程 PPO rollout 辅助，暂只用于低层单元测试和局部调试，不作为 `training.scripts.train_ppo` 的兼容入口。
 
 多进程入口保持 on-policy 语义：每个 update 的 rollout batch 来自当前冻结模型。推荐较大训练配置使用：
 
