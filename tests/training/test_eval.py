@@ -11,8 +11,8 @@ from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, Out
 from simulator.mechanisms.maps import SpawnConfig
 from simulator.types import Action, GameOutput, GoldGenerationEvent, Position
 from training.opponents import OpponentSpec
-from training.rl import EvaluationCase, EvaluationConfig, SingleAgentEnvConfig, evaluate_policy
-from training.rl.eval import _event_count
+from training.rl import SingleAgentEnvConfig
+from training.rl.eval import EvaluationCase, EvaluationConfig, _event_count, evaluate_policy
 from training.rl.rollout import Trajectory, Transition
 
 

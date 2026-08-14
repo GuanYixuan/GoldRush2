@@ -21,7 +21,6 @@ from training.opponents import OpponentSpec
 from training.rl import (
     BatchRolloutSampler,
     EvalTask,
-    EvaluationCase,
     MultiprocessRolloutConfig,
     MultiprocessRolloutPool,
     ParallelEvalConfig,
@@ -32,6 +31,7 @@ from training.rl import (
     critic_only_update,
     ppo_update,
 )
+from training.rl.eval import EvaluationCase
 
 
 @dataclass(frozen=True)

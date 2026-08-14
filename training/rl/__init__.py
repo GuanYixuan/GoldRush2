@@ -1,7 +1,6 @@
 """Minimal RL environment adapters for GoldRush2 training."""
 
 from .env import AGENT_DECISION_FAST, AGENT_DECISION_NEURAL, SingleAgentEnvConfig, SingleAgentGoldRushEnv
-from .eval import EvaluationCase, EvaluationConfig, EvaluationResult, EvaluationSuite, evaluate_policy
 from .eval_mp import (
     EvalEpisodeSummary,
     EvalTask,
@@ -40,10 +39,6 @@ __all__ = [
     "AGENT_DECISION_FAST",
     "AGENT_DECISION_NEURAL",
     "EpisodeBatch",
-    "EvaluationCase",
-    "EvaluationConfig",
-    "EvaluationResult",
-    "EvaluationSuite",
     "EvalEpisodeSummary",
     "EvalTask",
     "FAST_ORDER_LATENT_FIRST_RATE_MIXTURE",
@@ -75,7 +70,6 @@ __all__ = [
     "evaluate_actions",
     "evaluate_fast_runtime_crn_pair",
     "evaluate_parallel",
-    "evaluate_policy",
     "extract_privileged_critic_features",
     "privileged_critic_channel_names",
     "privileged_critic_feature_schema",

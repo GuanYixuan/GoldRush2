@@ -10,7 +10,8 @@ from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, Out
 from simulator.mechanisms.maps import SpawnConfig
 from simulator.types import Action, GameOutput, GoldGenerationEvent, Position
 from training.opponents import OpponentSpec
-from training.rl import BatchRolloutSampler, RuntimePolicyWrapper, SingleAgentEnvConfig, evaluate_policy
+from training.rl import BatchRolloutSampler, RuntimePolicyWrapper, SingleAgentEnvConfig
+from training.rl.eval import evaluate_policy
 from training.rl.runtime_policy import RuntimeAwarePolicy
 
 
@@ -82,7 +83,7 @@ class _RecordingRuntimePolicy:
 
 
 def _eval_config():
-    from training.rl import EvaluationCase, EvaluationConfig
+    from training.rl.eval import EvaluationCase, EvaluationConfig
 
     return EvaluationConfig(
         env_config=SingleAgentEnvConfig(episode=_one_round_episode(), opponent_spec=_stay_opponent_spec()),

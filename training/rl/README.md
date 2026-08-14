@@ -19,8 +19,8 @@
 - `ppo.py`：`ppo_update()`、`critic_only_update()`、EV、梯度统计，以及 legacy 单进程 PPO rollout 测试辅助。
 - `multiprocess_rollout.py` / `rollout_mp/`：多进程 rollout pool、worker、shared memory、scheduler 和 batch assembly。
 - `privileged_critic_features.py`：训练期 critic full-state feature extractor。
-- `eval.py`：`EvaluationCase`、`EvaluationConfig` 和 `evaluate_policy()`。
-- `eval_mp/`：轻量多进程评估，主进程持有 model/GPU 并批量推理，worker 只返回 episode summary。
+- `eval_mp/`：主线多进程评估，主进程持有 model/GPU 并批量推理，worker 只返回 episode summary。
+- `eval.py`：legacy 串行 callable-policy 小评估，只用于低层测试、`RuntimePolicyWrapper` 调试和旧 anchor config；不从 `training.rl` 顶层导出，也不作为 PPO 训练入口。
 - `runtime_policy.py`：把 actor-only runtime policy 接入 sampler/eval 时序。
 - `sampler.py` / `rollout.py`：通用 policy callable rollout 和 paired episode 数据结构。
 
@@ -86,7 +86,7 @@ rollout_seed = base + (u - 1) * pair_count
 - 己方毛金币与累计 `vision_spent`。
 - 分 map、opponent、机制参数切片统计。
 
-`training.configs.eval.anchor_eval_config()` 提供固定 anchor eval 配置；更大矩阵评估应显式冻结 seed、map、opponent 和参数范围。
+`training.configs.eval.anchor_eval_config()` 是旧串行 eval config helper，保留给低层回归测试。更大矩阵评估应直接构造 `EvalTask` 并显式冻结 seed、map、opponent 和参数范围。
 
 大规模或训练中评估优先使用 `ParallelEvalPool` / `evaluate_parallel()`。它复用 `rollout_mp` 的 central inference 结构，但不保存 PPO transition，只返回每局净金币、胜负、pickup、炸弹、踩踏和视野消耗 summary。`ParallelEvalConfig.deterministic=False` 是默认口径；需要 paired 可复现对比时显式打开 deterministic。
 

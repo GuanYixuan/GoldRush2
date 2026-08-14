@@ -106,14 +106,6 @@ class EvaluationResult:
     metrics: dict[str, Any]
 
 
-class EvaluationSuite:
-    def __init__(self, config: EvaluationConfig) -> None:
-        self.config = config
-
-    def evaluate(self, agent_policy: AgentPolicy) -> EvaluationResult:
-        return evaluate_policy(agent_policy, self.config)
-
-
 def evaluate_policy(agent_policy: AgentPolicy, config: EvaluationConfig) -> EvaluationResult:
     sampler = BatchRolloutSampler(
         env_config=config.env_config,

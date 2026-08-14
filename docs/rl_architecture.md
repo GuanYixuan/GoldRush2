@@ -100,15 +100,14 @@ conditional fast option 用于缓解神经网络常态后手问题，但不属�
 - 己方毛金币与累计 `vision_spent`。
 - 分 map、opponent、机制参数的切片表现。
 
-评估最小单位是显式 `EvaluationCase` 下的 paired episodes：
+主线评估最小单位是显式 `EvalTask`。训练内评估由 `training.scripts.train_ppo` 将冻结的 seed、map 和 opponent 切片展开成双方视角的 `EvalTask`：
 
 ```text
-EvaluationCase(seed, map_id, opponent_spec)
-  -> agent=P1, opponent=P2
-  -> agent=P2, opponent=P1
+EvalTask(seed, map_id, opponent_spec, agent_player_id=1)
+EvalTask(seed, map_id, opponent_spec, agent_player_id=2)
 ```
 
-两局共享同一 seed、map、opponent 和机制配置。训练轨迹仍按单局独立计算 reward；pair 只用于评估聚合和降噪。
+两局共享同一 seed、map、opponent 和机制配置。训练轨迹仍按单局独立计算 reward；双方视角只用于评估聚合和降噪。训练中和大规模本地评估应使用 `ParallelEvalPool` / `evaluate_parallel()`。
 
 ## 文档导航
 

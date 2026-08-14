@@ -12,8 +12,9 @@ import torch
 
 from simulator.config import EpisodeConfig, RulesConfig
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
-from training.rl import EvaluationCase, ParallelEvalConfig, PpoConfig
+from training.rl import ParallelEvalConfig, PpoConfig
 from training.rl import MultiprocessRolloutConfig
+from training.rl.eval import EvaluationCase
 from training.scripts.train_ppo import (
     TrainPpoConfig,
     _same_role_reverse_fraction,

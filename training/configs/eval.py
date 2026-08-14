@@ -4,7 +4,8 @@ from simulator.config import EpisodeConfig
 from simulator.envs.round_step import RoundStepMechanisms
 from simulator.mechanisms.maps import MapPool, SpawnConfig
 from training.opponents import OpponentSpec
-from training.rl import EvaluationConfig, SingleAgentEnvConfig
+from training.rl import SingleAgentEnvConfig
+from training.rl.eval import EvaluationConfig
 
 
 ANCHOR_EVAL_SEEDS = tuple(range(2026080200, 2026080210))

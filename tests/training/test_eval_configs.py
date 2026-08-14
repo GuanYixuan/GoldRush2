@@ -10,7 +10,7 @@ from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, Out
 from simulator.mechanisms.maps import SpawnConfig
 from simulator.types import Action, GameOutput
 from training.configs.eval import ANCHOR_EVAL_MAP_IDS, ANCHOR_EVAL_OPPONENT_SPECS, ANCHOR_EVAL_SEEDS, anchor_eval_config
-from training.rl import evaluate_policy
+from training.rl.eval import evaluate_policy
 
 
 class EvalConfigTests(unittest.TestCase):
