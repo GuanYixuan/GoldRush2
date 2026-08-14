@@ -16,6 +16,7 @@ from simulator.errors import SimulatorRuleError
 from simulator.mechanisms.maps import SpawnConfig
 from training.bc.schema import BC_CHECKPOINT_SCHEMA, FEATURE_SCHEMA as BC_FEATURE_SCHEMA
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig, TorchFeaturePolicy
+from training.models.policy_network import ACTION_HEAD_SCHEMA
 from training.opponents import OpponentSpec
 from training.rl import (
     BatchRolloutSampler,
@@ -65,6 +66,7 @@ class TrainPpoConfig:
     freeze_ko_vp_heads: bool = False
     adam_eps: float = 1.0e-5
     rollout_mode: str = "serial"
+    enable_fast_runtime_features: bool = False
     multiprocess_rollout: MultiprocessRolloutConfig = field(default_factory=MultiprocessRolloutConfig)
     ppo: PpoConfig = field(default_factory=PpoConfig)
     model: PolicyNetworkConfig = field(default_factory=PolicyNetworkConfig)
@@ -161,6 +163,7 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "update": update_index,
                 "rollout_seed": _rollout_seed(config, update_index),
                 "fixed_rollout_seeds": not config.advance_rollout_seed,
+                "enable_fast_runtime_features": config.enable_fast_runtime_features,
                 "phase": "critic_warmup" if optimizer_phase == "critic" else "ppo",
                 "optimizer_phase": optimizer_phase,
                 "init_source": init_source,
@@ -322,6 +325,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-model-checkpoint", type=Path, default=None)
     parser.add_argument("--fork-ppo-checkpoint", type=Path, default=None)
     parser.add_argument("--rollout-mode", choices=["serial", "multiprocess"], default="serial")
+    parser.add_argument("--enable-fast-runtime-features", action="store_true")
     parser.add_argument("--rollout-workers", type=int, default=8)
     parser.add_argument("--rollout-max-inference-batch-size", type=int, default=64)
     parser.add_argument("--rollout-inference-timeout-ms", type=float, default=2.0)
@@ -374,6 +378,7 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         max_inference_batch_size=int(args.rollout_max_inference_batch_size),
         inference_timeout_ms=float(args.rollout_inference_timeout_ms),
         worker_join_timeout_s=float(args.worker_join_timeout_s),
+        enable_fast_runtime_features=bool(args.enable_fast_runtime_features),
         reward_fold_gamma=float(args.ppo_gamma),
     )
     opponent_specs = tuple(opponent_spec_from_name(name) for name in args.opponents)
@@ -414,6 +419,7 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         freeze_ko_vp_heads=bool(args.freeze_ko_vp_heads),
         adam_eps=float(args.adam_eps),
         rollout_mode=str(args.rollout_mode),
+        enable_fast_runtime_features=bool(args.enable_fast_runtime_features),
         multiprocess_rollout=multiprocess_rollout,
         ppo=ppo,
         model=model,
@@ -943,6 +949,23 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError(f"eval_interval must be positive when set, got {config.eval_interval}")
     if config.rollout_mode not in ("serial", "multiprocess"):
         raise ValueError(f"rollout_mode must be serial or multiprocess, got {config.rollout_mode!r}")
+    if config.multiprocess_rollout.enable_fast_runtime_features != config.enable_fast_runtime_features:
+        raise ValueError(
+            "TrainPpoConfig.enable_fast_runtime_features must match "
+            "multiprocess_rollout.enable_fast_runtime_features"
+        )
+    if config.enable_fast_runtime_features:
+        if config.rollout_mode != "multiprocess":
+            raise ValueError("enable_fast_runtime_features requires rollout_mode='multiprocess'")
+        if config.eval_interval is not None:
+            raise ValueError(
+                "enable_fast_runtime_features does not support in-training serial eval; use eval_mp separately"
+            )
+        if config.model.action_head_schema != ACTION_HEAD_SCHEMA:
+            raise ValueError(
+                "enable_fast_runtime_features requires action_head_schema "
+                f"{ACTION_HEAD_SCHEMA!r}, got {config.model.action_head_schema!r}"
+            )
     if config.actor_learning_rate <= 0.0:
         raise ValueError(f"actor_learning_rate must be positive, got {config.actor_learning_rate}")
     if config.candidate_action_learning_rate is not None and config.candidate_action_learning_rate <= 0.0:

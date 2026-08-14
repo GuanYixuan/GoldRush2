@@ -17,6 +17,8 @@ from training.rl import MultiprocessRolloutConfig
 from training.scripts.train_ppo import (
     TrainPpoConfig,
     _same_role_reverse_fraction,
+    build_arg_parser,
+    config_from_args,
     load_checkpoint,
     opponent_spec_from_name,
     run_training,
@@ -221,12 +223,98 @@ class TrainPpoTests(unittest.TestCase):
 
             self.assertEqual(result.final_update, 2)
             self.assertEqual(result.train_metrics[0]["rollout_mode"], "multiprocess")
+            self.assertFalse(result.train_metrics[0]["enable_fast_runtime_features"])
             self.assertEqual(result.train_metrics[0]["first_episodes"], 1)
             self.assertEqual(result.train_metrics[0]["second_episodes"], 1)
             self.assertFalse(result.train_metrics[0]["worker_pool_reused"])
             self.assertTrue(result.train_metrics[1]["worker_pool_reused"])
             self.assertEqual(result.train_metrics[1]["worker_startup_ms"], 0.0)
             self.assertTrue(result.latest_checkpoint.exists())
+
+    def test_fast_runtime_training_requires_multiprocess_rollout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                enable_fast_runtime_features=True,
+            )
+
+            with self.assertRaisesRegex(ValueError, "requires rollout_mode='multiprocess'"):
+                run_training(config)
+
+    def test_fast_runtime_config_mismatch_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                rollout_mode="multiprocess",
+                enable_fast_runtime_features=True,
+                multiprocess_rollout=MultiprocessRolloutConfig(enable_fast_runtime_features=False),
+            )
+
+            with self.assertRaisesRegex(ValueError, "must match"):
+                run_training(config)
+
+    def test_fast_runtime_training_rejects_serial_eval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                rollout_mode="multiprocess",
+                enable_fast_runtime_features=True,
+                multiprocess_rollout=MultiprocessRolloutConfig(enable_fast_runtime_features=True),
+                eval_interval=1,
+                eval_cases=(
+                    EvaluationCase(
+                        seed=123,
+                        map_id=1,
+                        opponent_spec=opponent_spec_from_name("stay"),
+                        tag="tiny_eval",
+                    ),
+                ),
+            )
+
+            with self.assertRaisesRegex(ValueError, "in-training serial eval"):
+                run_training(config)
+
+    def test_fast_runtime_training_smoke(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                rollout_mode="multiprocess",
+                enable_fast_runtime_features=True,
+                multiprocess_rollout=MultiprocessRolloutConfig(
+                    num_workers=2,
+                    max_inference_batch_size=4,
+                    inference_timeout_ms=1.0,
+                    enable_fast_runtime_features=True,
+                ),
+            )
+
+            result = run_training(config)
+
+            self.assertEqual(result.final_update, 1)
+            self.assertEqual(result.train_metrics[0]["rollout_mode"], "multiprocess")
+            self.assertTrue(result.train_metrics[0]["enable_fast_runtime_features"])
+            self.assertIn("fast_success_per_episode", result.train_metrics[0])
+            self.assertIn("macro_tau_mean", result.train_metrics[0])
+            records = _read_jsonl(Path(tmpdir) / "metrics.jsonl")
+            self.assertTrue(records[0]["enable_fast_runtime_features"])
+
+    def test_cli_fast_runtime_sets_top_level_and_multiprocess_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parser = build_arg_parser()
+            args = parser.parse_args(
+                [
+                    "--output-dir",
+                    tmpdir,
+                    "--rollout-mode",
+                    "multiprocess",
+                    "--enable-fast-runtime-features",
+                ]
+            )
+
+            config = config_from_args(args)
+
+            self.assertTrue(config.enable_fast_runtime_features)
+            self.assertTrue(config.multiprocess_rollout.enable_fast_runtime_features)
 
     def test_cli_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -292,6 +380,7 @@ def _smoke_config(
     eval_cases: tuple[EvaluationCase, ...] = (),
     rollout_mode: str = "serial",
     multiprocess_rollout: MultiprocessRolloutConfig | None = None,
+    enable_fast_runtime_features: bool = False,
     critic_warmup_updates: int = 0,
     actor_lr_ramp_updates: int = 100,
     actor_learning_rate: float = 5.0e-5,
@@ -315,7 +404,9 @@ def _smoke_config(
         eval_interval=eval_interval,
         eval_cases=eval_cases,
         rollout_mode=rollout_mode,
-        multiprocess_rollout=multiprocess_rollout or MultiprocessRolloutConfig(),
+        enable_fast_runtime_features=enable_fast_runtime_features,
+        multiprocess_rollout=multiprocess_rollout
+        or MultiprocessRolloutConfig(enable_fast_runtime_features=enable_fast_runtime_features),
         beta_margin=0.0,
         actor_learning_rate=actor_learning_rate,
         candidate_action_learning_rate=candidate_action_learning_rate,
