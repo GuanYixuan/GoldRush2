@@ -91,3 +91,5 @@ rollout_seed = base + (u - 1) * pair_count
 大规模或训练中评估优先使用 `ParallelEvalPool` / `evaluate_parallel()`。它复用 `rollout_mp` 的 central inference 结构，但不保存 PPO transition，只返回每局净金币、胜负、pickup、炸弹、踩踏和视野消耗 summary。`ParallelEvalConfig.deterministic=False` 是默认口径；需要 paired 可复现对比时显式打开 deterministic。
 
 stochastic paired A/B eval 可通过 `EvalTask.policy_sample_key` / `policy_sample_seed` 启用 common random numbers。共享同一 `policy_sample_key` 的任务会在同一 round 使用相同 policy sampling 分位数，从而保留 stochastic 策略分布，同时减少 baseline 与实验组之间的额外采样噪声。CRN 只影响 eval 采样随机源，不改变 PPO rollout 或部署语义。
+
+fast option 对照优先使用 `evaluate_fast_runtime_crn_pair()`。它在同一批 `EvalTask` 上分别运行 `enable_fast_runtime_features=False/True`，并自动补齐 CRN 采样 key，按 `task_id` 输出 fast on 相对 fast off 的 paired delta。`evaluate_parallel()` 在 fast runtime 打开时会额外汇总 threshold 分布、fast success/miss/path-fail/fallback、fast order、belief effective score 以及 fast 回合内 pickup/bomb/trample 等诊断；fast runtime 关闭时这些字段稳定为 0 或初始 belief 统计。

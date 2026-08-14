@@ -10,7 +10,7 @@ from policy_runtime import FastRuntimeState, FeatureExtractor
 from simulator.errors import SimulatorRuleError
 from simulator.types import GameOutput
 from training.models import INITIAL_FAST_SCALARS
-from training.rl.env import SingleAgentEnvConfig, SingleAgentGoldRushEnv
+from training.rl.env import AGENT_DECISION_FAST, SingleAgentEnvConfig, SingleAgentGoldRushEnv
 from training.rl.privileged_critic_features import extract_privileged_critic_features
 from training.rl.rollout_mp.shared_memory import FeatureSharedMemory, attach_feature_shared_memory
 from training.rl.rollout_mp.worker import _add_event_counts, _empty_event_counts
@@ -93,6 +93,13 @@ def run_worker_episode(
     fast_runtime = FastRuntimeState(player_id=task.agent_player_id) if use_fast_runtime_features else None
     observation = reset.observation
     episode_events = _empty_event_counts()
+    fast_events = _empty_event_counts()
+    fast_infos: list[dict[str, Any]] = []
+    threshold_raw_values: list[float] = []
+    threshold_int_values: list[int] = []
+    threshold_log_std_values: list[float] = []
+    threshold_entropy_values: list[float] = []
+    fast_scalar_values: list[tuple[float, float]] = []
     request_index = 0
     pending_output: GameOutput | None = None
 
@@ -102,8 +109,10 @@ def run_worker_episode(
                 fast_try = fast_runtime.try_fast(observation)
                 if fast_try["status"] == "success":
                     output = _game_output_from_payload(fast_try["output"])
-                    step = env.step(output, agent_decision_mode="fast")
+                    step = env.step(output, agent_decision_mode=AGENT_DECISION_FAST)
                     _add_event_counts(episode_events, step.info["events"])
+                    _add_event_counts(fast_events, step.info["events"])
+                    fast_infos.append(step.info)
                     pending_output = None
                     observation = step.observation
                     request_index += 1
@@ -120,6 +129,7 @@ def run_worker_episode(
             prepared = fast_runtime.prepare_neural(observation)
             actor_features = prepared["actor_features"]
             fast_scalars = np.asarray(prepared["fast_scalars"], dtype=np.float32)
+        fast_scalar_values.append((float(fast_scalars[0]), float(fast_scalars[1])))
         if actor_features["feature_schema"] != "goldrush2_feature_v2":
             raise SimulatorRuleError(f"unexpected feature schema: {actor_features['feature_schema']!r}")
         critic_features = _extract_critic_features(env, task.agent_player_id, task.round_count)
@@ -168,6 +178,10 @@ def run_worker_episode(
         else:
             fast_runtime.commit_neural(output)
             fast_runtime.set_next_threshold(int(action_msg["threshold_int"]))
+        threshold_raw_values.append(float(action_msg["threshold_raw"]))
+        threshold_int_values.append(int(action_msg["threshold_int"]))
+        threshold_log_std_values.append(float(action_msg["threshold_log_std"]))
+        threshold_entropy_values.append(float(action_msg["threshold_entropy"]))
         env_step_start = time.perf_counter_ns()
         step = env.step(output)
         profile_stats["env_step_ns"] = profile_stats.get("env_step_ns", 0) + (time.perf_counter_ns() - env_step_start)
@@ -180,6 +194,7 @@ def run_worker_episode(
     if request_index <= 0:
         raise SimulatorRuleError(f"eval task {task.task_id!r} produced no transitions")
     profile_stats["episode_wall_ns"] = time.perf_counter_ns() - episode_wall_start
+    final_fast_diagnostics = _empty_fast_diagnostics() if fast_runtime is None else dict(fast_runtime.diagnostics())
     result_queue.put(
         {
             "type": "episode_done",
@@ -193,6 +208,14 @@ def run_worker_episode(
                 episode_length=request_index,
                 terminal_info=step.info,
                 episode_events=episode_events,
+                fast_events=fast_events,
+                fast_infos=fast_infos,
+                fast_diagnostics=final_fast_diagnostics,
+                threshold_raw_values=threshold_raw_values,
+                threshold_int_values=threshold_int_values,
+                threshold_log_std_values=threshold_log_std_values,
+                threshold_entropy_values=threshold_entropy_values,
+                fast_scalar_values=fast_scalar_values,
             ),
             "worker_stats": profile_stats,
         }
@@ -233,6 +256,14 @@ def _episode_summary(
     episode_length: int,
     terminal_info: dict[str, Any],
     episode_events: dict[str, dict[int, int]],
+    fast_events: dict[str, dict[int, int]],
+    fast_infos: list[dict[str, Any]],
+    fast_diagnostics: dict[str, Any],
+    threshold_raw_values: list[float],
+    threshold_int_values: list[int],
+    threshold_log_std_values: list[float],
+    threshold_entropy_values: list[float],
+    fast_scalar_values: list[tuple[float, float]],
 ) -> EvalEpisodeSummary:
     agent = int(task.agent_player_id)
     opponent = 2 if agent == 1 else 1
@@ -267,7 +298,113 @@ def _episode_summary(
         opponent_trample_penalty=int(episode_events["trample_penalty"][opponent]),
         opponent_tramples=int(episode_events["tramples"][opponent]),
         opponent_vision_spent=int(scores["vision_spent"][opponent]),
+        extra=_eval_extra_metrics(
+            agent_player_id=agent,
+            fast_events=fast_events,
+            fast_infos=fast_infos,
+            fast_diagnostics=fast_diagnostics,
+            threshold_raw_values=threshold_raw_values,
+            threshold_int_values=threshold_int_values,
+            threshold_log_std_values=threshold_log_std_values,
+            threshold_entropy_values=threshold_entropy_values,
+            fast_scalar_values=fast_scalar_values,
+        ),
     )
+
+
+def _eval_extra_metrics(
+    *,
+    agent_player_id: int,
+    fast_events: dict[str, dict[int, int]],
+    fast_infos: list[dict[str, Any]],
+    fast_diagnostics: dict[str, Any],
+    threshold_raw_values: list[float],
+    threshold_int_values: list[int],
+    threshold_log_std_values: list[float],
+    threshold_entropy_values: list[float],
+    fast_scalar_values: list[tuple[float, float]],
+) -> dict[str, float]:
+    p_fast_values = [value[0] for value in fast_scalar_values]
+    confidence_values = [value[1] for value in fast_scalar_values]
+    fast_success = _diagnostic_float(fast_diagnostics, "fast_success")
+    effective_updates = _diagnostic_float(fast_diagnostics, "fast_effective_updates")
+    fast_samples = [info for info in fast_infos if bool(info.get("fast_order_sampled", False))]
+    agent_first = [info for info in fast_samples if bool(info.get("agent_first", False))]
+    latent_rates = [float(info["latent_first_rate"]) for info in fast_infos if "latent_first_rate" in info]
+    return {
+        "threshold_raw_mean": _mean(threshold_raw_values),
+        "threshold_raw_std": _std(threshold_raw_values),
+        "threshold_int_mean": _mean([float(value) for value in threshold_int_values]),
+        "threshold_int_p10": _percentile([float(value) for value in threshold_int_values], 0.10),
+        "threshold_int_p50": _percentile([float(value) for value in threshold_int_values], 0.50),
+        "threshold_int_p90": _percentile([float(value) for value in threshold_int_values], 0.90),
+        "threshold_log_std": _mean(threshold_log_std_values),
+        "threshold_entropy": _mean(threshold_entropy_values),
+        "threshold_approx_kl": 0.0,
+        "fast_success_per_episode": fast_success,
+        "fast_miss_no_target_per_episode": _diagnostic_float(fast_diagnostics, "fast_miss_no_target"),
+        "fast_path_fail_per_episode": _diagnostic_float(fast_diagnostics, "fast_path_fail"),
+        "neural_fallback_per_episode": _diagnostic_float(fast_diagnostics, "neural_fallback"),
+        "fast_nonstay_per_episode": _diagnostic_float(fast_diagnostics, "fast_nonstay"),
+        "latent_first_rate_mean": _mean(latent_rates),
+        "actual_fast_first_rate": 0.0 if not fast_samples else float(len(agent_first)) / float(len(fast_samples)),
+        "fast_order_samples_per_episode": float(len(fast_samples)),
+        "p_fast_effective_mean": _mean(p_fast_values),
+        "p_fast_effective_p50": _percentile(p_fast_values, 0.50),
+        "fast_effective_confidence_mean": _mean(confidence_values),
+        "fast_effective_updates_per_episode": effective_updates,
+        "fast_effective_score_mean": _diagnostic_ratio(fast_diagnostics, "fast_effective_score_sum", effective_updates),
+        "fast_expected_gain_mean": _diagnostic_ratio(fast_diagnostics, "fast_expected_gain_sum", effective_updates),
+        "fast_actual_delta_mean": _diagnostic_ratio(fast_diagnostics, "fast_actual_delta_sum", effective_updates),
+        "fast_pickup_gold_per_episode": float(fast_events["pickup_gold"][agent_player_id]),
+        "fast_bomb_lost_gold_per_episode": float(fast_events["bomb_lost_gold"][agent_player_id]),
+        "fast_trample_penalty_per_episode": float(fast_events["trample_penalty"][agent_player_id]),
+        "one_step_fast_delta_per_episode": _diagnostic_float(fast_diagnostics, "one_step_fast_delta_sum"),
+    }
+
+
+def _empty_fast_diagnostics() -> dict[str, float]:
+    return {
+        "fast_success": 0.0,
+        "fast_miss_no_target": 0.0,
+        "fast_path_fail": 0.0,
+        "neural_fallback": 0.0,
+        "fast_nonstay": 0.0,
+        "fast_effective_updates": 0.0,
+        "fast_effective_score_sum": 0.0,
+        "fast_expected_gain_sum": 0.0,
+        "fast_actual_delta_sum": 0.0,
+        "one_step_fast_delta_sum": 0.0,
+    }
+
+
+def _diagnostic_float(diagnostics: dict[str, Any], key: str) -> float:
+    return float(diagnostics.get(key, 0.0))
+
+
+def _diagnostic_ratio(diagnostics: dict[str, Any], numerator_key: str, denominator: float) -> float:
+    if denominator <= 0.0:
+        return 0.0
+    return _diagnostic_float(diagnostics, numerator_key) / float(denominator)
+
+
+def _mean(values: list[float]) -> float:
+    return float(sum(values) / len(values)) if values else 0.0
+
+
+def _std(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    avg = _mean(values)
+    return float((sum((value - avg) ** 2 for value in values) / len(values)) ** 0.5)
+
+
+def _percentile(values: list[float], quantile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = int(round((len(ordered) - 1) * quantile))
+    return float(ordered[index])
 
 
 def _extract_critic_features(env: SingleAgentGoldRushEnv, agent_player_id: int, round_count: int) -> dict[str, Any]:

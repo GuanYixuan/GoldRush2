@@ -103,6 +103,10 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 
 平台提交、发起对局或修改挑战版本只能在用户明确要求时执行。
 
+## 多进程本地 eval
+
+训练代码中的 `training.rl.eval_mp.evaluate_parallel()` / `evaluate_fast_runtime_crn_pair()` 是本地 simulator 评估入口，不访问评测平台。fast option 实验优先使用 `evaluate_fast_runtime_crn_pair()` 做 fast runtime on/off 的 CRN paired 对照；它会复用 stochastic policy sampling 的 common random numbers，并输出净金币、margin、炸弹、踩踏、视野等 paired delta。fast runtime 打开时还会报告 threshold 分布、fast success/miss/path-fail/fallback、belief effective score 和 fast 回合事件统计。
+
 ## `metrics_tensorboard.py`
 
 只读训练指标查看工具。它将命令行明确指定的一个或多个实验目录中的 `metrics.jsonl` 导出为 TensorBoard event 文件；不会扫描整个 `temp/`，不会访问评测平台，也不会修改训练 checkpoint 或原始日志。

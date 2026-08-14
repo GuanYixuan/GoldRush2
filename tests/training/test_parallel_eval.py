@@ -10,6 +10,7 @@ from simulator.mechanisms.maps import SpawnConfig
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.opponents import OpponentSpec
 from training.rl import EvalTask, ParallelEvalConfig, ParallelEvalPool, SingleAgentEnvConfig, evaluate_parallel
+from training.rl.eval_mp import evaluate_fast_runtime_crn_pair
 from training.rl.eval_mp.scheduler import _request_uniform_row
 from training.rl.eval_mp.types import EvalFeatureRequest
 
@@ -72,6 +73,12 @@ class ParallelEvalTests(unittest.TestCase):
         self.assertIn("eval_mean_agent_net_gold", stats)
         self.assertIn("eval_win_rate", stats)
         self.assertIn("eval_by_setting", stats)
+        self.assertIn("eval_threshold_raw_mean", stats)
+        self.assertIn("eval_threshold_int_p50", stats)
+        self.assertIn("eval_fast_success_per_episode", stats)
+        self.assertEqual(stats["eval_fast_success_per_episode"], 0.0)
+        self.assertIn("threshold_raw_mean", summaries[0].extra)
+        self.assertIn("fast_success_per_episode", summaries[0].extra)
 
     def test_parallel_eval_pool_reuses_workers(self) -> None:
         model = _small_model()
@@ -114,6 +121,37 @@ class ParallelEvalTests(unittest.TestCase):
 
         self.assertEqual(len(summaries), 2)
         self.assertEqual(stats["eval_episode_count"], 2)
+        self.assertIn("eval_fast_miss_no_target_per_episode", stats)
+        self.assertIn("eval_p_fast_effective_mean", stats)
+        self.assertIn("eval_inference_threshold_entropy", stats)
+        for summary in summaries:
+            self.assertIn("fast_miss_no_target_per_episode", summary.extra)
+            self.assertIn("neural_fallback_per_episode", summary.extra)
+            self.assertIn("p_fast_effective_mean", summary.extra)
+            self.assertGreaterEqual(summary.extra["threshold_int_mean"], 4.0)
+            self.assertLessEqual(summary.extra["threshold_int_mean"], 30.0)
+
+    def test_fast_runtime_crn_pair_reports_paired_deltas(self) -> None:
+        model = _small_model()
+        result = evaluate_fast_runtime_crn_pair(
+            model,
+            _tasks(seed=9),
+            env_config=SingleAgentEnvConfig(episode=_one_round_episode(), opponent_spec=_stay_opponent_spec()),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+            device="cpu",
+            config=ParallelEvalConfig(num_workers=2, max_inference_batch_size=4, inference_timeout_ms=1.0),
+            policy_sample_seed=77,
+        )
+
+        self.assertEqual([summary.task_id for summary in result.fast_off_summaries], ["eval-9-p1", "eval-9-p2"])
+        self.assertEqual([summary.task_id for summary in result.fast_on_summaries], ["eval-9-p1", "eval-9-p2"])
+        self.assertEqual(result.fast_off_stats["eval_episode_count"], 2)
+        self.assertEqual(result.fast_on_stats["eval_episode_count"], 2)
+        self.assertEqual(result.paired_stats["paired_episode_count"], 2)
+        self.assertIn("paired_mean_agent_net_gold_delta", result.paired_stats)
+        self.assertFalse(result.fast_off_stats["eval_worker_pool_reused"])
+        self.assertFalse(result.fast_on_stats["eval_worker_pool_reused"])
 
     def test_crn_uniform_row_covers_threshold_sample(self) -> None:
         request = EvalFeatureRequest(

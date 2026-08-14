@@ -4,6 +4,7 @@ import hashlib
 import queue
 import time
 from collections.abc import Sequence
+from statistics import mean, pstdev
 from typing import Any
 
 import torch
@@ -53,6 +54,10 @@ def scheduler_loop(
     worker_stat_totals: dict[str, int] = {}
     worker_episode_count = 0
     episode_started = 0
+    threshold_raw_values: list[float] = []
+    threshold_int_values: list[int] = []
+    threshold_log_std_values: list[float] = []
+    threshold_entropy_values: list[float] = []
 
     while completed_episodes < expected_episodes:
         while idle_workers and pending_tasks:
@@ -124,6 +129,10 @@ def scheduler_loop(
             inference_model_sample_ns += inference_stats["model_sample_ns"]
             inference_action_send_ns += inference_stats["action_send_ns"]
             inference_total_with_action_send_ns += inference_stats["total_with_action_send_ns"]
+            threshold_raw_values.extend(inference_stats["threshold_raw"])
+            threshold_int_values.extend(inference_stats["threshold_int"])
+            threshold_log_std_values.extend(inference_stats["threshold_log_std"])
+            threshold_entropy_values.extend(inference_stats["threshold_entropy"])
             feature_batches += 1
             feature_batch_sizes.append(inference_stats["batch_size"])
             pending_requests.clear()
@@ -142,6 +151,10 @@ def scheduler_loop(
         inference_model_sample_ns += inference_stats["model_sample_ns"]
         inference_action_send_ns += inference_stats["action_send_ns"]
         inference_total_with_action_send_ns += inference_stats["total_with_action_send_ns"]
+        threshold_raw_values.extend(inference_stats["threshold_raw"])
+        threshold_int_values.extend(inference_stats["threshold_int"])
+        threshold_log_std_values.extend(inference_stats["threshold_log_std"])
+        threshold_entropy_values.extend(inference_stats["threshold_entropy"])
         feature_batches += 1
         feature_batch_sizes.append(inference_stats["batch_size"])
 
@@ -178,6 +191,12 @@ def scheduler_loop(
         "eval_scheduler_summary_sort_ms": summary_sort_ns / 1_000_000,
     }
     stats.update({f"eval_{key}": value for key, value in worker_profile_metrics(worker_stat_totals, worker_episode_count).items()})
+    stats.update({f"eval_inference_{key}": value for key, value in _threshold_summary(
+        threshold_raw_values,
+        threshold_int_values,
+        threshold_log_std_values,
+        threshold_entropy_values,
+    ).items()})
     return summaries, stats
 
 
@@ -189,7 +208,7 @@ def run_eval_inference_batch(
     feature_shared: FeatureSharedMemory,
     *,
     deterministic: bool,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     import numpy as np
 
     sync(device)
@@ -219,7 +238,10 @@ def run_eval_inference_batch(
         k_cpu = action.k.detach().cpu().tolist()
         order_cpu = action.order.detach().cpu().tolist()
         vp_cpu = action.vp.detach().cpu().tolist()
+        threshold_raw_cpu = action.threshold_raw.detach().cpu().tolist()
         threshold_int_cpu = action.threshold_int.detach().cpu().tolist()
+        threshold_entropy_cpu = action.threshold_entropy.detach().cpu().tolist()
+        threshold_log_std = float(model._threshold_log_std().detach().cpu().item())
     sync(device)
     model_sample_ns = time.perf_counter_ns() - model_sample_start
     elapsed_ns = time.perf_counter_ns() - start
@@ -236,7 +258,10 @@ def run_eval_inference_batch(
                     "order": int(order_cpu[batch_index]),
                     "vp": int(vp_cpu[batch_index]),
                 },
+                "threshold_raw": float(threshold_raw_cpu[batch_index]),
                 "threshold_int": int(threshold_int_cpu[batch_index]),
+                "threshold_log_std": threshold_log_std,
+                "threshold_entropy": float(threshold_entropy_cpu[batch_index]),
             }
         )
     action_send_ns = time.perf_counter_ns() - action_send_start
@@ -247,7 +272,50 @@ def run_eval_inference_batch(
         "model_sample_ns": model_sample_ns,
         "action_send_ns": action_send_ns,
         "total_with_action_send_ns": time.perf_counter_ns() - start,
+        "threshold_raw": [float(value) for value in threshold_raw_cpu],
+        "threshold_int": [int(value) for value in threshold_int_cpu],
+        "threshold_log_std": [threshold_log_std for _ in threshold_int_cpu],
+        "threshold_entropy": [float(value) for value in threshold_entropy_cpu],
     }
+
+
+def _threshold_summary(
+    raw_values: list[float],
+    int_values: list[int],
+    log_std_values: list[float],
+    entropy_values: list[float],
+) -> dict[str, float]:
+    if not raw_values:
+        return {
+            "threshold_raw_mean": 0.0,
+            "threshold_raw_std": 0.0,
+            "threshold_int_mean": 0.0,
+            "threshold_int_p10": 0.0,
+            "threshold_int_p50": 0.0,
+            "threshold_int_p90": 0.0,
+            "threshold_log_std": 0.0,
+            "threshold_entropy": 0.0,
+            "threshold_approx_kl": 0.0,
+        }
+    return {
+        "threshold_raw_mean": float(mean(raw_values)),
+        "threshold_raw_std": float(pstdev(raw_values)),
+        "threshold_int_mean": float(mean(int_values)),
+        "threshold_int_p10": _percentile(int_values, 0.10),
+        "threshold_int_p50": _percentile(int_values, 0.50),
+        "threshold_int_p90": _percentile(int_values, 0.90),
+        "threshold_log_std": float(mean(log_std_values)) if log_std_values else 0.0,
+        "threshold_entropy": float(mean(entropy_values)) if entropy_values else 0.0,
+        "threshold_approx_kl": 0.0,
+    }
+
+
+def _percentile(values: list[int], quantile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    index = int(round((len(ordered) - 1) * quantile))
+    return ordered[index]
 
 
 def _request_sample_uniforms(requests: list[EvalFeatureRequest], *, device: torch.device) -> torch.Tensor | None:

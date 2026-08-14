@@ -3,6 +3,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -14,7 +15,7 @@ from training.rl.rollout_mp.shared_memory import FeatureSharedMemory, create_fea
 
 from .scheduler import scheduler_loop
 from .summary import summarize_eval
-from .types import EvalEpisodeSummary, EvalTask, ParallelEvalConfig
+from .types import EvalEpisodeSummary, EvalTask, PairedEvalResult, ParallelEvalConfig
 from .worker import worker_loop
 
 
@@ -226,6 +227,59 @@ def evaluate_parallel(
         return pool.evaluate(model, tasks, device=device)
 
 
+def evaluate_fast_runtime_crn_pair(
+    model: GoldRushPolicyNetwork,
+    tasks: Sequence[EvalTask],
+    *,
+    env_config: SingleAgentEnvConfig,
+    mechanisms: Any = None,
+    map_pool: Any = None,
+    spawn: Any = None,
+    reward_fn: Any = None,
+    device: torch.device | str | None = None,
+    config: ParallelEvalConfig | None = None,
+    policy_sample_seed: int = 0,
+    policy_sample_key_prefix: str = "fast_crn",
+) -> PairedEvalResult:
+    paired_tasks = _tasks_with_crn(
+        tasks,
+        policy_sample_seed=policy_sample_seed,
+        policy_sample_key_prefix=policy_sample_key_prefix,
+    )
+    base_config = ParallelEvalConfig() if config is None else config
+    off_config = replace(base_config, enable_fast_runtime_features=False)
+    on_config = replace(base_config, enable_fast_runtime_features=True)
+    off_summaries, off_stats = evaluate_parallel(
+        model,
+        paired_tasks,
+        env_config=env_config,
+        mechanisms=mechanisms,
+        map_pool=map_pool,
+        spawn=spawn,
+        reward_fn=reward_fn,
+        device=device,
+        config=off_config,
+    )
+    on_summaries, on_stats = evaluate_parallel(
+        model,
+        paired_tasks,
+        env_config=env_config,
+        mechanisms=mechanisms,
+        map_pool=map_pool,
+        spawn=spawn,
+        reward_fn=reward_fn,
+        device=device,
+        config=on_config,
+    )
+    return PairedEvalResult(
+        fast_off_summaries=tuple(off_summaries),
+        fast_on_summaries=tuple(on_summaries),
+        fast_off_stats=off_stats,
+        fast_on_stats=on_stats,
+        paired_stats=_paired_delta_stats(off_summaries, on_summaries),
+    )
+
+
 def _validate_config(config: ParallelEvalConfig) -> None:
     if config.num_workers <= 0:
         raise ValueError(f"num_workers must be positive, got {config.num_workers}")
@@ -235,3 +289,69 @@ def _validate_config(config: ParallelEvalConfig) -> None:
         raise ValueError(f"inference_timeout_ms must be positive, got {config.inference_timeout_ms}")
     if config.worker_join_timeout_s <= 0:
         raise ValueError(f"worker_join_timeout_s must be positive, got {config.worker_join_timeout_s}")
+
+
+def _tasks_with_crn(
+    tasks: Sequence[EvalTask],
+    *,
+    policy_sample_seed: int,
+    policy_sample_key_prefix: str,
+) -> tuple[EvalTask, ...]:
+    if not tasks:
+        raise SimulatorRuleError("paired parallel eval requires at least one task")
+    seen: set[str] = set()
+    paired: list[EvalTask] = []
+    for task in tasks:
+        if task.task_id in seen:
+            raise SimulatorRuleError(f"paired parallel eval requires unique task_id, got duplicate {task.task_id!r}")
+        seen.add(task.task_id)
+        paired.append(
+            replace(
+                task,
+                policy_sample_key=task.policy_sample_key or f"{policy_sample_key_prefix}:{task.task_id}",
+                policy_sample_seed=task.policy_sample_seed if task.policy_sample_seed is not None else int(policy_sample_seed),
+            )
+        )
+    return tuple(paired)
+
+
+def _paired_delta_stats(
+    off_summaries: Sequence[EvalEpisodeSummary],
+    on_summaries: Sequence[EvalEpisodeSummary],
+) -> dict[str, float | int]:
+    off_by_id = {summary.task_id: summary for summary in off_summaries}
+    on_by_id = {summary.task_id: summary for summary in on_summaries}
+    if set(off_by_id) != set(on_by_id):
+        raise SimulatorRuleError("paired eval summary task ids differ between fast off and fast on")
+    deltas = [_episode_delta(off_by_id[task_id], on_by_id[task_id]) for task_id in sorted(off_by_id)]
+    if not deltas:
+        return {"paired_episode_count": 0}
+    return {
+        "paired_episode_count": len(deltas),
+        "paired_mean_agent_net_gold_delta": _mean_float(item["agent_net_gold_delta"] for item in deltas),
+        "paired_mean_margin_delta": _mean_float(item["margin_delta"] for item in deltas),
+        "paired_win_rate_delta": _mean_float(item["agent_won_delta"] for item in deltas),
+        "paired_mean_agent_pickup_gold_delta": _mean_float(item["agent_pickup_gold_delta"] for item in deltas),
+        "paired_mean_agent_bomb_lost_gold_delta": _mean_float(item["agent_bomb_lost_gold_delta"] for item in deltas),
+        "paired_mean_agent_trample_penalty_delta": _mean_float(item["agent_trample_penalty_delta"] for item in deltas),
+        "paired_mean_agent_vision_spent_delta": _mean_float(item["agent_vision_spent_delta"] for item in deltas),
+        "paired_mean_episode_length_delta": _mean_float(item["episode_length_delta"] for item in deltas),
+    }
+
+
+def _episode_delta(off: EvalEpisodeSummary, on: EvalEpisodeSummary) -> dict[str, float]:
+    return {
+        "agent_net_gold_delta": float(on.agent_net_gold - off.agent_net_gold),
+        "margin_delta": float(on.margin - off.margin),
+        "agent_won_delta": (1.0 if on.agent_won else 0.0) - (1.0 if off.agent_won else 0.0),
+        "agent_pickup_gold_delta": float(on.agent_pickup_gold - off.agent_pickup_gold),
+        "agent_bomb_lost_gold_delta": float(on.agent_bomb_lost_gold - off.agent_bomb_lost_gold),
+        "agent_trample_penalty_delta": float(on.agent_trample_penalty - off.agent_trample_penalty),
+        "agent_vision_spent_delta": float(on.agent_vision_spent - off.agent_vision_spent),
+        "episode_length_delta": float(on.episode_length - off.episode_length),
+    }
+
+
+def _mean_float(values: Any) -> float:
+    items = [float(value) for value in values]
+    return float(sum(items) / len(items)) if items else 0.0

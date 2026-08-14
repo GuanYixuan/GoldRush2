@@ -2,7 +2,15 @@
 
 from .env import AGENT_DECISION_FAST, AGENT_DECISION_NEURAL, SingleAgentEnvConfig, SingleAgentGoldRushEnv
 from .eval import EvaluationCase, EvaluationConfig, EvaluationResult, EvaluationSuite, evaluate_policy
-from .eval_mp import EvalEpisodeSummary, EvalTask, ParallelEvalConfig, ParallelEvalPool, evaluate_parallel
+from .eval_mp import (
+    EvalEpisodeSummary,
+    EvalTask,
+    PairedEvalResult,
+    ParallelEvalConfig,
+    ParallelEvalPool,
+    evaluate_fast_runtime_crn_pair,
+    evaluate_parallel,
+)
 from .fast_order import FAST_ORDER_LATENT_FIRST_RATE_MIXTURE, FastOrderConfig
 from .multiprocess_rollout import MultiprocessRolloutConfig, MultiprocessRolloutPool, collect_multiprocess_ppo_rollouts
 from .ppo import (
@@ -44,6 +52,7 @@ __all__ = [
     "MultiprocessRolloutPool",
     "ParallelEvalConfig",
     "ParallelEvalPool",
+    "PairedEvalResult",
     "PpoBatch",
     "PpoConfig",
     "PpoEvaluation",
@@ -64,6 +73,7 @@ __all__ = [
     "collect_ppo_rollouts",
     "critic_only_update",
     "evaluate_actions",
+    "evaluate_fast_runtime_crn_pair",
     "evaluate_parallel",
     "evaluate_policy",
     "extract_privileged_critic_features",

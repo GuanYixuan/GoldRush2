@@ -73,6 +73,15 @@ class EvalEpisodeSummary:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class PairedEvalResult:
+    fast_off_summaries: tuple[EvalEpisodeSummary, ...]
+    fast_on_summaries: tuple[EvalEpisodeSummary, ...]
+    fast_off_stats: dict[str, Any]
+    fast_on_stats: dict[str, Any]
+    paired_stats: dict[str, Any]
+
+
 def opponent_key(spec: OpponentSpec | None) -> str:
     if spec is None:
         return "none"

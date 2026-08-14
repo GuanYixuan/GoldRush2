@@ -8,6 +8,38 @@ from typing import Any
 from .types import EvalEpisodeSummary
 
 
+_EXTRA_MEAN_FIELDS = (
+    "threshold_raw_mean",
+    "threshold_raw_std",
+    "threshold_int_mean",
+    "threshold_int_p10",
+    "threshold_int_p50",
+    "threshold_int_p90",
+    "threshold_log_std",
+    "threshold_entropy",
+    "threshold_approx_kl",
+    "fast_success_per_episode",
+    "fast_miss_no_target_per_episode",
+    "fast_path_fail_per_episode",
+    "neural_fallback_per_episode",
+    "fast_nonstay_per_episode",
+    "latent_first_rate_mean",
+    "actual_fast_first_rate",
+    "fast_order_samples_per_episode",
+    "p_fast_effective_mean",
+    "p_fast_effective_p50",
+    "fast_effective_confidence_mean",
+    "fast_effective_updates_per_episode",
+    "fast_effective_score_mean",
+    "fast_expected_gain_mean",
+    "fast_actual_delta_mean",
+    "fast_pickup_gold_per_episode",
+    "fast_bomb_lost_gold_per_episode",
+    "fast_trample_penalty_per_episode",
+    "one_step_fast_delta_per_episode",
+)
+
+
 def summarize_eval(summaries: Sequence[EvalEpisodeSummary]) -> dict[str, Any]:
     if not summaries:
         return {
@@ -39,7 +71,7 @@ def _summary_for_group(summaries: Sequence[EvalEpisodeSummary]) -> dict[str, Any
     margins = [item.margin for item in summaries]
     agent_pickup_gold = [item.agent_pickup_gold for item in summaries]
     agent_bomb_loss = [item.agent_bomb_lost_gold for item in summaries]
-    return {
+    payload = {
         "episode_count": len(summaries),
         "mean_agent_net_gold": mean(item.agent_net_gold for item in summaries),
         "mean_opponent_net_gold": mean(item.opponent_net_gold for item in summaries),
@@ -61,3 +93,21 @@ def _summary_for_group(summaries: Sequence[EvalEpisodeSummary]) -> dict[str, Any
         "mean_opponent_bomb_triggers": mean(item.opponent_bomb_triggers for item in summaries),
         "agent_bomb_loss_ratio": sum(agent_bomb_loss) / max(sum(agent_bomb_loss) + sum(agent_pickup_gold), 1),
     }
+    payload.update(_extra_summary(summaries))
+    return payload
+
+
+def _extra_summary(summaries: Sequence[EvalEpisodeSummary]) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for key in _EXTRA_MEAN_FIELDS:
+        values = [_finite_float(item.extra[key]) for item in summaries if key in item.extra]
+        if len(values) == len(summaries):
+            result[key] = mean(values)
+    return result
+
+
+def _finite_float(value: Any) -> float:
+    numeric = float(value)
+    if numeric != numeric or numeric in (float("inf"), float("-inf")):
+        raise ValueError(f"eval extra metric must be finite, got {value!r}")
+    return numeric
