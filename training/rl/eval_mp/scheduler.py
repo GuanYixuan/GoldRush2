@@ -56,6 +56,9 @@ def scheduler_loop(
     episode_started = 0
     threshold_raw_values: list[float] = []
     threshold_int_values: list[int] = []
+    threshold_mu_raw_values: list[float] = []
+    threshold_base_raw_values: list[float] = []
+    threshold_residual_raw_values: list[float] = []
     threshold_log_std_values: list[float] = []
     threshold_entropy_values: list[float] = []
 
@@ -132,6 +135,9 @@ def scheduler_loop(
             inference_total_with_action_send_ns += inference_stats["total_with_action_send_ns"]
             threshold_raw_values.extend(inference_stats["threshold_raw"])
             threshold_int_values.extend(inference_stats["threshold_int"])
+            threshold_mu_raw_values.extend(inference_stats["threshold_mu_raw"])
+            threshold_base_raw_values.extend(inference_stats["threshold_base_raw"])
+            threshold_residual_raw_values.extend(inference_stats["threshold_residual_raw"])
             threshold_log_std_values.extend(inference_stats["threshold_log_std"])
             threshold_entropy_values.extend(inference_stats["threshold_entropy"])
             feature_batches += 1
@@ -155,6 +161,9 @@ def scheduler_loop(
         inference_total_with_action_send_ns += inference_stats["total_with_action_send_ns"]
         threshold_raw_values.extend(inference_stats["threshold_raw"])
         threshold_int_values.extend(inference_stats["threshold_int"])
+        threshold_mu_raw_values.extend(inference_stats["threshold_mu_raw"])
+        threshold_base_raw_values.extend(inference_stats["threshold_base_raw"])
+        threshold_residual_raw_values.extend(inference_stats["threshold_residual_raw"])
         threshold_log_std_values.extend(inference_stats["threshold_log_std"])
         threshold_entropy_values.extend(inference_stats["threshold_entropy"])
         feature_batches += 1
@@ -197,6 +206,9 @@ def scheduler_loop(
     stats.update({f"eval_inference_{key}": value for key, value in _threshold_summary(
         threshold_raw_values,
         threshold_int_values,
+        threshold_mu_raw_values,
+        threshold_base_raw_values,
+        threshold_residual_raw_values,
         threshold_log_std_values,
         threshold_entropy_values,
     ).items()})
@@ -242,15 +254,18 @@ def run_eval_inference_batch(
         k_cpu = action.k.detach().cpu().tolist()
         order_cpu = action.order.detach().cpu().tolist()
         vp_cpu = action.vp.detach().cpu().tolist()
-        threshold_raw_cpu = action.threshold_raw.detach().cpu().tolist()
-        sampled_threshold_int_cpu = action.threshold_int.detach().cpu().tolist()
-        threshold_int_cpu = (
+    threshold_raw_cpu = action.threshold_raw.detach().cpu().tolist()
+    sampled_threshold_int_cpu = action.threshold_int.detach().cpu().tolist()
+    threshold_mu_raw_cpu = action.threshold_mu_raw.detach().cpu().tolist()
+    threshold_base_raw_cpu = action.threshold_base_raw.detach().cpu().tolist()
+    threshold_residual_raw_cpu = action.threshold_residual_raw.detach().cpu().tolist()
+    threshold_int_cpu = (
             [int(fixed_threshold_int) for _ in sampled_threshold_int_cpu]
             if fixed_threshold_int is not None
             else sampled_threshold_int_cpu
         )
-        threshold_entropy_cpu = action.threshold_entropy.detach().cpu().tolist()
-        threshold_log_std = float(model._threshold_log_std().detach().cpu().item())
+    threshold_entropy_cpu = action.threshold_entropy.detach().cpu().tolist()
+    threshold_log_std = float(model._threshold_log_std().detach().cpu().item())
     sync(device)
     model_sample_ns = time.perf_counter_ns() - model_sample_start
     elapsed_ns = time.perf_counter_ns() - start
@@ -269,6 +284,9 @@ def run_eval_inference_batch(
                 },
                 "threshold_raw": float(threshold_raw_cpu[batch_index]),
                 "threshold_int": int(threshold_int_cpu[batch_index]),
+                "threshold_mu_raw": float(threshold_mu_raw_cpu[batch_index]),
+                "threshold_base_raw": float(threshold_base_raw_cpu[batch_index]),
+                "threshold_residual_raw": float(threshold_residual_raw_cpu[batch_index]),
                 "threshold_log_std": threshold_log_std,
                 "threshold_entropy": float(threshold_entropy_cpu[batch_index]),
             }
@@ -283,6 +301,9 @@ def run_eval_inference_batch(
         "total_with_action_send_ns": time.perf_counter_ns() - start,
         "threshold_raw": [float(value) for value in threshold_raw_cpu],
         "threshold_int": [int(value) for value in threshold_int_cpu],
+        "threshold_mu_raw": [float(value) for value in threshold_mu_raw_cpu],
+        "threshold_base_raw": [float(value) for value in threshold_base_raw_cpu],
+        "threshold_residual_raw": [float(value) for value in threshold_residual_raw_cpu],
         "threshold_log_std": [threshold_log_std for _ in threshold_int_cpu],
         "threshold_entropy": [float(value) for value in threshold_entropy_cpu],
     }
@@ -291,6 +312,9 @@ def run_eval_inference_batch(
 def _threshold_summary(
     raw_values: list[float],
     int_values: list[int],
+    mu_raw_values: list[float],
+    base_raw_values: list[float],
+    residual_raw_values: list[float],
     log_std_values: list[float],
     entropy_values: list[float],
 ) -> dict[str, float]:
@@ -302,6 +326,12 @@ def _threshold_summary(
             "threshold_int_p10": 0.0,
             "threshold_int_p50": 0.0,
             "threshold_int_p90": 0.0,
+            "threshold_mu_raw_mean": 0.0,
+            "threshold_mu_raw_std": 0.0,
+            "threshold_base_raw_mean": 0.0,
+            "threshold_base_raw_std": 0.0,
+            "threshold_residual_raw_mean": 0.0,
+            "threshold_residual_raw_std": 0.0,
             "threshold_log_std": 0.0,
             "threshold_entropy": 0.0,
             "threshold_approx_kl": 0.0,
@@ -313,6 +343,12 @@ def _threshold_summary(
         "threshold_int_p10": _percentile(int_values, 0.10),
         "threshold_int_p50": _percentile(int_values, 0.50),
         "threshold_int_p90": _percentile(int_values, 0.90),
+        "threshold_mu_raw_mean": float(mean(mu_raw_values)) if mu_raw_values else 0.0,
+        "threshold_mu_raw_std": float(pstdev(mu_raw_values)) if mu_raw_values else 0.0,
+        "threshold_base_raw_mean": float(mean(base_raw_values)) if base_raw_values else 0.0,
+        "threshold_base_raw_std": float(pstdev(base_raw_values)) if base_raw_values else 0.0,
+        "threshold_residual_raw_mean": float(mean(residual_raw_values)) if residual_raw_values else 0.0,
+        "threshold_residual_raw_std": float(pstdev(residual_raw_values)) if residual_raw_values else 0.0,
         "threshold_log_std": float(mean(log_std_values)) if log_std_values else 0.0,
         "threshold_entropy": float(mean(entropy_values)) if entropy_values else 0.0,
         "threshold_approx_kl": 0.0,

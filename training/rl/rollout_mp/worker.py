@@ -292,6 +292,9 @@ def run_worker_episode(
             "round_index": int(observation.round),
             "info": step.info,
         }
+        pending_transition["info"]["threshold_mu_raw"] = float(action_msg["threshold_mu_raw"])
+        pending_transition["info"]["threshold_base_raw"] = float(action_msg["threshold_base_raw"])
+        pending_transition["info"]["threshold_residual_raw"] = float(action_msg["threshold_residual_raw"])
         observation = step.observation
         episode_env_steps += 1
         if fast_runtime is None or observation is None:

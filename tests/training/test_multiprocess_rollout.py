@@ -356,6 +356,9 @@ class MultiprocessRolloutTests(unittest.TestCase):
                 "action": {"actions": (4, 4, 4, 4, 4, 4), "k": 0, "order": 0, "vp": 0},
                 "threshold_raw": 0.0,
                 "threshold_int": 12,
+                "threshold_mu_raw": 0.0,
+                "threshold_base_raw": 0.0,
+                "threshold_residual_raw": 0.0,
                 "old_logprob": -0.5,
                 "value": 0.25,
             }

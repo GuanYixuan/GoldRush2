@@ -47,15 +47,19 @@ threshold = low + (high - low) * sigmoid(threshold_raw)
 ```text
 low = 4
 high = 30
-initial_threshold ~= 12
+base_T = 11 when p_fast_full_realization <= 0.3
+base_T = 6 when p_fast_full_realization >= 0.7
+base_T follows a linear ramp between them
 ```
 
-`threshold=8` 已在 fast option 预研中显示较高触发率和 episode 层正收益，但作为可学习 head 的默认初始化略偏激进。第一版默认初始化到 `12` 左右，使接入初期触发率更保守，同时仍保留从数据中下调 threshold 的空间。可见金币 `>30` 的情况很少，`high=30` 已基本能表达“关闭普通抢金 fast path”，同时比 `64/80` 保留更宽的有效 sigmoid 梯度区间。
+`threshold=8` 已在 fast option 预研中显示较高触发率和 episode 层正收益；后续 fixed-threshold CRN sweep 显示不同 fast 顺序环境下全局最优会在约 `6-11` 间移动。当前第一版不再把网络均值直接初始化到某个固定 threshold，而是用 `p_fast_full_realization` 计算 calibrated base，再让网络学习 raw-space residual。初始 `p_fast_full_realization=0.8`，因此 residual 为 0 时 `base_T=6`，有利于早期获得 fast 校准样本。可见金币 `>30` 的情况很少，`high=30` 已基本能表达“关闭普通抢金 fast path”，同时比 `64/80` 保留更宽的有效 sigmoid 梯度区间。
 
 训练时把 `threshold_raw` 作为一个连续 stochastic action：
 
 ```text
-mu_raw = threshold_head(state, sampled_normal_action, fast_belief)
+base_raw = calibrated_base_raw(p_fast_full_realization)
+residual_raw = threshold_head(state, sampled_normal_action, fast_belief)
+mu_raw = base_raw + residual_raw
 threshold_raw ~ Normal(mu_raw, std_raw)
 threshold = 4 + 26 * sigmoid(threshold_raw)
 ```
@@ -418,7 +422,7 @@ belief 更新发生在当前 neural model 推理前，使 `fast_scalars_now` 能
    - 先做 CRN eval，确认 wrapper on/off 的收益、炸弹损失和触发率。
 
 2. 连续 threshold head。
-   - 初始化到 `threshold ~= 12`。
+   - 使用 calibrated base + zero residual 初始化；初始 `p_fast_full_realization=0.8` 对应 `threshold_int=6`。
    - 只训练 threshold head 或使用较小学习率。
    - 记录 threshold 分布、触发率、fast full-realization score 和 regret。
 

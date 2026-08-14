@@ -67,11 +67,32 @@ class PolicyNetworkTests(unittest.TestCase):
         self.assertEqual(torch.count_nonzero(candidate_output.bias).item(), 0)
         threshold_output = model.threshold_mlp[-1]
         self.assertEqual(torch.count_nonzero(threshold_output.weight).item(), 0)
+        self.assertEqual(torch.count_nonzero(threshold_output.bias).item(), 0)
         threshold_int = model.act_actor_only(*_feature_tensors(batch_size=1), deterministic=True).threshold_int.item()
-        self.assertEqual(threshold_int, 12)
+        self.assertEqual(threshold_int, 6)
 
         vp_prior = torch.softmax(model.vp_head.bias.detach(), dim=0)
         self.assertTrue(torch.allclose(vp_prior, torch.tensor([0.90, 0.07, 0.03]), atol=1e-6))
+
+    def test_calibrated_threshold_base_ramps_with_full_realization_belief(self) -> None:
+        model = _small_model()
+        spatial, scalars = _feature_tensors(batch_size=4)
+        fast_scalars = torch.tensor(
+            [
+                [0.2, 1.0],
+                [0.3, 1.0],
+                [0.5, 1.0],
+                [0.7, 1.0],
+            ],
+            dtype=torch.float32,
+        )
+
+        with torch.no_grad():
+            action = model.act_actor_only(spatial, scalars, fast_scalars, deterministic=True)
+
+        self.assertEqual(action.threshold_int.tolist(), [11, 11, 9, 6])
+        self.assertTrue(torch.allclose(action.threshold_residual_raw, torch.zeros_like(action.threshold_residual_raw)))
+        self.assertTrue(torch.allclose(action.threshold_mu_raw, action.threshold_base_raw))
 
     def test_candidate_residual_head_is_initially_noop(self) -> None:
         model = _small_model()

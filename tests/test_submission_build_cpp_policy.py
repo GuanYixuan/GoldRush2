@@ -218,7 +218,7 @@ def _write_fake_onnx_with_metadata(
         "stochastic": True,
         "critic_exported": False,
         "checkpoint_update": 3,
-        "action_head_schema": "candidate_cell_residual_v1_fast_threshold_v1",
+        "action_head_schema": "candidate_cell_residual_v1_fast_threshold_calibrated_base_v1",
         "inputs": build_cpp_policy.EXPECTED_INPUTS,
         "outputs": build_cpp_policy.EXPECTED_OUTPUTS,
     }

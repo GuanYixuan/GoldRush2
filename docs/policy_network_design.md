@@ -11,7 +11,7 @@ actor_spatial_planes: B x 43 x 17 x 17
 actor_scalars: B x 10
 fast_scalars: B x 2
 actor_feature_schema: goldrush2_feature_v2
-action_head_schema: candidate_cell_residual_v1_fast_threshold_v1
+action_head_schema: candidate_cell_residual_v1_fast_threshold_calibrated_base_v1
 ```
 
 critic 输入使用训练期 privileged critic feature：
@@ -199,7 +199,7 @@ fast_scalars: B x 2
 
 这两个量来自部署侧同样可计算的 Fast Full-Realization Belief，而不是 simulator 的隐藏真实先手率。`p_fast_full_realization` 是 strict proxy：只要 fast 后的实际持币增量小于根据上次可见金币模拟出的 `expected_gain`，就按失败样本更新；它不是 ratio 均值。
 
-threshold head 接在动作采样之后。六步 decoder 完成后，使用模拟出的两个己方最终位置从 `H_actor` gather 局部 feature：
+threshold head 接在动作采样之后。六步 decoder 完成后，使用模拟出的两个己方最终位置从 `H_actor` gather 局部 feature。当前 head 采用 calibrated base + neural residual：
 
 ```text
 threshold_input = concat(
@@ -214,7 +214,14 @@ threshold_mlp:
     SiLU
     Linear(128 -> 64)
     SiLU
-    Linear(64 -> 1)  # mu_raw
+    Linear(64 -> 1)  # residual_raw
+
+base_T =
+    11, if p_fast_full_realization <= 0.3
+    6,  if p_fast_full_realization >= 0.7
+    linear ramp from 11 to 6 otherwise
+base_raw = logit((base_T - 4) / (30 - 4))
+mu_raw = base_raw + residual_raw
 ```
 
 训练时采样 raw action：
@@ -238,12 +245,12 @@ threshold_int = clamp(threshold_int, 4, 30)
 第一版使用全局 learnable `threshold_log_std`，不做 state-dependent std。推荐初始化：
 
 ```text
-initial_threshold = 12
-mu_bias = logit((12 - 4) / (30 - 4)) ~= -0.811
+residual_raw = 0
+初始 p_fast_full_realization = 0.8 -> base_T = 6
 threshold_log_std ~= -1.3
 ```
 
-`threshold_mlp` 最后一层权重为 `0`，bias 为 `mu_bias`，使接入初期 `threshold ~= 12`。`threshold_log_std` 训练和导出时应 clamp 到稳定范围，例如 `[-3.0, 0.0]`。
+`threshold_mlp` 最后一层权重和 bias 都为 `0`，使接入初期完全等于 calibrated base。`threshold_log_std` 训练和导出时应 clamp 到稳定范围，例如 `[-3.0, 0.0]`。
 
 部署默认也使用 stochastic action 口径。C++ runtime 应从模型输出的分布参数采样普通动作和 `threshold_raw`，再执行同一 sigmoid 与整数化逻辑；随机流必须由 runtime 显式维护，避免训练、评估和平台提交之间出现隐式语义漂移。
 
@@ -383,7 +390,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 
 - `ko/vp/decoder_action` 输出层使用 `std=0.01` 小初始化。
 - `candidate_action_head` 最后一层权重和 bias 为 0，使 residual 初始严格为 0。
-- `threshold_mlp` 最后一层权重为 0，bias 为 `logit((12 - 4) / (30 - 4)) ~= -0.811`。
+- `threshold_mlp` 最后一层权重和 bias 为 0，使 threshold residual 初始严格为 0；初始 threshold 由 calibrated base 决定。
 - `threshold_log_std` 初始约为 `-1.3`，训练时 clamp 到稳定范围。
 - `vp` bias 保持初始先验 `(0.90,0.07,0.03)`。
 - GRU input weight 使用 Xavier，hidden weight 使用 orthogonal，bias 为 0。
@@ -391,9 +398,9 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - value 输出层使用小初始化，使初始 value 接近 0。
 - BC 训练只优化 actor 参数。PPO 从 BC checkpoint 初始化时，只加载 actor 路径；critic encoder 与 critic head 按 privileged critic schema 随机初始化或从专门 critic checkpoint 加载，不能默认拷贝 actor encoder，因为 actor/critic 输入 channel 与语义不同。
 
-主线不维护隐式部分加载。fast threshold 接入时，显式 inflation 工具只支持当前稳定的 feature v2 / `action_head_schema=candidate_cell_residual_v1` checkpoint：补齐 fast threshold head，并在 critic value 第一层追加 2 个 `fast_scalars` 输入列且置零，使初始普通动作分布和旧 value 输出保持不变。
+主线不维护隐式部分加载。fast threshold calibrated-base 接入时，显式 inflation 工具只支持当前稳定的 feature v2 / `action_head_schema=candidate_cell_residual_v1` checkpoint：补齐 fast threshold residual head，并在 critic value 第一层追加 2 个 `fast_scalars` 输入列且置零，使初始普通动作分布和旧 value 输出保持不变。
 
-旧 factorized checkpoint、旧 shared-encoder PPO checkpoint、缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint，以及 schema 元信息缺失或不匹配的 checkpoint 均不兼容当前模型，应 fail-fast。inflation 后不继承旧 optimizer state。
+旧 factorized checkpoint、旧 shared-encoder PPO checkpoint、缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint、旧 `candidate_cell_residual_v1_fast_threshold_v1` checkpoint，以及 schema 元信息缺失或不匹配的 checkpoint 均不兼容当前模型，应 fail-fast。inflation 后不继承旧 optimizer state。
 
 ## 部署与验证
 
@@ -406,7 +413,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - 非法动作不更新位置的规则参考对照。
 - rollout 与 teacher forcing logprob 等价。
 - candidate-cell residual head 初始为零扰动；旧 head checkpoint inflation 后在同一随机种子或 deterministic 检查下官方动作完全等价。
-- fast threshold head 初始 `threshold ~= 12`，旧 checkpoint inflation 后官方动作完全等价且 threshold 输出固定在 12 附近。
+- fast threshold residual head 初始为零扰动；`p_fast_full_realization` 为 0.8 时 calibrated base 输出 `threshold_int=6`，为 0.3/0.7 时分别输出约 11/6。
 - threshold raw teacher forcing logprob 等价，部署 stochastic 采样语义与训练分布一致。
 - PPO 双输入中 actor feature 只影响 policy/logprob，critic feature 只影响 value。
 - critic 四角色 gather 的 channel index、shape 和 P1/P2 视角。

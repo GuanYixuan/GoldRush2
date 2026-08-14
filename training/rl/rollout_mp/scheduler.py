@@ -235,6 +235,9 @@ def run_inference_batch(
     vp_cpu = action.vp.detach().cpu().tolist()
     threshold_raw_cpu = action.threshold_raw.detach().cpu().tolist()
     threshold_int_cpu = action.threshold_int.detach().cpu().tolist()
+    threshold_mu_raw_cpu = action.threshold_mu_raw.detach().cpu().tolist()
+    threshold_base_raw_cpu = action.threshold_base_raw.detach().cpu().tolist()
+    threshold_residual_raw_cpu = action.threshold_residual_raw.detach().cpu().tolist()
     logprob_cpu = action.logprob.detach().cpu().tolist()
     value_cpu = action.value.detach().cpu().tolist()
     for batch_index, request in enumerate(requests):
@@ -251,6 +254,9 @@ def run_inference_batch(
                 },
                 "threshold_raw": float(threshold_raw_cpu[batch_index]),
                 "threshold_int": int(threshold_int_cpu[batch_index]),
+                "threshold_mu_raw": float(threshold_mu_raw_cpu[batch_index]),
+                "threshold_base_raw": float(threshold_base_raw_cpu[batch_index]),
+                "threshold_residual_raw": float(threshold_residual_raw_cpu[batch_index]),
                 "old_logprob": float(logprob_cpu[batch_index]),
                 "value": float(value_cpu[batch_index]),
             }

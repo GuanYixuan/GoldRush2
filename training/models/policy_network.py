@@ -13,7 +13,7 @@ from simulator.types import Action, GameOutput
 FEATURE_SCHEMA = "goldrush2_feature_v2"
 SPATIAL_CHANNELS = 43
 SCALAR_FEATURES = 10
-ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1_fast_threshold_v1"
+ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1_fast_threshold_calibrated_base_v1"
 CANDIDATE_ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1"
 LEGACY_ACTION_HEAD_SCHEMA = "autoregressive_head_v1"
 CRITIC_FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v1"
@@ -27,6 +27,10 @@ ACTION_COUNT = 5
 KO_COUNT = 14
 THRESHOLD_LOW = 4.0
 THRESHOLD_HIGH = 30.0
+FAST_THRESHOLD_BASE_LOW_BELIEF = 0.3
+FAST_THRESHOLD_BASE_HIGH_BELIEF = 0.7
+FAST_THRESHOLD_BASE_CONSERVATIVE = 11.0
+FAST_THRESHOLD_BASE_AGGRESSIVE = 6.0
 OBSTACLE_KNOWN_CHANNEL = 20
 OBSTACLE_CHANNEL = 21
 OWN_UNIT0_CHANNEL = 24
@@ -78,6 +82,9 @@ class PolicyAction:
     vp: Tensor
     threshold_raw: Tensor
     threshold_int: Tensor
+    threshold_mu_raw: Tensor
+    threshold_base_raw: Tensor
+    threshold_residual_raw: Tensor
     logprob: Tensor
     value: Tensor
     normalized_entropy: Tensor
@@ -162,6 +169,9 @@ class _DecodedActions:
 class _ThresholdAction:
     raw: Tensor
     threshold_int: Tensor
+    mu: Tensor
+    base_raw: Tensor
+    residual_raw: Tensor
     logprob: Tensor
     entropy: Tensor
 
@@ -380,8 +390,8 @@ class GoldRushPolicyNetwork(nn.Module):
         if not isinstance(threshold_output, nn.Linear):
             raise TypeError("threshold_mlp final module must be nn.Linear")
         nn.init.zeros_(threshold_output.weight)
+        nn.init.zeros_(threshold_output.bias)
         with torch.no_grad():
-            threshold_output.bias.fill_(_threshold_to_raw(float(self.config.threshold_initial)))
             self.threshold_log_std.fill_(float(self.config.threshold_log_std_initial))
 
         vp_prior = torch.log(torch.tensor([0.90, 0.07, 0.03], dtype=self.vp_head.bias.dtype))
@@ -561,6 +571,9 @@ class GoldRushPolicyNetwork(nn.Module):
             vp=vp,
             threshold_raw=threshold.raw,
             threshold_int=threshold.threshold_int,
+            threshold_mu_raw=threshold.mu,
+            threshold_base_raw=threshold.base_raw,
+            threshold_residual_raw=threshold.residual_raw,
             logprob=ko_logprob + vp_logprob + decoded.logprob + threshold.logprob,
             value=value,
             normalized_entropy=(
@@ -728,7 +741,7 @@ class GoldRushPolicyNetwork(nn.Module):
         generator: torch.Generator | None,
         sample_uniform: Tensor | None,
     ) -> _ThresholdAction:
-        mu = self._threshold_mu(encoded, decoded, fast_scalars)
+        base_raw, residual_raw, mu = self._threshold_components(encoded, decoded, fast_scalars)
         log_std = self._threshold_log_std()
         if deterministic:
             raw = mu
@@ -738,7 +751,7 @@ class GoldRushPolicyNetwork(nn.Module):
             raw = mu + log_std.exp() * _standard_normal_icdf(sample_uniform.to(device=mu.device, dtype=mu.dtype))
         else:
             raw = mu + log_std.exp() * torch.randn(mu.shape, dtype=mu.dtype, device=mu.device, generator=generator)
-        return self._threshold_action(mu, log_std, raw)
+        return self._threshold_action(base_raw, residual_raw, mu, log_std, raw)
 
     def _evaluate_threshold(
         self,
@@ -747,12 +760,36 @@ class GoldRushPolicyNetwork(nn.Module):
         fast_scalars: Tensor,
         raw: Tensor,
     ) -> _ThresholdAction:
-        mu = self._threshold_mu(encoded, decoded, fast_scalars)
+        base_raw, residual_raw, mu = self._threshold_components(encoded, decoded, fast_scalars)
         log_std = self._threshold_log_std()
         raw = raw.reshape(mu.shape).to(device=mu.device, dtype=mu.dtype)
-        return self._threshold_action(mu, log_std, raw)
+        return self._threshold_action(base_raw, residual_raw, mu, log_std, raw)
 
     def _threshold_mu(self, encoded: _EncodedState, decoded: _DecodedActions, fast_scalars: Tensor) -> Tensor:
+        return self._threshold_components(encoded, decoded, fast_scalars)[2]
+
+    def _threshold_components(
+        self,
+        encoded: _EncodedState,
+        decoded: _DecodedActions,
+        fast_scalars: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        base_raw = self._threshold_base_raw(fast_scalars)
+        residual_raw = self._threshold_residual_raw(encoded, decoded, fast_scalars)
+        return base_raw, residual_raw, base_raw + residual_raw
+
+    def _threshold_base_raw(self, fast_scalars: Tensor) -> Tensor:
+        p = fast_scalars[:, 0].clamp(0.0, 1.0)
+        ramp = ((p - FAST_THRESHOLD_BASE_LOW_BELIEF) / (FAST_THRESHOLD_BASE_HIGH_BELIEF - FAST_THRESHOLD_BASE_LOW_BELIEF)).clamp(
+            0.0,
+            1.0,
+        )
+        base_threshold = FAST_THRESHOLD_BASE_CONSERVATIVE + ramp * (
+            FAST_THRESHOLD_BASE_AGGRESSIVE - FAST_THRESHOLD_BASE_CONSERVATIVE
+        )
+        return _threshold_to_raw_tensor(base_threshold)
+
+    def _threshold_residual_raw(self, encoded: _EncodedState, decoded: _DecodedActions, fast_scalars: Tensor) -> Tensor:
         final_unit0_local = _gather_position(encoded.spatial_features, decoded.final_unit0_position)
         final_unit1_local = _gather_position(encoded.spatial_features, decoded.final_unit1_position)
         return self.threshold_mlp(
@@ -765,12 +802,27 @@ class GoldRushPolicyNetwork(nn.Module):
             max=float(self.config.threshold_log_std_max),
         )
 
-    def _threshold_action(self, mu: Tensor, log_std: Tensor, raw: Tensor) -> _ThresholdAction:
+    def _threshold_action(
+        self,
+        base_raw: Tensor,
+        residual_raw: Tensor,
+        mu: Tensor,
+        log_std: Tensor,
+        raw: Tensor,
+    ) -> _ThresholdAction:
         threshold = THRESHOLD_LOW + (THRESHOLD_HIGH - THRESHOLD_LOW) * torch.sigmoid(raw)
         threshold_int = torch.floor(threshold + 0.5).clamp(int(THRESHOLD_LOW), int(THRESHOLD_HIGH)).long()
         logprob = _normal_logprob(raw, mu, log_std)
         entropy = (0.5 * (1.0 + math.log(2.0 * math.pi)) + log_std).expand_as(mu)
-        return _ThresholdAction(raw=raw, threshold_int=threshold_int, logprob=logprob, entropy=entropy)
+        return _ThresholdAction(
+            raw=raw,
+            threshold_int=threshold_int,
+            mu=mu,
+            base_raw=base_raw,
+            residual_raw=residual_raw,
+            logprob=logprob,
+            entropy=entropy,
+        )
 
     def _decode(
         self,
@@ -1064,6 +1116,9 @@ def policy_action_is_finite(action: PolicyAction) -> bool:
                 action.vp_entropy,
                 action.threshold_raw,
                 action.threshold_int.float(),
+                action.threshold_mu_raw,
+                action.threshold_base_raw,
+                action.threshold_residual_raw,
                 action.threshold_entropy,
             )
         ]
@@ -1139,6 +1194,14 @@ def _threshold_to_raw(threshold: float) -> float:
         raise ValueError(f"threshold_initial must be in ({THRESHOLD_LOW}, {THRESHOLD_HIGH}), got {threshold}")
     ratio = (threshold - THRESHOLD_LOW) / (THRESHOLD_HIGH - THRESHOLD_LOW)
     return math.log(ratio / (1.0 - ratio))
+
+
+def _threshold_to_raw_tensor(threshold: Tensor) -> Tensor:
+    ratio = ((threshold - THRESHOLD_LOW) / (THRESHOLD_HIGH - THRESHOLD_LOW)).clamp(
+        torch.finfo(threshold.dtype).eps,
+        1.0 - torch.finfo(threshold.dtype).eps,
+    )
+    return torch.log(ratio / (1.0 - ratio))
 
 
 def _gather_unit(h: Tensor, unit_mask: Tensor) -> Tensor:

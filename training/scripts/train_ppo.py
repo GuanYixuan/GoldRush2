@@ -1108,6 +1108,7 @@ def _training_diagnostics(batch) -> dict[str, float]:
     diagnostics["k_edge_fraction"] = float(((k == 0) | (k == 6)).sum().item()) / float(k.numel())
     diagnostics["same_role_reverse_fraction"] = _same_role_reverse_fraction(actions, k)
     diagnostics.update(_threshold_distribution_diagnostics(batch))
+    diagnostics.update(_threshold_component_diagnostics(batch.infos))
 
     terminal_indices = [idx for idx, done in enumerate(batch.dones.detach().cpu().tolist()) if done]
     diagnostics.update(_macro_step_diagnostics(batch, episode_count=len(terminal_indices)))
@@ -1138,6 +1139,30 @@ def _threshold_distribution_diagnostics(batch) -> dict[str, float]:
         "threshold_int_p50": _tensor_quantile(threshold_int, 0.50),
         "threshold_int_p90": _tensor_quantile(threshold_int, 0.90),
     }
+
+
+def _threshold_component_diagnostics(infos: tuple[dict[str, Any], ...]) -> dict[str, float]:
+    base = _info_float_values(infos, "threshold_base_raw")
+    residual = _info_float_values(infos, "threshold_residual_raw")
+    mu = _info_float_values(infos, "threshold_mu_raw")
+    return {
+        "threshold_base_raw_mean": _mean(base) if base else 0.0,
+        "threshold_base_raw_std": _float_std(base),
+        "threshold_residual_raw_mean": _mean(residual) if residual else 0.0,
+        "threshold_residual_raw_std": _float_std(residual),
+        "threshold_mu_raw_mean": _mean(mu) if mu else 0.0,
+        "threshold_mu_raw_std": _float_std(mu),
+    }
+
+
+def _info_float_values(infos: tuple[dict[str, Any], ...], key: str) -> list[float]:
+    return [float(info[key]) for info in infos if key in info]
+
+
+def _float_std(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return float(torch.tensor(values, dtype=torch.float32).std(unbiased=False).item())
 
 
 def _macro_step_diagnostics(batch, *, episode_count: int) -> dict[str, float]:

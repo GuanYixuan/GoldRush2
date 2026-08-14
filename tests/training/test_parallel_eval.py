@@ -76,9 +76,12 @@ class ParallelEvalTests(unittest.TestCase):
         self.assertIn("eval_by_setting", stats)
         self.assertIn("eval_threshold_raw_mean", stats)
         self.assertIn("eval_threshold_int_p50", stats)
+        self.assertIn("eval_threshold_base_raw_mean", stats)
+        self.assertIn("eval_inference_threshold_residual_raw_mean", stats)
         self.assertIn("eval_fast_success_per_episode", stats)
         self.assertEqual(stats["eval_fast_success_per_episode"], 0.0)
         self.assertIn("threshold_raw_mean", summaries[0].extra)
+        self.assertIn("threshold_mu_raw_mean", summaries[0].extra)
         self.assertIn("fast_success_per_episode", summaries[0].extra)
 
     def test_parallel_eval_pool_reuses_workers(self) -> None:

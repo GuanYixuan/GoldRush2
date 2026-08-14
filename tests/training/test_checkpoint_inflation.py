@@ -191,7 +191,10 @@ def test_inflate_fast_threshold_checkpoint_loads_and_preserves_old_value() -> No
     model.load_state_dict(inflated["model_state_dict"])
     new_value = model._critic_value(critic_planes, critic_scalars, torch.zeros(2, 2)).unsqueeze(1)
 
-    assert inflated["train_config"]["model"]["action_head_schema"] == "candidate_cell_residual_v1_fast_threshold_v1"
+    assert (
+        inflated["train_config"]["model"]["action_head_schema"]
+        == "candidate_cell_residual_v1_fast_threshold_calibrated_base_v1"
+    )
     assert "optimizer_state_dict" not in inflated
     assert inflated["optimizer_state_dict_dropped_for_fast_threshold_inflation"] is True
     assert "threshold_mlp.4.weight" in inflated["model_state_dict"]

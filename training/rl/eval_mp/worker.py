@@ -97,6 +97,9 @@ def run_worker_episode(
     fast_infos: list[dict[str, Any]] = []
     threshold_raw_values: list[float] = []
     threshold_int_values: list[int] = []
+    threshold_mu_raw_values: list[float] = []
+    threshold_base_raw_values: list[float] = []
+    threshold_residual_raw_values: list[float] = []
     threshold_log_std_values: list[float] = []
     threshold_entropy_values: list[float] = []
     fast_scalar_values: list[tuple[float, float]] = []
@@ -180,6 +183,9 @@ def run_worker_episode(
             fast_runtime.set_next_threshold(int(action_msg["threshold_int"]))
         threshold_raw_values.append(float(action_msg["threshold_raw"]))
         threshold_int_values.append(int(action_msg["threshold_int"]))
+        threshold_mu_raw_values.append(float(action_msg["threshold_mu_raw"]))
+        threshold_base_raw_values.append(float(action_msg["threshold_base_raw"]))
+        threshold_residual_raw_values.append(float(action_msg["threshold_residual_raw"]))
         threshold_log_std_values.append(float(action_msg["threshold_log_std"]))
         threshold_entropy_values.append(float(action_msg["threshold_entropy"]))
         env_step_start = time.perf_counter_ns()
@@ -213,6 +219,9 @@ def run_worker_episode(
                 fast_diagnostics=final_fast_diagnostics,
                 threshold_raw_values=threshold_raw_values,
                 threshold_int_values=threshold_int_values,
+                threshold_mu_raw_values=threshold_mu_raw_values,
+                threshold_base_raw_values=threshold_base_raw_values,
+                threshold_residual_raw_values=threshold_residual_raw_values,
                 threshold_log_std_values=threshold_log_std_values,
                 threshold_entropy_values=threshold_entropy_values,
                 fast_scalar_values=fast_scalar_values,
@@ -263,6 +272,9 @@ def _episode_summary(
     fast_diagnostics: dict[str, Any],
     threshold_raw_values: list[float],
     threshold_int_values: list[int],
+    threshold_mu_raw_values: list[float],
+    threshold_base_raw_values: list[float],
+    threshold_residual_raw_values: list[float],
     threshold_log_std_values: list[float],
     threshold_entropy_values: list[float],
     fast_scalar_values: list[tuple[float, float]],
@@ -307,6 +319,9 @@ def _episode_summary(
             fast_diagnostics=fast_diagnostics,
             threshold_raw_values=threshold_raw_values,
             threshold_int_values=threshold_int_values,
+            threshold_mu_raw_values=threshold_mu_raw_values,
+            threshold_base_raw_values=threshold_base_raw_values,
+            threshold_residual_raw_values=threshold_residual_raw_values,
             threshold_log_std_values=threshold_log_std_values,
             threshold_entropy_values=threshold_entropy_values,
             fast_scalar_values=fast_scalar_values,
@@ -333,6 +348,9 @@ def _eval_extra_metrics(
     fast_diagnostics: dict[str, Any],
     threshold_raw_values: list[float],
     threshold_int_values: list[int],
+    threshold_mu_raw_values: list[float],
+    threshold_base_raw_values: list[float],
+    threshold_residual_raw_values: list[float],
     threshold_log_std_values: list[float],
     threshold_entropy_values: list[float],
     fast_scalar_values: list[tuple[float, float]],
@@ -351,6 +369,12 @@ def _eval_extra_metrics(
         "threshold_int_p10": _percentile([float(value) for value in threshold_int_values], 0.10),
         "threshold_int_p50": _percentile([float(value) for value in threshold_int_values], 0.50),
         "threshold_int_p90": _percentile([float(value) for value in threshold_int_values], 0.90),
+        "threshold_mu_raw_mean": _mean(threshold_mu_raw_values),
+        "threshold_mu_raw_std": _std(threshold_mu_raw_values),
+        "threshold_base_raw_mean": _mean(threshold_base_raw_values),
+        "threshold_base_raw_std": _std(threshold_base_raw_values),
+        "threshold_residual_raw_mean": _mean(threshold_residual_raw_values),
+        "threshold_residual_raw_std": _std(threshold_residual_raw_values),
         "threshold_log_std": _mean(threshold_log_std_values),
         "threshold_entropy": _mean(threshold_entropy_values),
         "threshold_approx_kl": 0.0,

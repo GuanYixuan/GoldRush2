@@ -14,6 +14,10 @@ from torch import Tensor, nn
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.models.policy_network import (
     ACTION_COUNT,
+    FAST_THRESHOLD_BASE_AGGRESSIVE,
+    FAST_THRESHOLD_BASE_CONSERVATIVE,
+    FAST_THRESHOLD_BASE_HIGH_BELIEF,
+    FAST_THRESHOLD_BASE_LOW_BELIEF,
     FEATURE_SCHEMA,
     INITIAL_FAST_SCALARS,
     GRID_SIZE,
@@ -21,6 +25,8 @@ from training.models.policy_network import (
     MOVE_BUDGET,
     SCALAR_FEATURES,
     SPATIAL_CHANNELS,
+    THRESHOLD_HIGH,
+    THRESHOLD_LOW,
     _EncodedState,
     _gather_position,
 )
@@ -124,15 +130,32 @@ class StochasticActorExport(nn.Module):
     ) -> Tensor:
         final_unit0_local = _gather_position(encoded.spatial_features, final_unit0_position)
         final_unit1_local = _gather_position(encoded.spatial_features, final_unit1_position)
-        return self.model.threshold_mlp(
+        residual_raw = self.model.threshold_mlp(
             torch.cat((encoded.actor_context, final_unit0_local, final_unit1_local, fast_scalars), dim=1)
         ).squeeze(-1)
+        return _threshold_base_raw(fast_scalars) + residual_raw
 
 
 def _gumbel_argmax(logits: Tensor, rand: Tensor) -> Tensor:
     u = rand.float().clamp(1.0e-6, 1.0 - 1.0e-6)
     gumbel = -torch.log(-torch.log(u))
     return torch.argmax(logits + gumbel, dim=-1)
+
+
+def _threshold_base_raw(fast_scalars: Tensor) -> Tensor:
+    p = fast_scalars[:, 0].clamp(0.0, 1.0)
+    ramp = ((p - FAST_THRESHOLD_BASE_LOW_BELIEF) / (FAST_THRESHOLD_BASE_HIGH_BELIEF - FAST_THRESHOLD_BASE_LOW_BELIEF)).clamp(
+        0.0,
+        1.0,
+    )
+    base_threshold = FAST_THRESHOLD_BASE_CONSERVATIVE + ramp * (
+        FAST_THRESHOLD_BASE_AGGRESSIVE - FAST_THRESHOLD_BASE_CONSERVATIVE
+    )
+    ratio = ((base_threshold - THRESHOLD_LOW) / (THRESHOLD_HIGH - THRESHOLD_LOW)).clamp(
+        torch.finfo(base_threshold.dtype).eps,
+        1.0 - torch.finfo(base_threshold.dtype).eps,
+    )
+    return torch.log(ratio / (1.0 - ratio))
 
 
 def main() -> None:
