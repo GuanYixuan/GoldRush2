@@ -13,7 +13,7 @@ constexpr int ACTION_DOWN = 1;
 constexpr int ACTION_LEFT = 2;
 constexpr int ACTION_RIGHT = 3;
 constexpr int ACTION_STAY = 4;
-constexpr int SCAN_COUNT = 25;
+constexpr int SCAN_COUNT = 24;
 constexpr int PAD2 = FastRuntimeState::PAD2;
 constexpr int PAD2_STRIDE = FastRuntimeState::PAD2_STRIDE;
 constexpr int PAD2_COUNT = FastRuntimeState::PAD2_COUNT;
@@ -21,21 +21,21 @@ constexpr int PAD2_COUNT = FastRuntimeState::PAD2_COUNT;
 constexpr int kScan5x5Offsets[SCAN_COUNT] = {
     -2 * PAD2_STRIDE - 2, -2 * PAD2_STRIDE - 1, -2 * PAD2_STRIDE, -2 * PAD2_STRIDE + 1, -2 * PAD2_STRIDE + 2,
     -1 * PAD2_STRIDE - 2, -1 * PAD2_STRIDE - 1, -1 * PAD2_STRIDE, -1 * PAD2_STRIDE + 1, -1 * PAD2_STRIDE + 2,
-    -2, -1, 0, 1, 2,
+    -2, -1, 1, 2,
     PAD2_STRIDE - 2, PAD2_STRIDE - 1, PAD2_STRIDE, PAD2_STRIDE + 1, PAD2_STRIDE + 2,
     2 * PAD2_STRIDE - 2, 2 * PAD2_STRIDE - 1, 2 * PAD2_STRIDE, 2 * PAD2_STRIDE + 1, 2 * PAD2_STRIDE + 2,
 };
 constexpr int kScan5x5RowDelta[SCAN_COUNT] = {
     -2, -2, -2, -2, -2,
     -1, -1, -1, -1, -1,
-    0, 0, 0, 0, 0,
+    0, 0, 0, 0,
     1, 1, 1, 1, 1,
     2, 2, 2, 2, 2,
 };
 constexpr int kScan5x5ColDelta[SCAN_COUNT] = {
     -2, -1, 0, 1, 2,
     -2, -1, 0, 1, 2,
-    -2, -1, 0, 1, 2,
+    -2, -1, 1, 2,
     -2, -1, 0, 1, 2,
     -2, -1, 0, 1, 2,
 };
@@ -616,8 +616,14 @@ GameInput FastRuntimeState::restore_pending_input() const {
 
 void FastRuntimeState::backfill_pending(const GameInput& input_now) {
     const GameInput pending_input = restore_pending_input();
-    const int role = infer_fast_role(pending_input, pending_.output);
-    const int expected_gain = simulate_known_gold_pickups(pending_input, pending_.output, role);
+    int role = -1;
+    int expected_gain = 0;
+    try {
+        role = infer_fast_role(pending_input, pending_.output);
+        expected_gain = simulate_known_gold_pickups(pending_input, pending_.output, role);
+    } catch (const std::logic_error&) {
+        expected_gain = 0;
+    }
     if (expected_gain > 0) {
         const int actual_delta = input_now.my_units_gold[role] - pending_.my_units_gold[role];
         float score = static_cast<float>(actual_delta) / static_cast<float>(expected_gain);

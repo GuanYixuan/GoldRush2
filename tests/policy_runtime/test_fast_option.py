@@ -51,6 +51,24 @@ class FastOptionTests(unittest.TestCase):
         self.assertEqual(result["status"], "path_fail")
         self.assertEqual(result["target"], (6, 8))
 
+    def test_try_fast_gold_grab_ignores_current_cell_gold(self) -> None:
+        center_only = _basic_input(round_index=1)
+        center_only.my_units = [(8, 8), (16, 16)]
+        center_only.grid[8][8] = 30
+
+        self.assertEqual(try_fast_gold_grab(center_only, 12)["status"], "miss_no_target")
+
+        with_neighbor = _basic_input(round_index=1)
+        with_neighbor.my_units = [(8, 8), (16, 16)]
+        with_neighbor.grid[8][8] = 30
+        with_neighbor.grid[8][9] = 20
+
+        result = try_fast_gold_grab(with_neighbor, 12)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["target"], (8, 9))
+        self.assertGreater(result["action_count"], 0)
+
     def test_simulate_known_gold_pickups_counts_path_and_bounce(self) -> None:
         game_input = _basic_input(round_index=0)
         game_input.my_units = [(8, 8), (16, 16)]
