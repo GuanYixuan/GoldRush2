@@ -121,6 +121,7 @@ class ParallelEvalPool:
                 "spawn": self.spawn,
                 "reward_fn": self.reward_fn,
                 "enable_fast_runtime_features": bool(self.config.enable_fast_runtime_features),
+                "fixed_threshold_int": self.config.fixed_threshold_int,
                 "feature_shared_memory": self.feature_shared.config(),
             }
             self.processes = [
@@ -289,6 +290,8 @@ def _validate_config(config: ParallelEvalConfig) -> None:
         raise ValueError(f"inference_timeout_ms must be positive, got {config.inference_timeout_ms}")
     if config.worker_join_timeout_s <= 0:
         raise ValueError(f"worker_join_timeout_s must be positive, got {config.worker_join_timeout_s}")
+    if config.fixed_threshold_int is not None and not 4 <= int(config.fixed_threshold_int) <= 30:
+        raise ValueError(f"fixed_threshold_int must be in [4, 30] when set, got {config.fixed_threshold_int}")
 
 
 def _tasks_with_crn(

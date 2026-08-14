@@ -9,10 +9,11 @@ from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, Out
 from simulator.mechanisms.maps import SpawnConfig
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.opponents import OpponentSpec
-from training.rl import EvalTask, ParallelEvalConfig, ParallelEvalPool, SingleAgentEnvConfig, evaluate_parallel
+from training.rl import EvalTask, FastOrderConfig, ParallelEvalConfig, ParallelEvalPool, SingleAgentEnvConfig, evaluate_parallel
 from training.rl.eval_mp import evaluate_fast_runtime_crn_pair
 from training.rl.eval_mp.scheduler import _request_uniform_row
 from training.rl.eval_mp.types import EvalFeatureRequest
+from training.rl.eval_mp.worker import _env_config_for_task
 
 
 class ParallelEvalTests(unittest.TestCase):
@@ -130,6 +131,64 @@ class ParallelEvalTests(unittest.TestCase):
             self.assertIn("p_fast_effective_mean", summary.extra)
             self.assertGreaterEqual(summary.extra["threshold_int_mean"], 4.0)
             self.assertLessEqual(summary.extra["threshold_int_mean"], 30.0)
+
+    def test_parallel_eval_fixed_threshold_overrides_runtime_threshold(self) -> None:
+        model = _small_model()
+        summaries, stats = evaluate_parallel(
+            model,
+            _tasks(seed=8),
+            env_config=SingleAgentEnvConfig(episode=_one_round_episode(), opponent_spec=_stay_opponent_spec()),
+            mechanisms=_quiet_mechanisms(),
+            spawn=SpawnConfig(npc_ids=()),
+            device="cpu",
+            config=ParallelEvalConfig(
+                num_workers=2,
+                max_inference_batch_size=4,
+                inference_timeout_ms=1.0,
+                enable_fast_runtime_features=True,
+                fixed_threshold_int=8,
+            ),
+        )
+
+        self.assertEqual(stats["eval_fixed_threshold_int"], 8)
+        self.assertEqual(stats["eval_threshold_int_mean"], 8.0)
+        self.assertEqual(stats["eval_threshold_int_p50"], 8.0)
+        self.assertEqual(stats["eval_inference_threshold_int_mean"], 8.0)
+        for summary in summaries:
+            self.assertEqual(summary.extra["threshold_int_mean"], 8.0)
+
+    def test_eval_task_env_config_preserves_fast_order(self) -> None:
+        fast_order = FastOrderConfig(latent_first_rate_mixture=((1.0, 0.5, 0.5),))
+        base = SingleAgentEnvConfig(
+            episode=_one_round_episode(),
+            opponent_spec=_stay_opponent_spec(),
+            fast_order=fast_order,
+        )
+        same_round = _env_config_for_task(
+            {"env_config": base},
+            EvalTask(
+                task_id="same",
+                seed=1,
+                map_id=1,
+                opponent_spec=_stay_opponent_spec(),
+                agent_player_id=1,
+                round_count=1,
+            ),
+        )
+        different_round = _env_config_for_task(
+            {"env_config": base},
+            EvalTask(
+                task_id="different",
+                seed=1,
+                map_id=1,
+                opponent_spec=_stay_opponent_spec(),
+                agent_player_id=1,
+                round_count=2,
+            ),
+        )
+
+        self.assertEqual(same_round.fast_order, fast_order)
+        self.assertEqual(different_round.fast_order, fast_order)
 
     def test_fast_runtime_crn_pair_reports_paired_deltas(self) -> None:
         model = _small_model()

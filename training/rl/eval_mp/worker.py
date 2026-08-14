@@ -233,6 +233,7 @@ def _env_config_for_task(static_config: dict[str, Any], task: EvalTask) -> Singl
             opponent_league=base.opponent_league,
             league_split=base.league_split,
             record_replay=False,
+            fast_order=base.fast_order,
         )
     episode = replace(
         base.episode,
@@ -245,6 +246,7 @@ def _env_config_for_task(static_config: dict[str, Any], task: EvalTask) -> Singl
         opponent_league=base.opponent_league,
         league_split=base.league_split,
         record_replay=False,
+        fast_order=base.fast_order,
     )
 
 
@@ -309,6 +311,17 @@ def _episode_summary(
             threshold_entropy_values=threshold_entropy_values,
             fast_scalar_values=fast_scalar_values,
         ),
+    )
+
+
+def _game_output_from_payload(payload: Any) -> GameOutput:
+    if isinstance(payload, GameOutput):
+        return payload
+    return GameOutput(
+        actions=tuple(int(value) for value in payload["actions"]),
+        k=int(payload["k"]),
+        order=int(payload["order"]),
+        vp=int(payload["vp"]),
     )
 
 

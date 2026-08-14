@@ -14,6 +14,7 @@ class ParallelEvalConfig:
     worker_join_timeout_s: float = 5.0
     deterministic: bool = False
     enable_fast_runtime_features: bool = False
+    fixed_threshold_int: int | None = None
 
 
 @dataclass(frozen=True)

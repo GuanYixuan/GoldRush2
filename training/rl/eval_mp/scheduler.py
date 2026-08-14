@@ -123,6 +123,7 @@ def scheduler_loop(
                 device,
                 feature_shared,
                 deterministic=config.deterministic,
+                fixed_threshold_int=config.fixed_threshold_int,
             )
             inference_ns += inference_stats["elapsed_ns"]
             inference_stack_ns += inference_stats["stack_ns"]
@@ -145,6 +146,7 @@ def scheduler_loop(
             device,
             feature_shared,
             deterministic=config.deterministic,
+            fixed_threshold_int=config.fixed_threshold_int,
         )
         inference_ns += inference_stats["elapsed_ns"]
         inference_stack_ns += inference_stats["stack_ns"]
@@ -164,6 +166,7 @@ def scheduler_loop(
     stats = {
         "eval_mode": "parallel",
         "eval_deterministic": config.deterministic,
+        "eval_fixed_threshold_int": config.fixed_threshold_int,
         "eval_num_workers": len(command_queues),
         "eval_task_count": len(tasks),
         "eval_episode_started": episode_started,
@@ -208,6 +211,7 @@ def run_eval_inference_batch(
     feature_shared: FeatureSharedMemory,
     *,
     deterministic: bool,
+    fixed_threshold_int: int | None,
 ) -> dict[str, Any]:
     import numpy as np
 
@@ -239,7 +243,12 @@ def run_eval_inference_batch(
         order_cpu = action.order.detach().cpu().tolist()
         vp_cpu = action.vp.detach().cpu().tolist()
         threshold_raw_cpu = action.threshold_raw.detach().cpu().tolist()
-        threshold_int_cpu = action.threshold_int.detach().cpu().tolist()
+        sampled_threshold_int_cpu = action.threshold_int.detach().cpu().tolist()
+        threshold_int_cpu = (
+            [int(fixed_threshold_int) for _ in sampled_threshold_int_cpu]
+            if fixed_threshold_int is not None
+            else sampled_threshold_int_cpu
+        )
         threshold_entropy_cpu = action.threshold_entropy.detach().cpu().tolist()
         threshold_log_std = float(model._threshold_log_std().detach().cpu().item())
     sync(device)
