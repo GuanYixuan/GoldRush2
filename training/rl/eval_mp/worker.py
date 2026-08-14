@@ -393,6 +393,15 @@ def _eval_extra_metrics(
         "fast_effective_confidence_mean": _mean(confidence_values),
         "fast_effective_updates_per_episode": effective_updates,
         "fast_effective_score_mean": _diagnostic_ratio(fast_diagnostics, "fast_effective_score_sum", effective_updates),
+        "fast_effective_positive_updates_per_episode": _diagnostic_float(
+            fast_diagnostics, "fast_effective_positive_updates"
+        ),
+        "fast_effective_negative_updates_per_episode": _diagnostic_float(
+            fast_diagnostics, "fast_effective_negative_updates"
+        ),
+        "fast_effective_skipped_success_no_new_npc_per_episode": _diagnostic_float(
+            fast_diagnostics, "fast_effective_skipped_success_no_new_npc"
+        ),
         "fast_expected_gain_mean": _diagnostic_ratio(fast_diagnostics, "fast_expected_gain_sum", effective_updates),
         "fast_actual_delta_mean": _diagnostic_ratio(fast_diagnostics, "fast_actual_delta_sum", effective_updates),
         "fast_pickup_gold_per_episode": float(fast_events["pickup_gold"][agent_player_id]),
@@ -414,6 +423,9 @@ def _empty_fast_diagnostics() -> dict[str, float]:
         "fast_expected_gain_sum": 0.0,
         "fast_actual_delta_sum": 0.0,
         "one_step_fast_delta_sum": 0.0,
+        "fast_effective_positive_updates": 0.0,
+        "fast_effective_negative_updates": 0.0,
+        "fast_effective_skipped_success_no_new_npc": 0.0,
     }
 
 

@@ -48,11 +48,11 @@ threshold = low + (high - low) * sigmoid(threshold_raw)
 low = 4
 high = 30
 base_T = 11 when p_fast_full_realization <= 0.3
-base_T = 6 when p_fast_full_realization >= 0.7
+base_T = 6 when p_fast_full_realization >= 0.6
 base_T follows a linear ramp between them
 ```
 
-`threshold=8` 已在 fast option 预研中显示较高触发率和 episode 层正收益；后续 fixed-threshold CRN sweep 显示不同 fast 顺序环境下全局最优会在约 `6-11` 间移动。当前第一版不再把网络均值直接初始化到某个固定 threshold，而是用 `p_fast_full_realization` 计算 calibrated base，再让网络学习 raw-space residual。初始 `p_fast_full_realization=0.8`，因此 residual 为 0 时 `base_T=6`，有利于早期获得 fast 校准样本。可见金币 `>30` 的情况很少，`high=30` 已基本能表达“关闭普通抢金 fast path”，同时比 `64/80` 保留更宽的有效 sigmoid 梯度区间。
+`threshold=8` 已在 fast option 预研中显示较高触发率和 episode 层正收益；后续 fixed-threshold CRN sweep 显示不同 fast 顺序环境下全局最优会在约 `6-11` 间移动。当前第一版不再把网络均值直接初始化到某个固定 threshold，而是用 `p_fast_full_realization` 计算 calibrated base，再让网络学习 raw-space residual。收紧 contested-NPC 口径后 `p_fast_full_realization` 更保守，因此当其达到 `0.6` 即认为 fast 有较强可用性证据并给出 `base_T=6`。初始 `p_fast_full_realization=0.8`，因此 residual 为 0 时 `base_T=6`，有利于早期获得 fast 校准样本。可见金币 `>30` 的情况很少，`high=30` 已基本能表达“关闭普通抢金 fast path”，同时比 `64/80` 保留更宽的有效 sigmoid 梯度区间。
 
 训练时把 `threshold_raw` 作为一个连续 stochastic action：
 
@@ -91,6 +91,8 @@ fast option 的核心价值来自抢先手。部署侧 C++ fast path 属于算�
 
 fast option 的真实收益依赖触发后是否达成预期抢金效果。官方 `GameInput` 不提供双方耗时、真实执行顺序或事件日志；为了避免训练/部署不匹配，第一版不使用“真实是否先手”作为 belief 更新口径，而使用可由部署侧同样计算的抢金效果 proxy。
 
+当前 `p_fast_full_realization` 采用收紧后的竞争证据口径。它不是“所有 fast 是否兑现”的宽松成功率，而是“出现竞争证据时 fast 是否完整兑现”的保守 belief。这样可以避免无人竞争金币成功样本把低先手环境下的 `p_fast_full_realization` 虚高。
+
 推荐使用 Beta 后验：
 
 ```text
@@ -105,23 +107,38 @@ fast_effective_confidence = min((alpha + beta) / 20, 1)
 每次 fast path 触发后，下一次 neural observe 前用上回合保存的局面和动作做一次只模拟已知金币的轻量模拟：
 
 ```text
-expected_gain = simulate_known_gold_pickups(saved_input_t, fast_output_t)
-actual_delta = current_my_units_gold[inferred_fast_role] - saved_my_units_gold[inferred_fast_role]
-score = 1 if actual_delta >= expected_gain else 0
+inferred_role = infer_fast_role(saved_input_t, fast_output_t)
+target = replay fast_output_t for inferred_role from saved_input_t.my_units[inferred_role]
+expected_gain = simulate_known_gold_pickups(saved_input_t, fast_output_t, inferred_role)
+actual_delta = current_my_units_gold[inferred_role] - saved_my_units_gold[inferred_role]
 ```
 
-只在 `expected_gain > 0` 时更新 Beta：
+只在 `expected_gain > 0` 时考虑更新 Beta：
 
 ```text
-alpha += score
-beta += 1 - score
+if actual_delta < expected_gain:
+    beta += 1
+else if next observation has a new visible NPC at target:
+    alpha += 1
+else:
+    no alpha/beta update
 ```
 
-该 strict 口径把任何 `actual_delta < expected_gain` 都视为 fast 未完整兑现预期收益，即使角色仍吃到部分残值也按失败样本处理。第一版不模拟炸弹损失、踩踏、NPC 或敌方行动；这些因素如果导致实际金币变化低于已知金币模拟收益，会自然表现为失败样本。
+该收紧口径把任何 `actual_delta < expected_gain` 都视为 fast 未完整兑现预期收益，即使角色仍吃到部分残值也按失败样本处理。正样本除了 `actual_delta >= expected_gain` 外，还必须在下一回合观测到新的 NPC 停留在 fast target 格；无新 NPC 证据的成功样本跳过，不更新 belief。第一版不模拟炸弹损失、踩踏、NPC 或敌方行动；这些因素如果导致实际金币变化低于已知金币模拟收益，会自然表现为失败样本。
+
+“新的 NPC 停留在 target 格”按部署侧可复现的终态观测定义：
+
+```text
+npc_now_at_target = input_now.visible_npcs 中存在 NPC 位于 target
+npc_prev_at_target = saved_input_t.visible_npcs 中存在 NPC 位于 target
+new_npc_at_target = npc_now_at_target && !npc_prev_at_target
+```
+
+官方 observation 不提供回合内轨迹，因此这里不声称观测到了 NPC “经过” target，只使用下一回合可见终态。target/role/expected_gain 不应在 fast path 热路径额外保存；当前实现从 `pending_input + fast_output` 在 `backfill_pending()` 慢路径中重放得到。
 
 `p_fast_full_realization` 和 `fast_effective_confidence` 应作为 threshold head 的额外 scalar 输入。它们不进入 actor 主干或 actor scalar FiLM，但 PPO 重算 logprob 时必须能复现同一输入；critic value 也应看到这两个 scalar，否则同一 observation 下未来 fast 有效性分布不同，value 会更难拟合。
 
-第一版不额外保存逐次 belief/debug 字段；`score`、`expected_gain` 和 `actual_delta` 只用于更新 Beta belief，并按 update 聚合到默认诊断指标。历史指标名中的 `fast_effective_score` 在当前实现中表示 strict full-realization success rate，而不再表示 ratio 均值。
+第一版不额外保存逐次 belief/debug 字段；`score`、`expected_gain` 和 `actual_delta` 只用于更新 Beta belief，并按 update 聚合到默认诊断指标。历史指标名中的 `fast_effective_score` 在当前实现中表示参与 belief 更新样本上的 contested full-realization success rate，而不再表示 ratio 均值。成功但无新 NPC 证据的跳过样本通过 `fast_effective_skipped_success_no_new_npc` 诊断统计。
 
 ### 轻量金币模拟口径
 

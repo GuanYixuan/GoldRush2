@@ -40,6 +40,9 @@ struct FastDiagnostics {
     float fast_expected_gain_sum = 0.0F;
     float fast_actual_delta_sum = 0.0F;
     float one_step_fast_delta_sum = 0.0F;
+    int fast_effective_positive_updates = 0;
+    int fast_effective_negative_updates = 0;
+    int fast_effective_skipped_success_no_new_npc = 0;
 };
 
 struct FastTryResult {

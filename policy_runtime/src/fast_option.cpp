@@ -419,6 +419,34 @@ int infer_fast_role(const GameInput& input, const GameOutput& output) {
     throw std::logic_error("cannot uniquely infer fast role from pending output");
 }
 
+Position replay_output_final_position(const GameInput& input, const GameOutput& output, int role) {
+    int actions[S]{};
+    int action_count = 0;
+    split_output(output, role, actions, &action_count);
+    Position pos = input.my_units[role];
+    for (int i = 0; i < action_count; ++i) {
+        const Position next = moved(pos, actions[i]);
+        if (!in_bounds(next) || input.grid[next.row][next.col] < 0 || is_visible_enemy(input, next.row, next.col)) {
+            continue;
+        }
+        if (next.row == pos.row && next.col == pos.col) {
+            continue;
+        }
+        pos = next;
+    }
+    return pos;
+}
+
+bool npc_at_position(const GameInput& input, Position position) {
+    for (int i = 0; i < input.num_visible_npcs; ++i) {
+        const NpcInfo& npc = input.visible_npcs[i];
+        if (npc.pos.row == position.row && npc.pos.col == position.col) {
+            return true;
+        }
+    }
+    return false;
+}
+
 FastRuntimeState::FastRuntimeState(int player_id) : extractor_(player_id) {
     reset(player_id);
 }
@@ -618,22 +646,41 @@ void FastRuntimeState::backfill_pending(const GameInput& input_now) {
     const GameInput pending_input = restore_pending_input();
     int role = -1;
     int expected_gain = 0;
+    Position target{0, 0};
     try {
         role = infer_fast_role(pending_input, pending_.output);
         expected_gain = simulate_known_gold_pickups(pending_input, pending_.output, role);
+        target = replay_output_final_position(pending_input, pending_.output, role);
     } catch (const std::logic_error&) {
         expected_gain = 0;
     }
     if (expected_gain > 0) {
         const int actual_delta = input_now.my_units_gold[role] - pending_.my_units_gold[role];
-        const float score = actual_delta >= expected_gain ? 1.0F : 0.0F;
-        fast_alpha_ += score;
-        fast_beta_ += 1.0F - score;
-        diagnostics_.fast_effective_updates += 1;
-        diagnostics_.fast_effective_score_sum += score;
-        diagnostics_.fast_expected_gain_sum += static_cast<float>(expected_gain);
-        diagnostics_.fast_actual_delta_sum += static_cast<float>(actual_delta);
-        diagnostics_.one_step_fast_delta_sum += static_cast<float>(actual_delta - expected_gain);
+        bool should_update = actual_delta < expected_gain;
+        float score = 0.0F;
+        if (!should_update) {
+            const bool new_npc_at_target = npc_at_position(input_now, target) && !npc_at_position(pending_input, target);
+            if (new_npc_at_target) {
+                should_update = true;
+                score = 1.0F;
+            } else {
+                diagnostics_.fast_effective_skipped_success_no_new_npc += 1;
+            }
+        }
+        if (should_update) {
+            if (score > 0.0F) {
+                diagnostics_.fast_effective_positive_updates += 1;
+            } else {
+                diagnostics_.fast_effective_negative_updates += 1;
+            }
+            fast_alpha_ += score;
+            fast_beta_ += 1.0F - score;
+            diagnostics_.fast_effective_updates += 1;
+            diagnostics_.fast_effective_score_sum += score;
+            diagnostics_.fast_expected_gain_sum += static_cast<float>(expected_gain);
+            diagnostics_.fast_actual_delta_sum += static_cast<float>(actual_delta);
+            diagnostics_.one_step_fast_delta_sum += static_cast<float>(actual_delta - expected_gain);
+        }
     }
     extractor_.observe(pending_input);
     extractor_.commit_action(pending_.output);

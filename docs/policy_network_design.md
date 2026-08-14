@@ -218,7 +218,7 @@ threshold_mlp:
 
 base_T =
     11, if p_fast_full_realization <= 0.3
-    6,  if p_fast_full_realization >= 0.7
+    6,  if p_fast_full_realization >= 0.6
     linear ramp from 11 to 6 otherwise
 base_raw = logit((base_T - 4) / (30 - 4))
 mu_raw = base_raw + residual_raw
@@ -413,7 +413,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - 非法动作不更新位置的规则参考对照。
 - rollout 与 teacher forcing logprob 等价。
 - candidate-cell residual head 初始为零扰动；旧 head checkpoint inflation 后在同一随机种子或 deterministic 检查下官方动作完全等价。
-- fast threshold residual head 初始为零扰动；`p_fast_full_realization` 为 0.8 时 calibrated base 输出 `threshold_int=6`，为 0.3/0.7 时分别输出约 11/6。
+- fast threshold residual head 初始为零扰动；`p_fast_full_realization` 为 0.8 时 calibrated base 输出 `threshold_int=6`，为 0.3/0.6 时分别输出约 11/6。
 - threshold raw teacher forcing logprob 等价，部署 stochastic 采样语义与训练分布一致。
 - PPO 双输入中 actor feature 只影响 policy/logprob，critic feature 只影响 value。
 - critic 四角色 gather 的 channel index、shape 和 P1/P2 视角。

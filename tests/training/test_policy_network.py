@@ -82,7 +82,7 @@ class PolicyNetworkTests(unittest.TestCase):
                 [0.2, 1.0],
                 [0.3, 1.0],
                 [0.5, 1.0],
-                [0.7, 1.0],
+                [0.6, 1.0],
             ],
             dtype=torch.float32,
         )
@@ -90,7 +90,7 @@ class PolicyNetworkTests(unittest.TestCase):
         with torch.no_grad():
             action = model.act_actor_only(spatial, scalars, fast_scalars, deterministic=True)
 
-        self.assertEqual(action.threshold_int.tolist(), [11, 11, 9, 6])
+        self.assertEqual(action.threshold_int.tolist(), [11, 11, 8, 6])
         self.assertTrue(torch.allclose(action.threshold_residual_raw, torch.zeros_like(action.threshold_residual_raw)))
         self.assertTrue(torch.allclose(action.threshold_mu_raw, action.threshold_base_raw))
 

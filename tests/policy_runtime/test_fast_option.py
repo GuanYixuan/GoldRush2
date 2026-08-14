@@ -107,12 +107,15 @@ class FastOptionTests(unittest.TestCase):
         diagnostics = runtime.diagnostics()
         self.assertEqual(diagnostics["fast_success"], 1)
         self.assertEqual(diagnostics["fast_effective_updates"], 1)
+        self.assertEqual(diagnostics["fast_effective_positive_updates"], 0)
+        self.assertEqual(diagnostics["fast_effective_negative_updates"], 1)
+        self.assertEqual(diagnostics["fast_effective_skipped_success_no_new_npc"], 0)
         self.assertEqual(diagnostics["fast_expected_gain_sum"], 18.0)
         self.assertEqual(diagnostics["fast_actual_delta_sum"], 13.0)
         self.assertEqual(diagnostics["fast_effective_score_sum"], 0.0)
         self.assertEqual(diagnostics["one_step_fast_delta_sum"], -5.0)
 
-    def test_runtime_belief_treats_full_realization_as_success(self) -> None:
+    def test_runtime_belief_skips_full_realization_without_new_npc_at_target(self) -> None:
         runtime = FastRuntimeState(player_id=1)
         runtime.set_next_threshold(12)
         fast_input = _basic_input(round_index=1)
@@ -128,13 +131,67 @@ class FastOptionTests(unittest.TestCase):
         now.my_units_gold = (118, 200)
         prepared = runtime.prepare_neural(now)
 
+        self.assertEqual(tuple(round(value, 6) for value in prepared["fast_scalars"]), (0.8, 0.25))
+        diagnostics = runtime.diagnostics()
+        self.assertEqual(diagnostics["fast_effective_updates"], 0)
+        self.assertEqual(diagnostics["fast_effective_positive_updates"], 0)
+        self.assertEqual(diagnostics["fast_effective_negative_updates"], 0)
+        self.assertEqual(diagnostics["fast_effective_skipped_success_no_new_npc"], 1)
+        self.assertEqual(diagnostics["fast_expected_gain_sum"], 0.0)
+        self.assertEqual(diagnostics["fast_actual_delta_sum"], 0.0)
+        self.assertEqual(diagnostics["fast_effective_score_sum"], 0.0)
+        self.assertEqual(diagnostics["one_step_fast_delta_sum"], 0.0)
+
+    def test_runtime_belief_treats_full_realization_with_new_target_npc_as_success(self) -> None:
+        runtime = FastRuntimeState(player_id=1)
+        runtime.set_next_threshold(12)
+        fast_input = _basic_input(round_index=1)
+        fast_input.my_units = [(8, 8), (16, 16)]
+        fast_input.my_units_gold = (100, 200)
+        fast_input.grid[7][8] = 20
+
+        fast = runtime.try_fast(fast_input)
+        self.assertTrue(fast["success"])
+
+        now = _basic_input(round_index=2)
+        now.my_units = [(7, 8), (16, 16)]
+        now.my_units_gold = (118, 200)
+        now.visible_npcs = [NpcInfo(id=10, row=7, col=8)]
+        prepared = runtime.prepare_neural(now)
+
         self.assertEqual(tuple(round(value, 6) for value in prepared["fast_scalars"]), (0.833333, 0.3))
         diagnostics = runtime.diagnostics()
         self.assertEqual(diagnostics["fast_effective_updates"], 1)
+        self.assertEqual(diagnostics["fast_effective_positive_updates"], 1)
+        self.assertEqual(diagnostics["fast_effective_negative_updates"], 0)
+        self.assertEqual(diagnostics["fast_effective_skipped_success_no_new_npc"], 0)
         self.assertEqual(diagnostics["fast_expected_gain_sum"], 18.0)
         self.assertEqual(diagnostics["fast_actual_delta_sum"], 18.0)
         self.assertEqual(diagnostics["fast_effective_score_sum"], 1.0)
         self.assertEqual(diagnostics["one_step_fast_delta_sum"], 0.0)
+
+    def test_runtime_belief_does_not_count_existing_target_npc_as_new_success(self) -> None:
+        runtime = FastRuntimeState(player_id=1)
+        runtime.set_next_threshold(12)
+        fast_input = _basic_input(round_index=1)
+        fast_input.my_units = [(8, 8), (16, 16)]
+        fast_input.my_units_gold = (100, 200)
+        fast_input.grid[7][8] = 20
+        fast_input.visible_npcs = [NpcInfo(id=10, row=7, col=8)]
+
+        fast = runtime.try_fast(fast_input)
+        self.assertTrue(fast["success"])
+
+        now = _basic_input(round_index=2)
+        now.my_units = [(7, 8), (16, 16)]
+        now.my_units_gold = (118, 200)
+        now.visible_npcs = [NpcInfo(id=10, row=7, col=8)]
+        prepared = runtime.prepare_neural(now)
+
+        self.assertEqual(tuple(round(value, 6) for value in prepared["fast_scalars"]), (0.8, 0.25))
+        diagnostics = runtime.diagnostics()
+        self.assertEqual(diagnostics["fast_effective_updates"], 0)
+        self.assertEqual(diagnostics["fast_effective_skipped_success_no_new_npc"], 1)
 
     def test_pending_backfill_matches_full_observe_commit_for_feature_state(self) -> None:
         runtime = FastRuntimeState(player_id=1)

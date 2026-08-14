@@ -213,6 +213,9 @@ py::dict fast_diagnostics_to_python(const policy_runtime::FastDiagnostics& diagn
     result["fast_expected_gain_sum"] = diagnostics.fast_expected_gain_sum;
     result["fast_actual_delta_sum"] = diagnostics.fast_actual_delta_sum;
     result["one_step_fast_delta_sum"] = diagnostics.one_step_fast_delta_sum;
+    result["fast_effective_positive_updates"] = diagnostics.fast_effective_positive_updates;
+    result["fast_effective_negative_updates"] = diagnostics.fast_effective_negative_updates;
+    result["fast_effective_skipped_success_no_new_npc"] = diagnostics.fast_effective_skipped_success_no_new_npc;
     return result;
 }
 
