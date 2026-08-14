@@ -26,6 +26,8 @@ _EXTRA_MEAN_FIELDS = (
     "latent_first_rate_mean",
     "actual_fast_first_rate",
     "fast_order_samples_per_episode",
+    "p_fast_full_realization_mean",
+    "p_fast_full_realization_p50",
     "p_fast_effective_mean",
     "p_fast_effective_p50",
     "fast_effective_confidence_mean",

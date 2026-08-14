@@ -337,7 +337,7 @@ def _eval_extra_metrics(
     threshold_entropy_values: list[float],
     fast_scalar_values: list[tuple[float, float]],
 ) -> dict[str, float]:
-    p_fast_values = [value[0] for value in fast_scalar_values]
+    full_realization_values = [value[0] for value in fast_scalar_values]
     confidence_values = [value[1] for value in fast_scalar_values]
     fast_success = _diagnostic_float(fast_diagnostics, "fast_success")
     effective_updates = _diagnostic_float(fast_diagnostics, "fast_effective_updates")
@@ -362,8 +362,10 @@ def _eval_extra_metrics(
         "latent_first_rate_mean": _mean(latent_rates),
         "actual_fast_first_rate": 0.0 if not fast_samples else float(len(agent_first)) / float(len(fast_samples)),
         "fast_order_samples_per_episode": float(len(fast_samples)),
-        "p_fast_effective_mean": _mean(p_fast_values),
-        "p_fast_effective_p50": _percentile(p_fast_values, 0.50),
+        "p_fast_full_realization_mean": _mean(full_realization_values),
+        "p_fast_full_realization_p50": _percentile(full_realization_values, 0.50),
+        "p_fast_effective_mean": _mean(full_realization_values),
+        "p_fast_effective_p50": _percentile(full_realization_values, 0.50),
         "fast_effective_confidence_mean": _mean(confidence_values),
         "fast_effective_updates_per_episode": effective_updates,
         "fast_effective_score_mean": _diagnostic_ratio(fast_diagnostics, "fast_effective_score_sum", effective_updates),

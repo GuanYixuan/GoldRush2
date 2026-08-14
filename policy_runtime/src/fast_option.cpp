@@ -626,8 +626,7 @@ void FastRuntimeState::backfill_pending(const GameInput& input_now) {
     }
     if (expected_gain > 0) {
         const int actual_delta = input_now.my_units_gold[role] - pending_.my_units_gold[role];
-        float score = static_cast<float>(actual_delta) / static_cast<float>(expected_gain);
-        score = std::max(0.0F, std::min(score, 1.0F));
+        const float score = actual_delta >= expected_gain ? 1.0F : 0.0F;
         fast_alpha_ += score;
         fast_beta_ += 1.0F - score;
         diagnostics_.fast_effective_updates += 1;

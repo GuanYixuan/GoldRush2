@@ -73,27 +73,27 @@ threshold_int = clamp(threshold_int, 4, 30)
 
 不得使用 Python `round()` 的 banker rounding。训练 simulator 和 C++ runtime 必须使用同一口径；trigger 条件为 `grid_gold >= threshold_int`。
 
-## Fast Effective Belief
+## Fast Full-Realization Belief
 
 fast option 的真实收益依赖触发后是否达成预期抢金效果。官方 `GameInput` 不提供双方耗时、真实执行顺序或事件日志；为了避免训练/部署不匹配，第一版不使用“真实是否先手”作为 belief 更新口径，而使用可由部署侧同样计算的抢金效果 proxy。
 
 推荐使用 Beta 后验：
 
 ```text
-fast_effective_alpha = 4
-fast_effective_beta = 1
-p_fast_effective = alpha / (alpha + beta)  # 初始 80%
+fast_full_realization_alpha = 4
+fast_full_realization_beta = 1
+p_fast_full_realization = alpha / (alpha + beta)  # 初始 80%
 fast_effective_confidence = min((alpha + beta) / 20, 1)
 ```
 
-每局开始 reset 为 `alpha=4, beta=1`，不跨局继承。初始 `p_fast_effective=0.8`，初始 `fast_effective_confidence=0.25`；约 15 次有效 fast 更新后达到满置信。
+每局开始 reset 为 `alpha=4, beta=1`，不跨局继承。初始 `p_fast_full_realization=0.8`，初始 `fast_effective_confidence=0.25`；约 15 次有效 fast 更新后达到满置信。
 
 每次 fast path 触发后，下一次 neural observe 前用上回合保存的局面和动作做一次只模拟已知金币的轻量模拟：
 
 ```text
 expected_gain = simulate_known_gold_pickups(saved_input_t, fast_output_t)
 actual_delta = current_my_units_gold[inferred_fast_role] - saved_my_units_gold[inferred_fast_role]
-score = clip(actual_delta / max(expected_gain, 1), 0, 1)
+score = 1 if actual_delta >= expected_gain else 0
 ```
 
 只在 `expected_gain > 0` 时更新 Beta：
@@ -103,11 +103,11 @@ alpha += score
 beta += 1 - score
 ```
 
-如果实际收益为负，`score` 会被 clip 到 `0`，等价于一次明确失败样本。第一版不模拟炸弹损失、踩踏、NPC 或敌方行动；这些因素如果导致实际金币变化低于已知金币模拟收益，会自然表现为低 score。
+该 strict 口径把任何 `actual_delta < expected_gain` 都视为 fast 未完整兑现预期收益，即使角色仍吃到部分残值也按失败样本处理。第一版不模拟炸弹损失、踩踏、NPC 或敌方行动；这些因素如果导致实际金币变化低于已知金币模拟收益，会自然表现为失败样本。
 
-`p_fast_effective` 和 `fast_effective_confidence` 应作为 threshold head 的额外 scalar 输入。它们不进入 actor 主干或 actor scalar FiLM，但 PPO 重算 logprob 时必须能复现同一输入；critic value 也应看到这两个 scalar，否则同一 observation 下未来 fast 有效性分布不同，value 会更难拟合。
+`p_fast_full_realization` 和 `fast_effective_confidence` 应作为 threshold head 的额外 scalar 输入。它们不进入 actor 主干或 actor scalar FiLM，但 PPO 重算 logprob 时必须能复现同一输入；critic value 也应看到这两个 scalar，否则同一 observation 下未来 fast 有效性分布不同，value 会更难拟合。
 
-第一版不额外保存逐次 belief/debug 字段；`score`、`expected_gain` 和 `actual_delta` 只用于更新 Beta belief，并按 update 聚合到默认诊断指标。
+第一版不额外保存逐次 belief/debug 字段；`score`、`expected_gain` 和 `actual_delta` 只用于更新 Beta belief，并按 update 聚合到默认诊断指标。历史指标名中的 `fast_effective_score` 在当前实现中表示 strict full-realization success rate，而不再表示 ratio 均值。
 
 ### 轻量金币模拟口径
 
@@ -123,10 +123,10 @@ beta += 1 - score
 
 ```text
 fast_effective_score_sample =
-  实际持币变化 / 按上回合可见金币和自身 fast 动作可解释的预期收益
+  1 if 实际持币变化完整覆盖预期收益 else 0
 ```
 
-它不是“真实先手概率”，但更适合训练和部署一致地调节 threshold：如果近期 fast trigger 经常拿不到预期金币，threshold 应自然变保守。
+它不是“真实先手概率”，而是“fast 是否完整兑现自身已知金币计划”的概率。若某目标没有竞争，后手也能完整吃到，该样本仍会被记为 success，因此该 proxy 仍偏乐观；但如果近期 fast trigger 经常只吃残值或拿不到预期金币，threshold 应自然变保守。
 
 ### 依赖的 Fast-Path 性质
 
@@ -179,7 +179,7 @@ latent_first_rate = p_fast
   p_fast ~ Uniform(0.02, 0.10)
 ```
 
-每次 agent 走 fast path 时，simulator 按 `Bernoulli(p_fast)` 抽取本次是否由我方先执行；同一局内 `p_fast` 保持不变，以模拟稳定的对手速度类型，并让 `Fast Effective Belief` 有机会通过同局历史逐渐校准。agent 走 neural fallback 时仍按慢速后手建模：
+每次 agent 走 fast path 时，simulator 按 `Bernoulli(p_fast)` 抽取本次是否由我方先执行；同一局内 `p_fast` 保持不变，以模拟稳定的对手速度类型，并让 Fast Full-Realization Belief 有机会通过同局历史逐渐校准。agent 走 neural fallback 时仍按慢速后手建模：
 
 ```text
 if agent_decision_mode == fast:
@@ -190,7 +190,7 @@ else:
 
 `fast_order_rng` 必须是独立随机流，不与地图、金币、炸弹、policy sampling 或 opponent sampling 共用 RNG。
 
-`p_fast` 是环境隐藏变量，不直接进入 actor/critic feature。训练和部署都只暴露 `p_fast_effective`、`fast_effective_confidence` 等由抢金效果 proxy 更新出的 belief；这样可以避免训练时把真实先手率泄露给网络，而部署时无法复现。rollout metrics 应记录 `latent_first_rate`、实际 fast 先手率、fast trigger 数和 fast effective score，便于区分“速度 regime 不利”和“threshold 学坏”。
+`p_fast` 是环境隐藏变量，不直接进入 actor/critic feature。训练和部署都只暴露 `p_fast_full_realization`、`fast_effective_confidence` 等由抢金效果 proxy 更新出的 belief；这样可以避免训练时把真实先手率泄露给网络，而部署时无法复现。rollout metrics 应记录 `latent_first_rate`、实际 fast 先手率、fast trigger 数和 fast full-realization score，便于区分“速度 regime 不利”和“threshold 学坏”。
 
 ### 标准 PPO 归因
 
@@ -257,8 +257,8 @@ latent_first_rate_mean
 actual_fast_first_rate
 fast_order_samples_per_episode
 
-p_fast_effective_mean
-p_fast_effective_p50
+p_fast_full_realization_mean
+p_fast_full_realization_p50
 fast_effective_confidence_mean
 fast_effective_updates_per_episode
 fast_effective_score_mean
@@ -366,7 +366,7 @@ if pending.valid:
     restored_input = restore_game_input(pending)
 
     expected_gain = simulate_known_gold_pickups(restored_input, pending.output)
-    update_fast_effective_belief(pending, input_now, expected_gain)
+    update_fast_full_realization_belief(pending, input_now, expected_gain)
 
     observe(restored_input)
     commit_action(pending.output)
@@ -379,7 +379,7 @@ commit_action(neural_output)
 save threshold for next round
 ```
 
-belief 更新发生在当前 neural model 推理前，使 `fast_scalars_now` 能反映上一次 fast 的实际效果。`simulate_known_gold_pickups()` 在慢路径使用 restored pending input 和 pending output 现算；它可以受 `int8 clip 127` 影响，但不影响 fast 动作或 feature backfill。第一版接受该 proxy 近似以保护 fast 热路径。
+belief 更新发生在当前 neural model 推理前，使 `fast_scalars_now` 能反映上一次 fast 是否完整兑现预期收益。`simulate_known_gold_pickups()` 在慢路径使用 restored pending input 和 pending output 现算；它可以受 `int8 clip 127` 影响，但不影响 fast 动作或 feature backfill。第一版接受该 proxy 近似以保护 fast 热路径。
 
 已有预研显示 shadow backfill 可以保持 feature state 等价；主线实现前仍必须保留覆盖测试，尤其是：
 
@@ -390,7 +390,7 @@ belief 更新发生在当前 neural model 推理前，使 `fast_scalars_now` 能
 - `commit_action()` 相关状态。
 - fast miss/path fail 不创建 pending，而是回退 neural path。
 - `int8 clip 127` restore 后 actor feature 与原始输入在当前 schema 下等价。
-- Fast Effective Belief 在当前 neural 推理前更新，且每局 reset。
+- Fast Full-Realization Belief 在当前 neural 推理前更新，且每局 reset。
 
 ## Fast Controller 边界
 
@@ -420,7 +420,7 @@ belief 更新发生在当前 neural model 推理前，使 `fast_scalars_now` 能
 2. 连续 threshold head。
    - 初始化到 `threshold ~= 12`。
    - 只训练 threshold head 或使用较小学习率。
-   - 记录 threshold 分布、触发率、fast effective score 和 regret。
+   - 记录 threshold 分布、触发率、fast full-realization score 和 regret。
 
 3. PPO 联合微调。
    - 从稳定神经网络 checkpoint fork。
@@ -439,7 +439,7 @@ fast option 实验除官方净金币/胜率外，必须额外报告：
 - fast success/miss/path-fail/fallback rate。
 - fast nonstay rate。
 - latent/actual fast first rate。
-- fast effective score/confidence。
+- fast full-realization score/confidence。
 - fast pickup gold。
 - fast bomb lost。
 - fast trample penalty。

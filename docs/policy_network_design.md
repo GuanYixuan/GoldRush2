@@ -193,11 +193,11 @@ threshold 是下一回合 fast controller 的参数，第一版不进入 actor s
 
 ```text
 fast_scalars: B x 2
-  p_fast_effective
+  p_fast_full_realization
   fast_effective_confidence
 ```
 
-这两个量来自部署侧同样可计算的 Fast Effective Belief，而不是 simulator 的隐藏真实先手率。
+这两个量来自部署侧同样可计算的 Fast Full-Realization Belief，而不是 simulator 的隐藏真实先手率。`p_fast_full_realization` 是 strict proxy：只要 fast 后的实际持币增量小于根据上次可见金币模拟出的 `expected_gain`，就按失败样本更新；它不是 ratio 均值。
 
 threshold head 接在动作采样之后。六步 decoder 完成后，使用模拟出的两个己方最终位置从 `H_actor` gather 局部 feature：
 
@@ -356,7 +356,7 @@ multiprocess rollout 的 worker 负责提取两套 feature：
 
 ```text
 policy_runtime.FeatureExtractor.observe(GameInput) -> actor feature
-Fast Effective Belief runtime state -> fast_scalars
+Fast Full-Realization Belief runtime state -> fast_scalars
 extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent_player_id) -> critic feature
 ```
 
