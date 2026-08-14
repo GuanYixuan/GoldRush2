@@ -15,21 +15,21 @@ from simulator.envs.round_step import RoundStepMechanisms
 from simulator.errors import SimulatorRuleError
 from simulator.mechanisms.maps import SpawnConfig
 from training.bc.schema import BC_CHECKPOINT_SCHEMA, FEATURE_SCHEMA as BC_FEATURE_SCHEMA
-from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig, TorchFeaturePolicy
+from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
 from training.models.policy_network import ACTION_HEAD_SCHEMA
 from training.opponents import OpponentSpec
 from training.rl import (
     BatchRolloutSampler,
+    EvalTask,
     EvaluationCase,
-    EvaluationConfig,
     MultiprocessRolloutConfig,
     MultiprocessRolloutPool,
+    ParallelEvalConfig,
+    ParallelEvalPool,
     PpoConfig,
-    RuntimePolicyWrapper,
     SingleAgentEnvConfig,
     TerminalWinMarginGoldGainReward,
     critic_only_update,
-    evaluate_policy,
     ppo_update,
 )
 
@@ -68,6 +68,14 @@ class TrainPpoConfig:
     rollout_mode: str = "multiprocess"
     enable_fast_runtime_features: bool = False
     multiprocess_rollout: MultiprocessRolloutConfig = field(default_factory=MultiprocessRolloutConfig)
+    eval_mp: ParallelEvalConfig = field(
+        default_factory=lambda: ParallelEvalConfig(
+            num_workers=64,
+            max_inference_batch_size=64,
+            inference_timeout_ms=2.0,
+            deterministic=False,
+        )
+    )
     ppo: PpoConfig = field(default_factory=PpoConfig)
     model: PolicyNetworkConfig = field(default_factory=PolicyNetworkConfig)
     episode: EpisodeConfig = field(default_factory=EpisodeConfig)
@@ -128,6 +136,7 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
     metrics_path = output_dir / "metrics.jsonl"
     sampler = _sampler(config)
     rollout_pool = MultiprocessRolloutPool(sampler, config.multiprocess_rollout)
+    eval_pool = _make_eval_pool(config) if config.eval_interval is not None and config.eval_cases else None
 
     try:
         for update_index in range(start_update + 1, config.total_updates + 1):
@@ -234,11 +243,13 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 )
 
             if config.eval_interval is not None and update_index % config.eval_interval == 0:
-                eval_record = _run_eval(model, config=config, update_index=update_index, device=device)
+                eval_record = _run_eval(model, config=config, update_index=update_index, device=device, eval_pool=eval_pool)
                 _append_jsonl(metrics_path, eval_record)
                 eval_metrics.append(eval_record)
     finally:
         rollout_pool.close()
+        if eval_pool is not None:
+            eval_pool.close()
 
     latest_path = output_dir / "checkpoints" / "latest.pt"
     return TrainPpoResult(
@@ -306,6 +317,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save-updates", type=int, nargs="*", default=[])
     parser.add_argument("--eval-interval", type=int, default=None)
     parser.add_argument("--eval-seed", type=int, default=2026080401)
+    parser.add_argument("--eval-workers", type=int, default=64)
+    parser.add_argument("--eval-max-inference-batch-size", type=int, default=64)
+    parser.add_argument("--eval-inference-timeout-ms", type=float, default=2.0)
+    parser.add_argument("--eval-worker-join-timeout-s", type=float, default=5.0)
+    parser.add_argument("--eval-deterministic", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--beta-win", type=float, default=0.0)
     parser.add_argument("--beta-margin", type=float, default=0.0)
     parser.add_argument("--beta-gold-gain", type=float, default=0.0)
@@ -382,6 +398,14 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         enable_fast_runtime_features=bool(args.enable_fast_runtime_features),
         reward_fold_gamma=float(args.ppo_gamma),
     )
+    eval_mp = ParallelEvalConfig(
+        num_workers=int(args.eval_workers),
+        max_inference_batch_size=int(args.eval_max_inference_batch_size),
+        inference_timeout_ms=float(args.eval_inference_timeout_ms),
+        worker_join_timeout_s=float(args.eval_worker_join_timeout_s),
+        deterministic=bool(args.eval_deterministic),
+        enable_fast_runtime_features=bool(args.enable_fast_runtime_features),
+    )
     opponent_specs = tuple(opponent_spec_from_name(name) for name in args.opponents)
     eval_cases: tuple[EvaluationCase, ...] = ()
     if args.eval_interval is not None:
@@ -425,6 +449,7 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         rollout_mode=str(args.rollout_mode),
         enable_fast_runtime_features=bool(args.enable_fast_runtime_features),
         multiprocess_rollout=multiprocess_rollout,
+        eval_mp=eval_mp,
         ppo=ppo,
         model=model,
         episode=episode,
@@ -698,30 +723,65 @@ def _trainable_param_count(model: GoldRushPolicyNetwork) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
 
 
+def _make_eval_pool(config: TrainPpoConfig) -> ParallelEvalPool:
+    return ParallelEvalPool(
+        env_config=SingleAgentEnvConfig(episode=config.episode, opponent_spec=None),
+        mechanisms=RoundStepMechanisms(),
+        spawn=SpawnConfig(),
+        config=config.eval_mp,
+    )
+
+
 def _run_eval(
     model: GoldRushPolicyNetwork,
     *,
     config: TrainPpoConfig,
     update_index: int,
     device: torch.device,
+    eval_pool: ParallelEvalPool | None,
 ) -> dict[str, Any]:
     if not config.eval_cases:
-        return {"kind": "eval", "update": update_index, "metrics": {}, "skipped": True}
-    feature_policy = TorchFeaturePolicy(model, deterministic=True, device=device)
-    runtime_policy = RuntimePolicyWrapper(feature_policy)
-    eval_config = EvaluationConfig(
-        env_config=SingleAgentEnvConfig(episode=config.episode, opponent_spec=None),
-        cases=config.eval_cases,
-        mechanisms=RoundStepMechanisms(),
-        spawn=SpawnConfig(),
+        return {"kind": "eval", "update": update_index, "metrics": {}, "skipped": True, "eval_mode": "parallel"}
+    if eval_pool is None:
+        raise ValueError("eval_interval with eval_cases requires a ParallelEvalPool")
+    summaries, stats = eval_pool.evaluate(
+        model,
+        _eval_tasks(config),
+        device=device,
     )
-    result = evaluate_policy(runtime_policy, eval_config)
     return {
         "kind": "eval",
         "update": update_index,
-        "metrics": _jsonable(result.metrics),
-        "fallback_error": feature_policy.last_fallback_error,
+        "eval_mode": "parallel",
+        "summary_count": len(summaries),
+        "metrics": _jsonable(stats),
     }
+
+
+def _eval_tasks(config: TrainPpoConfig) -> tuple[EvalTask, ...]:
+    tasks: list[EvalTask] = []
+    round_count = int(config.episode.rules.round_count)
+    for case_index, case in enumerate(config.eval_cases):
+        case_id = _eval_case_id(case_index, case)
+        setting = case.tag or "train_eval"
+        for agent_player_id in (1, 2):
+            tasks.append(
+                EvalTask(
+                    task_id=f"{case_id}-p{agent_player_id}",
+                    seed=int(case.seed),
+                    map_id=case.map_id,
+                    opponent_spec=case.opponent_spec,
+                    agent_player_id=agent_player_id,
+                    round_count=round_count,
+                    setting=setting,
+                    tags=(setting,),
+                )
+            )
+    return tuple(tasks)
+
+
+def _eval_case_id(case_index: int, case: EvaluationCase) -> str:
+    return f"train-eval-{case_index:04d}-seed-{case.seed}"
 
 
 def _save_checkpoint(
@@ -974,11 +1034,11 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
             "TrainPpoConfig.enable_fast_runtime_features must match "
             "multiprocess_rollout.enable_fast_runtime_features"
         )
+    if config.eval_mp.enable_fast_runtime_features != config.enable_fast_runtime_features:
+        raise ValueError(
+            "TrainPpoConfig.enable_fast_runtime_features must match eval_mp.enable_fast_runtime_features"
+        )
     if config.enable_fast_runtime_features:
-        if config.eval_interval is not None:
-            raise ValueError(
-                "enable_fast_runtime_features does not support in-training serial eval; use eval_mp separately"
-            )
         if config.model.action_head_schema != ACTION_HEAD_SCHEMA:
             raise ValueError(
                 "enable_fast_runtime_features requires action_head_schema "

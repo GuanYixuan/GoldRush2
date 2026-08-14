@@ -12,7 +12,7 @@ import torch
 
 from simulator.config import EpisodeConfig, RulesConfig
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
-from training.rl import EvaluationCase, PpoConfig
+from training.rl import EvaluationCase, ParallelEvalConfig, PpoConfig
 from training.rl import MultiprocessRolloutConfig
 from training.scripts.train_ppo import (
     TrainPpoConfig,
@@ -226,7 +226,9 @@ class TrainPpoTests(unittest.TestCase):
 
             self.assertEqual(len(result.eval_metrics), 1)
             self.assertEqual(result.eval_metrics[0]["kind"], "eval")
-            self.assertIn("win_rate", result.eval_metrics[0]["metrics"])
+            self.assertEqual(result.eval_metrics[0]["eval_mode"], "parallel")
+            self.assertEqual(result.eval_metrics[0]["summary_count"], 2)
+            self.assertIn("eval_win_rate", result.eval_metrics[0]["metrics"])
             records = _read_jsonl(Path(tmpdir) / "metrics.jsonl")
             self.assertEqual([record["kind"] for record in records], ["train", "eval"])
 
@@ -277,7 +279,7 @@ class TrainPpoTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must match"):
                 run_training(config)
 
-    def test_fast_runtime_training_rejects_serial_eval(self) -> None:
+    def test_fast_runtime_training_eval_uses_eval_mp(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _smoke_config(
                 output_dir=Path(tmpdir),
@@ -295,8 +297,11 @@ class TrainPpoTests(unittest.TestCase):
                 ),
             )
 
-            with self.assertRaisesRegex(ValueError, "in-training serial eval"):
-                run_training(config)
+            result = run_training(config)
+
+            self.assertEqual(len(result.eval_metrics), 1)
+            self.assertEqual(result.eval_metrics[0]["eval_mode"], "parallel")
+            self.assertTrue(result.eval_metrics[0]["metrics"]["eval_fast_success_per_episode"] >= 0.0)
 
     def test_fast_runtime_training_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -438,6 +443,12 @@ def _smoke_config(
         enable_fast_runtime_features=enable_fast_runtime_features,
         multiprocess_rollout=multiprocess_rollout
         or MultiprocessRolloutConfig(
+            num_workers=1,
+            max_inference_batch_size=4,
+            inference_timeout_ms=1.0,
+            enable_fast_runtime_features=enable_fast_runtime_features,
+        ),
+        eval_mp=ParallelEvalConfig(
             num_workers=1,
             max_inference_batch_size=4,
             inference_timeout_ms=1.0,

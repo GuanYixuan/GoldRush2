@@ -53,6 +53,7 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 - `--actor-lr-ramp-updates`：PPO phase 内 actor lr 线性 ramp。
 - `--rollout-seed-base` / `--advance-rollout-seed`：显式控制 rollout seed。
 - `--save-updates`：保存指定 update checkpoint。
+- `--eval-interval`：按 update 周期运行训练内评估；默认关闭。打开后使用 `ParallelEvalPool` 多进程评估，默认 `--eval-workers 64`、`--eval-max-inference-batch-size 64`、`--eval-inference-timeout-ms 2.0`、`--no-eval-deterministic`。若训练打开 fast runtime，评估同步使用 fast runtime。
 
 ## 最小测试
 
