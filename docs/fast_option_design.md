@@ -77,6 +77,16 @@ threshold_int = clamp(threshold_int, 4, 30)
 
 不得使用 Python `round()` 的 banker rounding。训练 simulator 和 C++ runtime 必须使用同一口径；trigger 条件为 `grid_gold >= threshold_int`。
 
+## Fast Path 热路径保护
+
+fast option 的核心价值来自抢先手。部署侧 C++ fast path 属于算法竞赛级热路径，常常是在几百纳秒量级与对手争同一枚金币；任何额外字段写入、容器分配、分支扫描、日志拼接或 debug 统计都可能直接改变真实先手率。因此后续修改必须默认保护热路径：
+
+- `try_fast_output()` / `try_fast_output_core()` 成功抢金路径只做选点、贪心路径生成、写出 `GameOutput` 和必要的最小 pending 保存。
+- belief 更新、target/role 复原、收益模拟、诊断统计和策略分析应放在下一次 neural observe 前的 `backfill_pending()` 等慢路径中。
+- 不得为了方便训练指标或后验估计，在 fast path 中新增非必要字段、复杂判断、动态内存、字符串、容器或跨格扫描。
+- 如果某个信息能从 `pending_input + fast_output` 在慢路径中重放得到，应优先重放，而不是在 fast path 额外保存。
+- 必须新增热路径信息时，应先说明无法慢路径复原的原因，并用 microbenchmark 或平台 self-play 证明不会破坏先手率。
+
 ## Fast Full-Realization Belief
 
 fast option 的真实收益依赖触发后是否达成预期抢金效果。官方 `GameInput` 不提供双方耗时、真实执行顺序或事件日志；为了避免训练/部署不匹配，第一版不使用“真实是否先手”作为 belief 更新口径，而使用可由部署侧同样计算的抢金效果 proxy。
