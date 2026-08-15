@@ -100,6 +100,13 @@ class OuterGoldTests(unittest.TestCase):
         self.assertTrue(all(region_id(pos) in (3, 4, 5) for pos in static0))
         self.assertTrue(all(template.static_grid[pos.row][pos.col] == 0 for pos in static0))
 
+    def test_outer_static2_candidates_follow_map_specific_static_layer(self) -> None:
+        template = built_in_public_map_pool().get(4)
+
+        counts = {region: len(outer_static2_candidate_cells(template, region)) for region in (2, 3, 4, 5)}
+
+        self.assertEqual(counts, {2: 2, 3: 1, 4: 2, 5: 1})
+
     def test_initial_state_is_reproducible(self) -> None:
         generator = OuterGoldGenerator()
 
@@ -199,6 +206,35 @@ class OuterGoldTests(unittest.TestCase):
         self.assertEqual(len(static2_events), 4)
         self.assertEqual(sum(event.amount for event in static2_events), 88)
         self.assertEqual(positions, static2_positions - {blocked_static2})
+
+    def test_zero_available_static2_falls_back_to_other_outer_static0_cells(self) -> None:
+        template = built_in_public_map_pool().get(4)
+        state = build_initial_state(template)
+        blocked_static2 = outer_static2_candidate_cells(template, 5)[0]
+        state.players[2].units[0].position = blocked_static2
+        generator = OuterGoldGenerator(
+            OuterGoldConfig(
+                gap_weights=((8, 1),),
+                region_weights=((5, 1),),
+                static2_total_weights=((90, 1),),
+                static2_zero_fallback_count_weights=((3, 1),),
+                outer_static0_count_weights=((0, 1),),
+            )
+        )
+
+        events = generator.generate(
+            state,
+            template,
+            OuterGoldState(next_static2_round=0, next_static2_region=5),
+            random.Random(5),
+        )
+
+        self.assertEqual(len(events), 3)
+        self.assertEqual(sum(event.amount for event in events), 90)
+        self.assertEqual({event.amount for event in events}, {30})
+        self.assertTrue(all(region_id(event.position) in (2, 3, 4) for event in events))
+        self.assertTrue(all(template.static_grid[event.position.row][event.position.col] == 0 for event in events))
+        self.assertNotIn(blocked_static2, {event.position for event in events})
 
     def test_static2_batch_allows_existing_gold_cells(self) -> None:
         template = built_in_public_map_pool().get(1)

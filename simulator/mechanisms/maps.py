@@ -104,6 +104,7 @@ def built_in_public_map_pool() -> MapPool:
             _template_from_cells(1, "official_map_1", _MAP1_OBSTACLES, _MAP1_SPECIAL),
             _template_from_cells(2, "official_map_2", _MAP2_OBSTACLES, _MAP2_SPECIAL),
             _template_from_cells(3, "official_map_3", _MAP3_OBSTACLES, _MAP3_SPECIAL),
+            _template_from_static_rows(4, "official_map_4", _MAP4_STATIC_ROWS),
         )
     )
 
@@ -119,7 +120,10 @@ def built_in_training_map_pool() -> MapPool:
         )
     )
     for template in pool.templates:
-        validate_competition_training_map(template)
+        _validate_spawn_against_map(template, SpawnConfig())
+        _validate_spawn_reaches_center(template, SpawnConfig())
+        if template.map_id >= 100:
+            validate_competition_training_map(template)
     return pool
 
 
@@ -206,6 +210,10 @@ def _template_from_cells(
     for row, col in special_coords:
         grid[row][col] = STATIC_SPECIAL_NON_BLOCKING
     return MapTemplate.from_static_grid(map_id, name, grid)
+
+
+def _template_from_static_rows(map_id: int, name: str, rows: tuple[str, ...]) -> MapTemplate:
+    return MapTemplate.from_static_grid(map_id, name, tuple(tuple(int(value) for value in row) for row in rows))
 
 
 def _normalize_static_grid(static_grid: Sequence[Sequence[int]]) -> StaticGrid:
@@ -441,6 +449,27 @@ _MAP3_SPECIAL = (
     (16, 8),
     (16, 9),
     (16, 10),
+)
+
+
+_MAP4_STATIC_ROWS = (
+    "00100010201000100",
+    "01101011011010110",
+    "00021000000012000",
+    "01111111011111110",
+    "00000001010000000",
+    "11111101010111111",
+    "00000100000100000",
+    "01110111011101110",
+    "00010000000001000",
+    "01010111011101010",
+    "01010100000101010",
+    "01010101010101010",
+    "01000101010100010",
+    "01110101110101110",
+    "00000000000000000",
+    "01110111011101110",
+    "00120010201002100",
 )
 
 

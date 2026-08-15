@@ -15,24 +15,25 @@ from simulator.mechanisms.maps import (
     validate_competition_training_map,
 )
 from simulator.observation.sdk import make_game_input
+from simulator.rules.snapshot import region_id
 from simulator.types import Position
 
 
 class MapsTests(unittest.TestCase):
-    def test_built_in_public_pool_contains_three_uniform_templates(self) -> None:
+    def test_built_in_public_pool_contains_observed_templates(self) -> None:
         pool = built_in_public_map_pool()
 
-        self.assertEqual([template.map_id for template in pool.templates], [1, 2, 3])
-        self.assertEqual([len(template.obstacles) for template in pool.templates], [40, 24, 78])
-        self.assertEqual([len(template.special_cells) for template in pool.templates], [20, 20, 20])
+        self.assertEqual([template.map_id for template in pool.templates], [1, 2, 3, 4])
+        self.assertEqual([len(template.obstacles) for template in pool.templates], [40, 24, 78, 119])
+        self.assertEqual([len(template.special_cells) for template in pool.templates], [20, 20, 20, 6])
 
     def test_built_in_training_pool_extends_public_pool(self) -> None:
         public_pool = built_in_public_map_pool()
         training_pool = built_in_training_map_pool()
 
-        self.assertEqual([template.map_id for template in training_pool.templates], [1, 2, 3, 101, 111, 121])
+        self.assertEqual([template.map_id for template in training_pool.templates], [1, 2, 3, 4, 101, 111, 121])
         self.assertEqual(
-            [template.static_grid for template in training_pool.templates[:3]],
+            [template.static_grid for template in training_pool.templates[:4]],
             [template.static_grid for template in public_pool.templates],
         )
         self.assertEqual(len(training_pool.get(101).obstacles), 38)
@@ -42,9 +43,19 @@ class MapsTests(unittest.TestCase):
         self.assertEqual(len(training_pool.get(121).obstacles), 52)
         self.assertEqual(len(training_pool.get(121).special_cells), 20)
 
-    def test_training_maps_satisfy_competition_constraints(self) -> None:
+    def test_synthetic_training_maps_satisfy_competition_constraints(self) -> None:
         for template in built_in_training_map_pool().templates:
-            validate_competition_training_map(template)
+            if template.map_id >= 100:
+                validate_competition_training_map(template)
+
+    def test_public_map_four_has_sparse_static_two_cells(self) -> None:
+        template = built_in_public_map_pool().get(4)
+
+        counts = {region: 0 for region in (2, 3, 4, 5)}
+        for pos in template.special_cells:
+            counts[region_id(pos)] += 1
+
+        self.assertEqual(counts, {2: 2, 3: 1, 4: 2, 5: 1})
 
     def test_training_map_validation_rejects_non_axis_symmetric_obstacles(self) -> None:
         grid = _valid_training_grid()
@@ -92,7 +103,7 @@ class MapsTests(unittest.TestCase):
         ids2 = [pool.sample(rng2).map_id for _ in range(20)]
 
         self.assertEqual(ids1, ids2)
-        self.assertEqual(set(ids1), {1, 2, 3})
+        self.assertEqual(set(ids1), {1, 2, 3, 4})
 
     def test_spawn_over_obstacle_fails_fast(self) -> None:
         template = built_in_public_map_pool().get(1)

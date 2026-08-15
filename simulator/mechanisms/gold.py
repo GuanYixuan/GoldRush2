@@ -127,6 +127,7 @@ DEFAULT_OUTER_STATIC0_AMOUNT_WEIGHTS = (
     (17, 17),
     (18, 13),
 )
+DEFAULT_STATIC2_ZERO_FALLBACK_COUNT_WEIGHTS = tuple((count, 1) for count in range(9, 16))
 DEFAULT_REGION_WEIGHTS = tuple((region, 1) for region in OUTER_REGIONS)
 DEFAULT_FIRST_ROUND_OFFSET_WEIGHTS = tuple((offset, 1) for offset in range(8, 15))
 
@@ -186,6 +187,7 @@ class OuterGoldConfig:
     gap_weights: WeightedIntDistribution = DEFAULT_STATIC2_GAP_WEIGHTS
     region_weights: WeightedIntDistribution = DEFAULT_REGION_WEIGHTS
     static2_total_weights: WeightedIntDistribution = DEFAULT_STATIC2_TOTAL_WEIGHTS
+    static2_zero_fallback_count_weights: WeightedIntDistribution = DEFAULT_STATIC2_ZERO_FALLBACK_COUNT_WEIGHTS
     outer_static0_count_weights: WeightedIntDistribution = DEFAULT_OUTER_STATIC0_COUNT_WEIGHTS
     outer_static0_amount_weights: WeightedIntDistribution = DEFAULT_OUTER_STATIC0_AMOUNT_WEIGHTS
 
@@ -194,6 +196,7 @@ class OuterGoldConfig:
         _validate_weights("gap_weights", self.gap_weights, min_value=1)
         _validate_weights("region_weights", self.region_weights, allowed_values=OUTER_REGIONS)
         _validate_weights("static2_total_weights", self.static2_total_weights, min_value=1)
+        _validate_weights("static2_zero_fallback_count_weights", self.static2_zero_fallback_count_weights, min_value=1)
         _validate_weights("outer_static0_count_weights", self.outer_static0_count_weights, min_value=0)
         _validate_weights("outer_static0_amount_weights", self.outer_static0_amount_weights, min_value=1)
 
@@ -245,12 +248,11 @@ class OuterGoldGenerator:
             outer_static2_candidate_cells(template, high_region),
             state,
         )
-        if not static2_cells:
-            # TODO: 全部 static2 候选格均不可用时官方行为未观测；第一版跳过本次 static2 分配并推进 gap。
-            return ()
-
         total = _sample_weighted(self.config.static2_total_weights, rng)
-        events = _split_batch_total(static2_cells, total, rng)
+        if static2_cells:
+            events = _split_batch_total(static2_cells, total, rng)
+        else:
+            events = self._generate_zero_static2_fallback(state, template, high_region, total, rng)
 
         static0_cells = _generation_available_cells(
             outer_static0_candidate_cells(template, exclude_region=high_region),
@@ -263,6 +265,25 @@ class OuterGoldGenerator:
             GoldGenerationEvent(pos, _sample_weighted(self.config.outer_static0_amount_weights, rng)) for pos in selected_static0
         )
         return tuple(events)
+
+    def _generate_zero_static2_fallback(
+        self,
+        state: GameState,
+        template: MapTemplate,
+        high_region: int,
+        total: int,
+        rng: random.Random,
+    ) -> list[GoldGenerationEvent]:
+        static0_cells = _generation_available_cells(
+            outer_static0_candidate_cells(template, exclude_region=high_region),
+            state,
+        )
+        if not static0_cells:
+            return []
+        fallback_count = _sample_weighted(self.config.static2_zero_fallback_count_weights, rng)
+        fallback_count = min(fallback_count, len(static0_cells))
+        selected_cells = tuple(rng.sample(static0_cells, fallback_count))
+        return _split_batch_total(selected_cells, total, rng)
 
 
 def center_candidate_cells(template: MapTemplate) -> tuple[Position, ...]:
@@ -283,8 +304,8 @@ def outer_static2_candidate_cells(template: MapTemplate, id_: int) -> tuple[Posi
         for pos in sorted(template.special_cells)
         if region_id(pos) == id_ and template.static_grid[pos.row][pos.col] == STATIC_SPECIAL_NON_BLOCKING
     )
-    if len(cells) != 5:
-        raise SimulatorRuleError(f"map {template.map_id} region {id_} must have exactly 5 static2 cells, got {len(cells)}")
+    if not cells:
+        raise SimulatorRuleError(f"map {template.map_id} region {id_} must have at least one static2 cell")
     return cells
 
 
