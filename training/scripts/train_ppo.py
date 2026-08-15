@@ -60,6 +60,7 @@ class TrainPpoConfig:
     candidate_action_learning_rate: float | None = None
     stem_new_channel_learning_rate: float | None = None
     fast_threshold_learning_rate: float | None = None
+    vp_head_learning_rate: float | None = None
     critic_learning_rate: float = 5.0e-4
     critic_warmup_updates: int = 0
     actor_lr_ramp_updates: int = 100
@@ -181,11 +182,13 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "candidate_action_lr": learning_rates["candidate_action_lr"],
                 "stem_new_channel_lr": learning_rates["stem_new_channel_lr"],
                 "fast_threshold_lr": learning_rates["fast_threshold_lr"],
+                "vp_head_lr": learning_rates["vp_head_lr"],
                 "critic_lr": learning_rates["critic_lr"],
                 "actor_lr_ramp_updates": config.actor_lr_ramp_updates,
                 "candidate_action_learning_rate": config.candidate_action_learning_rate,
                 "stem_new_channel_learning_rate": config.stem_new_channel_learning_rate,
                 "fast_threshold_learning_rate": config.fast_threshold_learning_rate,
+                "vp_head_learning_rate": config.vp_head_learning_rate,
                 "freeze_ko_vp_heads": config.freeze_ko_vp_heads,
                 "critic_warmup_updates": config.critic_warmup_updates,
                 "transition_count": batch.transition_count,
@@ -201,6 +204,16 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "policy_loss": stats.policy_loss,
                 "value_loss": stats.value_loss,
                 "entropy_bonus": stats.entropy_bonus,
+                "action_entropy_mean": stats.action_entropy_mean,
+                "ko_entropy_mean": stats.ko_entropy_mean,
+                "vp_entropy_mean": stats.vp_entropy_mean,
+                "action_entropy_bonus": stats.action_entropy_bonus,
+                "ko_entropy_bonus": stats.ko_entropy_bonus,
+                "vp_entropy_bonus": stats.vp_entropy_bonus,
+                "threshold_entropy_bonus": stats.threshold_entropy_bonus,
+                "ppo_entropy_action_coef": config.ppo.entropy_action_coef,
+                "ppo_entropy_ko_coef": config.ppo.entropy_ko_coef,
+                "ppo_entropy_vp_coef": config.ppo.entropy_vp_coef,
                 "loss": stats.loss,
                 "approx_joint_kl": stats.approx_joint_kl,
                 "clip_fraction": stats.clip_fraction,
@@ -336,6 +349,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-action-learning-rate", type=float, default=None)
     parser.add_argument("--stem-new-channel-learning-rate", type=float, default=None)
     parser.add_argument("--fast-threshold-learning-rate", type=float, default=None)
+    parser.add_argument("--vp-head-learning-rate", type=float, default=None)
     parser.add_argument("--critic-learning-rate", type=float, default=5.0e-4)
     parser.add_argument("--critic-warmup-updates", type=int, default=0)
     parser.add_argument("--actor-lr-ramp-updates", type=int, default=100)
@@ -362,6 +376,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ppo-clip-range", type=float, default=0.20)
     parser.add_argument("--ppo-value-clip-range", type=float, default=0.20)
     parser.add_argument("--ppo-value-coef", type=float, default=0.50)
+    parser.add_argument("--ppo-entropy-action-coef", type=float, default=0.0100)
+    parser.add_argument("--ppo-entropy-ko-coef", type=float, default=0.0040)
+    parser.add_argument("--ppo-entropy-vp-coef", type=float, default=0.0003)
     parser.add_argument("--ppo-huber-delta", type=float, default=1.0)
     parser.add_argument("--ppo-max-grad-norm", type=float, default=0.5)
     parser.add_argument("--ppo-minibatch-size", type=int, default=512)
@@ -387,6 +404,9 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         clip_range=float(args.ppo_clip_range),
         value_clip_range=float(args.ppo_value_clip_range),
         value_coef=float(args.ppo_value_coef),
+        entropy_action_coef=float(args.ppo_entropy_action_coef),
+        entropy_ko_coef=float(args.ppo_entropy_ko_coef),
+        entropy_vp_coef=float(args.ppo_entropy_vp_coef),
         huber_delta=float(args.ppo_huber_delta),
         max_grad_norm=float(args.ppo_max_grad_norm),
         minibatch_size=int(args.ppo_minibatch_size),
@@ -444,6 +464,7 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         fast_threshold_learning_rate=(
             None if args.fast_threshold_learning_rate is None else float(args.fast_threshold_learning_rate)
         ),
+        vp_head_learning_rate=None if args.vp_head_learning_rate is None else float(args.vp_head_learning_rate),
         critic_learning_rate=float(args.critic_learning_rate),
         critic_warmup_updates=int(args.critic_warmup_updates),
         actor_lr_ramp_updates=int(args.actor_lr_ramp_updates),
@@ -561,7 +582,9 @@ def _make_optimizer(
         params = _full_optimizer_param_groups(model, config)
     else:
         raise ValueError(f"unknown optimizer_phase: {optimizer_phase!r}")
-    return torch.optim.Adam(params, lr=config.critic_learning_rate, eps=config.adam_eps)
+    optimizer = torch.optim.Adam(params, lr=config.critic_learning_rate, eps=config.adam_eps)
+    _validate_optimizer_param_coverage(model, optimizer)
+    return optimizer
 
 
 def _set_learning_rates_for_update(
@@ -579,6 +602,7 @@ def _set_learning_rates_for_update(
             "candidate_action_lr": None,
             "stem_new_channel_lr": None,
             "fast_threshold_lr": None,
+            "vp_head_lr": None,
             "critic_lr": config.critic_learning_rate,
         }
     if optimizer_phase != "full":
@@ -588,8 +612,9 @@ def _set_learning_rates_for_update(
     candidate_lr = None if config.candidate_action_learning_rate is None else _ramped_actor_lr(config.candidate_action_learning_rate, config=config, update_index=update_index)
     stem_new_channel_lr = None if config.stem_new_channel_learning_rate is None else _ramped_actor_lr(config.stem_new_channel_learning_rate, config=config, update_index=update_index)
     fast_threshold_lr = None if config.fast_threshold_learning_rate is None else _ramped_actor_lr(config.fast_threshold_learning_rate, config=config, update_index=update_index)
+    vp_head_lr = None if config.vp_head_learning_rate is None else _ramped_actor_lr(config.vp_head_learning_rate, config=config, update_index=update_index)
     group_names = [group.get("name") for group in optimizer.param_groups]
-    if config.candidate_action_learning_rate is None and config.fast_threshold_learning_rate is None:
+    if _uses_single_actor_optimizer_group(config):
         expected_group_names = ["actor", "critic"]
     else:
         expected_group_names = ["actor_body"]
@@ -599,6 +624,8 @@ def _set_learning_rates_for_update(
             expected_group_names.append("candidate_action")
         if config.fast_threshold_learning_rate is not None:
             expected_group_names.append("fast_threshold")
+        if config.vp_head_learning_rate is not None:
+            expected_group_names.append("vp_head")
         expected_group_names.append("critic")
     if group_names != expected_group_names:
         raise RuntimeError(
@@ -615,6 +642,8 @@ def _set_learning_rates_for_update(
             group["lr"] = candidate_lr
         elif name == "fast_threshold":
             group["lr"] = fast_threshold_lr
+        elif name == "vp_head":
+            group["lr"] = vp_head_lr
         elif name == "critic":
             group["lr"] = config.critic_learning_rate
         else:
@@ -624,6 +653,7 @@ def _set_learning_rates_for_update(
         "candidate_action_lr": candidate_lr,
         "stem_new_channel_lr": stem_new_channel_lr,
         "fast_threshold_lr": fast_threshold_lr,
+        "vp_head_lr": vp_head_lr,
         "critic_lr": config.critic_learning_rate,
     }
 
@@ -638,7 +668,7 @@ def _ramped_actor_lr(target_lr: float, *, config: TrainPpoConfig, update_index: 
 
 def _full_optimizer_param_groups(model: GoldRushPolicyNetwork, config: TrainPpoConfig) -> list[dict[str, Any]]:
     critic_params = _trainable_parameters(model.critic_parameters())
-    if config.candidate_action_learning_rate is None and config.fast_threshold_learning_rate is None:
+    if _uses_single_actor_optimizer_group(config):
         if config.stem_new_channel_learning_rate is not None:
             raise ValueError("stem_new_channel_learning_rate requires candidate_action_learning_rate")
         return [
@@ -646,10 +676,14 @@ def _full_optimizer_param_groups(model: GoldRushPolicyNetwork, config: TrainPpoC
             {"params": critic_params, "lr": config.critic_learning_rate, "name": "critic"},
         ]
 
-    candidate_params = _candidate_action_parameters(model)
-    threshold_params = _fast_threshold_parameters(model)
+    candidate_params = (
+        _candidate_action_parameters(model) if config.candidate_action_learning_rate is not None else tuple()
+    )
+    threshold_params = _fast_threshold_parameters(model) if config.fast_threshold_learning_rate is not None else tuple()
+    vp_head_params = _vp_head_parameters(model) if config.vp_head_learning_rate is not None else tuple()
     candidate_ids = {id(parameter) for parameter in candidate_params}
     threshold_ids = {id(parameter) for parameter in threshold_params}
+    vp_head_ids = {id(parameter) for parameter in vp_head_params}
     stem_new_channel_params = tuple()
     stem_new_channel_ids: set[int] = set()
     if config.stem_new_channel_learning_rate is not None:
@@ -661,6 +695,7 @@ def _full_optimizer_param_groups(model: GoldRushPolicyNetwork, config: TrainPpoC
         if (
             id(parameter) not in candidate_ids
             and id(parameter) not in threshold_ids
+            and id(parameter) not in vp_head_ids
             and id(parameter) not in stem_new_channel_ids
             and parameter.requires_grad
         )
@@ -692,8 +727,45 @@ def _full_optimizer_param_groups(model: GoldRushPolicyNetwork, config: TrainPpoC
                 "name": "fast_threshold",
             }
         )
+    if config.vp_head_learning_rate is not None:
+        groups.append(
+            {
+                "params": _trainable_parameters(vp_head_params),
+                "lr": config.vp_head_learning_rate,
+                "name": "vp_head",
+            }
+        )
     groups.append({"params": critic_params, "lr": config.critic_learning_rate, "name": "critic"})
     return groups
+
+
+def _validate_optimizer_param_coverage(model: GoldRushPolicyNetwork, optimizer: torch.optim.Optimizer) -> None:
+    grouped_params = [
+        parameter
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    ]
+    grouped_ids = [id(parameter) for parameter in grouped_params]
+    duplicate_count = len(grouped_ids) - len(set(grouped_ids))
+    if duplicate_count:
+        raise RuntimeError(f"optimizer parameter groups contain duplicate parameters: {duplicate_count}")
+    trainable_ids = {id(parameter) for parameter in model.parameters() if parameter.requires_grad}
+    grouped_id_set = set(grouped_ids)
+    missing = trainable_ids - grouped_id_set
+    unexpected = grouped_id_set - trainable_ids
+    if missing or unexpected:
+        raise RuntimeError(
+            "optimizer parameter groups must exactly cover trainable parameters; "
+            f"missing={len(missing)}, unexpected={len(unexpected)}"
+        )
+
+
+def _uses_single_actor_optimizer_group(config: TrainPpoConfig) -> bool:
+    return (
+        config.candidate_action_learning_rate is None
+        and config.fast_threshold_learning_rate is None
+        and config.vp_head_learning_rate is None
+    )
 
 
 def _trainable_parameters(parameters) -> list[torch.nn.Parameter]:
@@ -711,6 +783,10 @@ def _stem_new_channel_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn
 
 def _fast_threshold_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn.Parameter, ...]:
     return tuple(model.threshold_parameters())
+
+
+def _vp_head_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn.Parameter, ...]:
+    return tuple(model.vp_head.parameters())
 
 
 def _ko_vp_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn.Parameter, ...]:
@@ -1041,6 +1117,12 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError(
             "TrainPpoConfig.enable_fast_runtime_features must match eval_mp.enable_fast_runtime_features"
         )
+    if config.ppo.entropy_action_coef < 0.0:
+        raise ValueError(f"ppo.entropy_action_coef must be non-negative, got {config.ppo.entropy_action_coef}")
+    if config.ppo.entropy_ko_coef < 0.0:
+        raise ValueError(f"ppo.entropy_ko_coef must be non-negative, got {config.ppo.entropy_ko_coef}")
+    if config.ppo.entropy_vp_coef < 0.0:
+        raise ValueError(f"ppo.entropy_vp_coef must be non-negative, got {config.ppo.entropy_vp_coef}")
     if config.enable_fast_runtime_features:
         if config.model.action_head_schema != ACTION_HEAD_SCHEMA:
             raise ValueError(
@@ -1067,6 +1149,14 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
             "fast_threshold_learning_rate must be positive when set, "
             f"got {config.fast_threshold_learning_rate}"
         )
+    if config.vp_head_learning_rate is not None:
+        if config.vp_head_learning_rate <= 0.0:
+            raise ValueError(
+                "vp_head_learning_rate must be positive when set, "
+                f"got {config.vp_head_learning_rate}"
+            )
+        if config.freeze_ko_vp_heads:
+            raise ValueError("vp_head_learning_rate cannot be combined with freeze_ko_vp_heads")
     if config.critic_learning_rate <= 0.0:
         raise ValueError(f"critic_learning_rate must be positive, got {config.critic_learning_rate}")
     if config.critic_warmup_updates < 0:

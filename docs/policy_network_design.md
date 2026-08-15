@@ -338,7 +338,7 @@ fast option 的 success/miss/path-fail/fallback、belief、first-rate 和 one-st
 
 policy loss、KL 和 entropy 只读取 actor feature；value loss、old value 对齐和 explained variance 只读取 critic feature。`old_logprob` 仍来自 actor 路径，`old_value` 来自 critic 路径。
 
-当前 entropy 权重保持旧量级：
+PPO entropy bonus 按动作子头分别加权，默认值保持旧量级；实验中可通过 `PpoConfig.entropy_action_coef`、`PpoConfig.entropy_ko_coef`、`PpoConfig.entropy_vp_coef` 单独调整三路探索强度：
 
 ```text
 action_entropy = mean_t H(action_t | prefix_t) / log(5)
@@ -347,11 +347,13 @@ vp_entropy = H(vp) / log(3)
 threshold_entropy = H(Normal(mu_raw, std_raw))
 
 entropy_bonus =
-    0.0100 * action_entropy
-  + 0.0040 * ko_entropy
-  + 0.0003 * vp_entropy
+    entropy_action_coef * action_entropy
+  + entropy_ko_coef * ko_entropy
+  + entropy_vp_coef * vp_entropy
   + beta_threshold_entropy * threshold_entropy
 ```
+
+默认值为 `entropy_action_coef=0.0100`、`entropy_ko_coef=0.0040`、`entropy_vp_coef=0.0003`。
 
 `beta_threshold_entropy` 第一版应很小或为 `0`，先通过 `threshold_log_std` 初始化提供探索，避免 threshold 噪声长期主导 fast 行为。action entropy 暂以完整五类 `log(5)` 归一化；mask 后只有少量合法动作时指标会自然下降。masked logits 使用 dtype 有限最小值，避免 `0 * -inf` 产生 NaN。
 

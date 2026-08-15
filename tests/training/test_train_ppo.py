@@ -175,6 +175,28 @@ class TrainPpoTests(unittest.TestCase):
             final_threshold = torch.cat([parameter.detach().flatten().cpu() for parameter in model.threshold_parameters()])
             self.assertFalse(torch.allclose(initial_threshold, final_threshold, atol=0.0, rtol=0.0))
 
+    def test_vp_head_lr_uses_separate_optimizer_group(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                actor_learning_rate=1.0e-6,
+                vp_head_learning_rate=1.0e-4,
+                actor_lr_ramp_updates=1,
+            )
+            torch.manual_seed(config.seed)
+            initial_model = GoldRushPolicyNetwork(_small_model_config())
+            initial_vp = torch.cat([parameter.detach().flatten().clone() for parameter in initial_model.vp_head.parameters()])
+
+            result = run_training(config)
+
+            records = _read_jsonl(Path(tmpdir) / "metrics.jsonl")
+            self.assertAlmostEqual(float(records[0]["actor_lr"]), 1.0e-6)
+            self.assertAlmostEqual(float(records[0]["vp_head_lr"]), 1.0e-4)
+            self.assertAlmostEqual(float(records[0]["vp_head_learning_rate"]), 1.0e-4)
+            model, _checkpoint = load_checkpoint(result.latest_checkpoint, model_config=_small_model_config())
+            final_vp = torch.cat([parameter.detach().flatten().cpu() for parameter in model.vp_head.parameters()])
+            self.assertFalse(torch.allclose(initial_vp, final_vp, atol=0.0, rtol=0.0))
+
     def test_fork_ppo_checkpoint_loads_model_without_resuming_update(self) -> None:
         with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as fork_tmp:
             first = run_training(_smoke_config(output_dir=Path(first_tmp), total_updates=2))
@@ -339,6 +361,16 @@ class TrainPpoTests(unittest.TestCase):
             self.assertIn("threshold_log_std", records[0])
             self.assertIn("threshold_entropy", records[0])
             self.assertIn("threshold_approx_kl", records[0])
+            self.assertIn("action_entropy_mean", records[0])
+            self.assertIn("ko_entropy_mean", records[0])
+            self.assertIn("vp_entropy_mean", records[0])
+            self.assertIn("action_entropy_bonus", records[0])
+            self.assertIn("ko_entropy_bonus", records[0])
+            self.assertIn("vp_entropy_bonus", records[0])
+            self.assertIn("threshold_entropy_bonus", records[0])
+            self.assertIn("ppo_entropy_action_coef", records[0])
+            self.assertIn("ppo_entropy_ko_coef", records[0])
+            self.assertIn("ppo_entropy_vp_coef", records[0])
             self.assertGreaterEqual(records[0]["threshold_int_p10"], 4.0)
             self.assertLessEqual(records[0]["threshold_int_p90"], 30.0)
 
@@ -409,6 +441,8 @@ class TrainPpoTests(unittest.TestCase):
                 "2",
                 "--ppo-update-epochs",
                 "1",
+                "--ppo-entropy-vp-coef",
+                "0.02",
                 "--ppo-target-kl",
                 "-1",
             ]
@@ -437,6 +471,7 @@ def _smoke_config(
     candidate_action_learning_rate: float | None = None,
     stem_new_channel_learning_rate: float | None = None,
     fast_threshold_learning_rate: float | None = None,
+    vp_head_learning_rate: float | None = None,
     freeze_ko_vp_heads: bool = False,
     fork_ppo_checkpoint: Path | None = None,
     rollout_seed_base: int | None = None,
@@ -474,6 +509,7 @@ def _smoke_config(
         candidate_action_learning_rate=candidate_action_learning_rate,
         stem_new_channel_learning_rate=stem_new_channel_learning_rate,
         fast_threshold_learning_rate=fast_threshold_learning_rate,
+        vp_head_learning_rate=vp_head_learning_rate,
         critic_warmup_updates=critic_warmup_updates,
         actor_lr_ramp_updates=actor_lr_ramp_updates,
         freeze_ko_vp_heads=freeze_ko_vp_heads,

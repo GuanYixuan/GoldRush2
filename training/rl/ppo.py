@@ -33,6 +33,9 @@ class PpoConfig:
     clip_range: float = 0.20
     value_clip_range: float = 0.20
     value_coef: float = 0.50
+    entropy_action_coef: float = 0.0100
+    entropy_ko_coef: float = 0.0040
+    entropy_vp_coef: float = 0.0003
     huber_delta: float = 1.0
     max_grad_norm: float = 0.5
     target_joint_kl: float | None = 0.05
@@ -49,6 +52,13 @@ class PpoUpdateStats:
     policy_loss: float
     value_loss: float
     entropy_bonus: float
+    action_entropy_mean: float
+    ko_entropy_mean: float
+    vp_entropy_mean: float
+    action_entropy_bonus: float
+    ko_entropy_bonus: float
+    vp_entropy_bonus: float
+    threshold_entropy_bonus: float
     loss: float
     approx_joint_kl: float
     clip_fraction: float
@@ -153,6 +163,13 @@ def ppo_update(
     policy_losses: list[float] = []
     value_losses: list[float] = []
     entropy_bonuses: list[float] = []
+    action_entropy_means: list[float] = []
+    ko_entropy_means: list[float] = []
+    vp_entropy_means: list[float] = []
+    action_entropy_bonuses: list[float] = []
+    ko_entropy_bonuses: list[float] = []
+    vp_entropy_bonuses: list[float] = []
+    threshold_entropy_bonuses: list[float] = []
     losses: list[float] = []
     kls: list[float] = []
     clip_fractions: list[float] = []
@@ -187,7 +204,15 @@ def ppo_update(
                 delta=config.huber_delta,
             )
             value_loss = torch.maximum(unclipped_value_loss, clipped_value_loss).mean()
-            entropy_bonus = evaluation.normalized_entropy.mean()
+            action_entropy_mean = evaluation.action_entropy.mean()
+            ko_entropy_mean = evaluation.ko_entropy.mean()
+            vp_entropy_mean = evaluation.vp_entropy.mean()
+            threshold_entropy_mean = evaluation.threshold_entropy.mean()
+            action_entropy_bonus = config.entropy_action_coef * action_entropy_mean
+            ko_entropy_bonus = config.entropy_ko_coef * ko_entropy_mean
+            vp_entropy_bonus = config.entropy_vp_coef * vp_entropy_mean
+            threshold_entropy_bonus = model.config.threshold_entropy_coef * threshold_entropy_mean
+            entropy_bonus = action_entropy_bonus + ko_entropy_bonus + vp_entropy_bonus + threshold_entropy_bonus
             actor_loss = policy_loss - entropy_bonus
             critic_loss = config.value_coef * value_loss
             loss = actor_loss + critic_loss
@@ -206,6 +231,13 @@ def ppo_update(
             policy_losses.append(float(policy_loss.detach().cpu().item()))
             value_losses.append(float(value_loss.detach().cpu().item()))
             entropy_bonuses.append(float(entropy_bonus.detach().cpu().item()))
+            action_entropy_means.append(float(action_entropy_mean.detach().cpu().item()))
+            ko_entropy_means.append(float(ko_entropy_mean.detach().cpu().item()))
+            vp_entropy_means.append(float(vp_entropy_mean.detach().cpu().item()))
+            action_entropy_bonuses.append(float(action_entropy_bonus.detach().cpu().item()))
+            ko_entropy_bonuses.append(float(ko_entropy_bonus.detach().cpu().item()))
+            vp_entropy_bonuses.append(float(vp_entropy_bonus.detach().cpu().item()))
+            threshold_entropy_bonuses.append(float(threshold_entropy_bonus.detach().cpu().item()))
             losses.append(float(loss.detach().cpu().item()))
             kls.append(float(approx_joint_kl.detach().cpu().item()))
             clip_fractions.append(float(clip_fraction.detach().cpu().item()))
@@ -229,6 +261,13 @@ def ppo_update(
         policy_loss=mean(policy_losses),
         value_loss=mean(value_losses),
         entropy_bonus=mean(entropy_bonuses),
+        action_entropy_mean=mean(action_entropy_means),
+        ko_entropy_mean=mean(ko_entropy_means),
+        vp_entropy_mean=mean(vp_entropy_means),
+        action_entropy_bonus=mean(action_entropy_bonuses),
+        ko_entropy_bonus=mean(ko_entropy_bonuses),
+        vp_entropy_bonus=mean(vp_entropy_bonuses),
+        threshold_entropy_bonus=mean(threshold_entropy_bonuses),
         loss=mean(losses),
         approx_joint_kl=mean(kls),
         clip_fraction=mean(clip_fractions),
@@ -284,6 +323,13 @@ def critic_only_update(
         policy_loss=0.0,
         value_loss=mean(value_losses),
         entropy_bonus=0.0,
+        action_entropy_mean=0.0,
+        ko_entropy_mean=0.0,
+        vp_entropy_mean=0.0,
+        action_entropy_bonus=0.0,
+        ko_entropy_bonus=0.0,
+        vp_entropy_bonus=0.0,
+        threshold_entropy_bonus=0.0,
         loss=mean(losses),
         approx_joint_kl=0.0,
         clip_fraction=0.0,
@@ -430,6 +476,12 @@ def _validate_config(config: PpoConfig) -> None:
         raise ValueError(f"clip_range must be positive, got {config.clip_range}")
     if config.value_clip_range <= 0.0:
         raise ValueError(f"value_clip_range must be positive, got {config.value_clip_range}")
+    if config.entropy_action_coef < 0.0:
+        raise ValueError(f"entropy_action_coef must be non-negative, got {config.entropy_action_coef}")
+    if config.entropy_ko_coef < 0.0:
+        raise ValueError(f"entropy_ko_coef must be non-negative, got {config.entropy_ko_coef}")
+    if config.entropy_vp_coef < 0.0:
+        raise ValueError(f"entropy_vp_coef must be non-negative, got {config.entropy_vp_coef}")
     if config.huber_delta <= 0.0:
         raise ValueError(f"huber_delta must be positive, got {config.huber_delta}")
     if config.max_grad_norm <= 0.0:
