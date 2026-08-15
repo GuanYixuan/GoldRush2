@@ -7,6 +7,12 @@
 namespace policy_runtime {
 namespace {
 
+#if POLICY_RUNTIME_FAST_DEBUG
+#define FAST_RELEASE_INLINE
+#else
+#define FAST_RELEASE_INLINE inline __attribute__((always_inline))
+#endif
+
 constexpr int GRID_FOG = -5;
 constexpr int ACTION_UP = 0;
 constexpr int ACTION_DOWN = 1;
@@ -295,7 +301,7 @@ bool try_fast_gold_grab(const GameInput& input, int threshold_int, GameOutput* o
     return true;
 }
 
-FastStatus try_fast_output_core(
+FAST_RELEASE_INLINE FastStatus try_fast_output_core(
     std::int8_t* padded_grid,
     const GameInput& input,
     int threshold_int,
@@ -508,6 +514,20 @@ FastStatus FastRuntimeState::try_fast_output(const GameInput& input, GameOutput*
     return FastStatus::Success;
 }
 
+#if !POLICY_RUNTIME_FAST_DEBUG && POLICY_RUNTIME_FAST_ONE_TU
+FAST_RELEASE_INLINE FastStatus FastRuntimeState::try_fast_output_release(const GameInput& input, GameOutput* output) {
+    GameOutput fused{};
+    const FastStatus status = try_fast_output_core(pending_.grid, input, threshold_int_, &fused, nullptr, nullptr, nullptr);
+    if (status != FastStatus::Success) {
+        return status;
+    }
+
+    *output = fused;
+    store_pending_meta(input, fused);
+    return FastStatus::Success;
+}
+#endif
+
 FastTryResult FastRuntimeState::try_fast(const GameInput& input) {
     FastTryResult result{};
     GameOutput output{};
@@ -570,7 +590,7 @@ void FastRuntimeState::pack_grid(const GameInput& input) {
     pack_padded_grid_interior(pending_.grid, input);
 }
 
-void FastRuntimeState::store_pending_meta(const GameInput& input, const GameOutput& output) {
+FAST_RELEASE_INLINE void FastRuntimeState::store_pending_meta(const GameInput& input, const GameOutput& output) {
     pending_.valid = true;
     pending_.round = input.round;
     pending_.my_units[0] = input.my_units[0];

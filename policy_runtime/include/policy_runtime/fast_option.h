@@ -14,6 +14,14 @@
 #error "POLICY_RUNTIME_FAST_DEBUG must be 0 or 1"
 #endif
 
+#ifndef POLICY_RUNTIME_FAST_ONE_TU
+#define POLICY_RUNTIME_FAST_ONE_TU 0
+#endif
+
+#if POLICY_RUNTIME_FAST_ONE_TU != 0 && POLICY_RUNTIME_FAST_ONE_TU != 1
+#error "POLICY_RUNTIME_FAST_ONE_TU must be 0 or 1"
+#endif
+
 namespace policy_runtime {
 
 constexpr int FAST_SCALAR_FEATURES = 2;
@@ -75,6 +83,9 @@ public:
 
     void set_next_threshold(int threshold_int);
     FastStatus try_fast_output(const GameInput& input, GameOutput* output);
+#if !POLICY_RUNTIME_FAST_DEBUG && POLICY_RUNTIME_FAST_ONE_TU
+    FastStatus try_fast_output_release(const GameInput& input, GameOutput* output);
+#endif
     FastTryResult try_fast(const GameInput& input);
     NeuralPrepareResult prepare_neural(const GameInput& input);
     void commit_neural(const GameOutput& output);

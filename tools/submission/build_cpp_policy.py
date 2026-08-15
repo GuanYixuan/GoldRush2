@@ -165,9 +165,10 @@ def _makefile(module_name: str, *, fast_debug: int, fast_core_one_tu: bool) -> s
     include_flags = "-I. -I$(REPO_ROOT) -I$(REPO_ROOT)/policy_runtime/include" if fast_core_one_tu else "-I$(REPO_ROOT) -I$(REPO_ROOT)/policy_runtime/include -I."
     src = "player.cpp $(REPO_ROOT)/policy_runtime/src/feature_extractor.cpp" if fast_core_one_tu else "player.cpp $(REPO_ROOT)/policy_runtime/src/feature_extractor.cpp $(REPO_ROOT)/policy_runtime/src/fast_option.cpp"
     extra_deps = " fast_option_one_tu.cpp policy_runtime/fast_option.h" if fast_core_one_tu else ""
+    one_tu_define = " -DPOLICY_RUNTIME_FAST_ONE_TU=1" if fast_core_one_tu else ""
     return f"""CXX ?= g++
 REPO_ROOT := {ROOT}
-CXXFLAGS ?= -std=c++17 -O3 -fPIC -Wall -Wextra -DPOLICY_RUNTIME_FAST_DEBUG={fast_debug} {include_flags}
+CXXFLAGS ?= -std=c++17 -O3 -fPIC -Wall -Wextra -DPOLICY_RUNTIME_FAST_DEBUG={fast_debug}{one_tu_define} {include_flags}
 LDFLAGS ?= -shared
 LDLIBS ?= -ldl
 TARGET = {module_name}.so
@@ -261,7 +262,11 @@ public:
             maybe_reset_episode(*input);
             if (fast_armed_) {{
                 GameOutput fast_output = {{}};
+#if POLICY_RUNTIME_FAST_DEBUG || !POLICY_RUNTIME_FAST_ONE_TU
                 const policy_runtime::FastStatus fast_status = runtime_.try_fast_output(*input, &fast_output);
+#else
+                const policy_runtime::FastStatus fast_status = runtime_.try_fast_output_release(*input, &fast_output);
+#endif
                 fast_armed_ = false;
                 if (fast_status == policy_runtime::FastStatus::Success) {{
                     return fast_output;
