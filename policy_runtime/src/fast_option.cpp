@@ -104,12 +104,16 @@ inline int clamp_threshold(int threshold) {
     return std::max(FAST_THRESHOLD_LOW, std::min(threshold, FAST_THRESHOLD_HIGH));
 }
 
-bool choose_target_padded(
+inline Position scan_target(Position start, int scan_idx) {
+    return Position{start.row + kScan5x5RowDelta[scan_idx], start.col + kScan5x5ColDelta[scan_idx]};
+}
+
+bool choose_target_scan_idx(
     const std::int8_t* padded_grid,
     const GameInput& input,
     int threshold,
-    Position* target,
-    int* role) {
+    int* role,
+    int* scan_idx) {
     const int u0r = input.my_units[0].row;
     const int u0c = input.my_units[0].col;
     const int u1r = input.my_units[1].row;
@@ -121,10 +125,8 @@ bool choose_target_padded(
         if (gold < threshold) {
             continue;
         }
-        const int row = u0r + kScan5x5RowDelta[i];
-        const int col = u0c + kScan5x5ColDelta[i];
-        *target = Position{row, col};
         *role = 0;
+        *scan_idx = i;
         return true;
     }
 
@@ -134,14 +136,26 @@ bool choose_target_padded(
         if (gold < threshold) {
             continue;
         }
-        const int row = u1r + kScan5x5RowDelta[i];
-        const int col = u1c + kScan5x5ColDelta[i];
-        *target = Position{row, col};
         *role = 1;
+        *scan_idx = i;
         return true;
     }
 
     return false;
+}
+
+bool choose_target_padded(
+    const std::int8_t* padded_grid,
+    const GameInput& input,
+    int threshold,
+    Position* target,
+    int* role) {
+    int scan_idx = 0;
+    if (!choose_target_scan_idx(padded_grid, input, threshold, role, &scan_idx)) {
+        return false;
+    }
+    *target = scan_target(input.my_units[*role], scan_idx);
+    return true;
 }
 
 bool append_greedy_path_to_output(const GameInput& input, Position start, Position target, GameOutput* output, int* action_count) {
@@ -318,11 +332,12 @@ FAST_RELEASE_INLINE FastStatus try_fast_output_core(
 ) {
     pack_padded_grid_interior(padded_grid, input);
 
-    Position target{0, 0};
     int role = 0;
-    if (!choose_target_padded(padded_grid, input, threshold_int, &target, &role)) {
+    int scan_idx = 0;
+    if (!choose_target_scan_idx(padded_grid, input, threshold_int, &role, &scan_idx)) {
         return FastStatus::MissNoTarget;
     }
+    const Position target = scan_target(input.my_units[role], scan_idx);
 
     GameOutput fused = stay_output();
     int action_count = 0;
