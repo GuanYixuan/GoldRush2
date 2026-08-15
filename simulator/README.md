@@ -63,7 +63,7 @@ resource mechanisms already applied
 当前实现：
 
 - `maps.py`：内置地图池、静态障碍、`static_grid == 2` 特殊非障碍格和固定出生配置。`built_in_public_map_pool()` 保留当前已观测公开图；`built_in_training_map_pool()` 是训练/本地对局默认池，包含公开图和满足规则约束的 synthetic training 图。
-- `gold.py`：中心小额金币生成、外围 `static_grid == 2` high batch 和伴随外围小额金币生成；公开 map 4 的外围 `static_grid == 2` 数量少于旧三图，生成候选按地图静态层实际格子处理，零合法 static2 候选时将 high total fallback 到 high region 外外围普通格。
+- `gold.py`：中心小额金币生成、外围 `static_grid == 2` high batch 和伴随外围小额金币生成；公开 map 4 的外围 `static_grid == 2` 数量少于旧三图，生成候选按地图静态层实际格子处理，零合法 static2 候选时退化为 high region 外外围普通格上的 combined fallback batch。
 - `bombs.py`：固定 20 回合刷新周期，按候选格 Bernoulli 采样。
 - `npc.py`：默认 NPC path-level softmax approximation，当前推荐口径见 `mechanism/results/npc/npc_behavior_modeling_overview.md`。
 - `scripted.py`：固定金币/NPC 行为脚本，用于 deterministic transition 测试。

@@ -127,7 +127,96 @@ DEFAULT_OUTER_STATIC0_AMOUNT_WEIGHTS = (
     (17, 17),
     (18, 13),
 )
-DEFAULT_STATIC2_ZERO_FALLBACK_COUNT_WEIGHTS = tuple((count, 1) for count in range(9, 16))
+DEFAULT_STATIC2_ZERO_FALLBACK_COUNT_WEIGHTS = (
+    (12, 5),
+    (13, 6),
+    (14, 18),
+    (15, 44),
+    (16, 52),
+    (17, 61),
+    (18, 72),
+    (19, 69),
+    (20, 60),
+    (21, 44),
+    (22, 17),
+    (23, 21),
+    (24, 1),
+    (25, 1),
+    (26, 4),
+)
+DEFAULT_STATIC2_ZERO_FALLBACK_AMOUNT_WEIGHTS = (
+    (1, 799),
+    (2, 721),
+    (3, 633),
+    (4, 653),
+    (5, 768),
+    (6, 776),
+    (7, 706),
+    (8, 647),
+    (9, 701),
+    (10, 626),
+    (11, 654),
+    (12, 94),
+    (13, 66),
+    (14, 68),
+    (15, 55),
+    (16, 58),
+    (17, 61),
+    (18, 39),
+    (19, 36),
+    (20, 25),
+    (21, 10),
+    (22, 11),
+    (23, 14),
+    (24, 1),
+    (25, 6),
+    (26, 1),
+    (27, 2),
+    (29, 4),
+)
+DEFAULT_STATIC2_ZERO_FALLBACK_TOTAL_WEIGHTS = (
+    (100, 22),
+    (101, 14),
+    (102, 3),
+    (103, 26),
+    (104, 8),
+    (105, 11),
+    (106, 13),
+    (107, 7),
+    (108, 16),
+    (109, 11),
+    (110, 20),
+    (111, 7),
+    (112, 20),
+    (113, 9),
+    (114, 16),
+    (115, 13),
+    (116, 8),
+    (117, 5),
+    (118, 6),
+    (119, 12),
+    (120, 12),
+    (121, 12),
+    (122, 4),
+    (123, 15),
+    (124, 12),
+    (125, 17),
+    (126, 4),
+    (127, 7),
+    (128, 12),
+    (129, 13),
+    (130, 1),
+    (131, 12),
+    (132, 13),
+    (133, 4),
+    (134, 25),
+    (135, 5),
+    (136, 5),
+    (137, 9),
+    (138, 16),
+    (139, 4),
+    (140, 26),
+)
 DEFAULT_REGION_WEIGHTS = tuple((region, 1) for region in OUTER_REGIONS)
 DEFAULT_FIRST_ROUND_OFFSET_WEIGHTS = tuple((offset, 1) for offset in range(8, 15))
 
@@ -187,7 +276,9 @@ class OuterGoldConfig:
     gap_weights: WeightedIntDistribution = DEFAULT_STATIC2_GAP_WEIGHTS
     region_weights: WeightedIntDistribution = DEFAULT_REGION_WEIGHTS
     static2_total_weights: WeightedIntDistribution = DEFAULT_STATIC2_TOTAL_WEIGHTS
+    static2_zero_fallback_total_weights: WeightedIntDistribution = DEFAULT_STATIC2_ZERO_FALLBACK_TOTAL_WEIGHTS
     static2_zero_fallback_count_weights: WeightedIntDistribution = DEFAULT_STATIC2_ZERO_FALLBACK_COUNT_WEIGHTS
+    static2_zero_fallback_amount_weights: WeightedIntDistribution = DEFAULT_STATIC2_ZERO_FALLBACK_AMOUNT_WEIGHTS
     outer_static0_count_weights: WeightedIntDistribution = DEFAULT_OUTER_STATIC0_COUNT_WEIGHTS
     outer_static0_amount_weights: WeightedIntDistribution = DEFAULT_OUTER_STATIC0_AMOUNT_WEIGHTS
 
@@ -196,7 +287,9 @@ class OuterGoldConfig:
         _validate_weights("gap_weights", self.gap_weights, min_value=1)
         _validate_weights("region_weights", self.region_weights, allowed_values=OUTER_REGIONS)
         _validate_weights("static2_total_weights", self.static2_total_weights, min_value=1)
+        _validate_weights("static2_zero_fallback_total_weights", self.static2_zero_fallback_total_weights, min_value=1)
         _validate_weights("static2_zero_fallback_count_weights", self.static2_zero_fallback_count_weights, min_value=1)
+        _validate_weights("static2_zero_fallback_amount_weights", self.static2_zero_fallback_amount_weights, min_value=1)
         _validate_weights("outer_static0_count_weights", self.outer_static0_count_weights, min_value=0)
         _validate_weights("outer_static0_amount_weights", self.outer_static0_amount_weights, min_value=1)
 
@@ -248,30 +341,30 @@ class OuterGoldGenerator:
             outer_static2_candidate_cells(template, high_region),
             state,
         )
-        total = _sample_weighted(self.config.static2_total_weights, rng)
         if static2_cells:
+            total = _sample_weighted(self.config.static2_total_weights, rng)
             events = _split_batch_total(static2_cells, total, rng)
-        else:
-            events = self._generate_zero_static2_fallback(state, template, high_region, total, rng)
 
-        static0_cells = _generation_available_cells(
-            outer_static0_candidate_cells(template, exclude_region=high_region),
-            state,
-        )
-        static0_count = _sample_weighted(self.config.outer_static0_count_weights, rng)
-        static0_count = min(static0_count, len(static0_cells))
-        selected_static0 = tuple(rng.sample(static0_cells, static0_count))
-        events.extend(
-            GoldGenerationEvent(pos, _sample_weighted(self.config.outer_static0_amount_weights, rng)) for pos in selected_static0
-        )
-        return tuple(events)
+            static0_cells = _generation_available_cells(
+                outer_static0_candidate_cells(template, exclude_region=high_region),
+                state,
+            )
+            static0_count = _sample_weighted(self.config.outer_static0_count_weights, rng)
+            static0_count = min(static0_count, len(static0_cells))
+            selected_static0 = tuple(rng.sample(static0_cells, static0_count))
+            events.extend(
+                GoldGenerationEvent(pos, _sample_weighted(self.config.outer_static0_amount_weights, rng))
+                for pos in selected_static0
+            )
+            return tuple(events)
+
+        return tuple(self._generate_zero_static2_fallback(state, template, high_region, rng))
 
     def _generate_zero_static2_fallback(
         self,
         state: GameState,
         template: MapTemplate,
         high_region: int,
-        total: int,
         rng: random.Random,
     ) -> list[GoldGenerationEvent]:
         static0_cells = _generation_available_cells(
@@ -283,7 +376,14 @@ class OuterGoldGenerator:
         fallback_count = _sample_weighted(self.config.static2_zero_fallback_count_weights, rng)
         fallback_count = min(fallback_count, len(static0_cells))
         selected_cells = tuple(rng.sample(static0_cells, fallback_count))
-        return _split_batch_total(selected_cells, total, rng)
+        total = _sample_weighted(self.config.static2_zero_fallback_total_weights, rng)
+        amounts = _sample_amounts_with_total(
+            fallback_count,
+            total,
+            self.config.static2_zero_fallback_amount_weights,
+            rng,
+        )
+        return [GoldGenerationEvent(pos, amount) for pos, amount in zip(selected_cells, amounts, strict=True)]
 
 
 def center_candidate_cells(template: MapTemplate) -> tuple[Position, ...]:
@@ -356,6 +456,51 @@ def _split_batch_total(cells: tuple[Position, ...], total: int, rng: random.Rand
     for cell in rng.sample(cells, remainder):
         amounts[cell] += 1
     return [GoldGenerationEvent(cell, amounts[cell]) for cell in cells]
+
+
+def _sample_amounts_with_total(
+    count: int,
+    total: int,
+    weights: WeightedIntDistribution,
+    rng: random.Random,
+) -> list[int]:
+    if count <= 0:
+        raise SimulatorRuleError(f"fallback count must be positive, got {count}")
+    min_amount = min(value for value, _ in weights)
+    max_amount = max(value for value, _ in weights)
+    if total < count * min_amount or total > count * max_amount:
+        raise SimulatorRuleError(f"cannot sample {count} fallback amounts summing to {total}")
+
+    best: list[int] | None = None
+    best_abs_diff: int | None = None
+    for _ in range(64):
+        amounts = [_sample_weighted(weights, rng) for _ in range(count)]
+        diff = total - sum(amounts)
+        if diff == 0:
+            return amounts
+        abs_diff = abs(diff)
+        if best_abs_diff is None or abs_diff < best_abs_diff:
+            best = amounts
+            best_abs_diff = abs_diff
+
+    assert best is not None
+    amounts = list(best)
+    current = sum(amounts)
+    while current < total:
+        candidates = [index for index, amount in enumerate(amounts) if amount < max_amount]
+        if not candidates:
+            raise SimulatorRuleError(f"cannot increase fallback amounts from {current} to {total}")
+        index = rng.choice(candidates)
+        amounts[index] += 1
+        current += 1
+    while current > total:
+        candidates = [index for index, amount in enumerate(amounts) if amount > min_amount]
+        if not candidates:
+            raise SimulatorRuleError(f"cannot decrease fallback amounts from {current} to {total}")
+        index = rng.choice(candidates)
+        amounts[index] -= 1
+        current -= 1
+    return amounts
 
 
 def _sample_weighted(weights: WeightedIntDistribution, rng: random.Random) -> int:

@@ -217,8 +217,10 @@ class OuterGoldTests(unittest.TestCase):
                 gap_weights=((8, 1),),
                 region_weights=((5, 1),),
                 static2_total_weights=((90, 1),),
+                static2_zero_fallback_total_weights=((90, 1),),
                 static2_zero_fallback_count_weights=((3, 1),),
-                outer_static0_count_weights=((0, 1),),
+                static2_zero_fallback_amount_weights=((30, 1),),
+                outer_static0_count_weights=((999, 1),),
             )
         )
 
@@ -333,6 +335,12 @@ class OuterGoldTests(unittest.TestCase):
             OuterGoldConfig(region_weights=((1, 1),))
         with self.assertRaises(SimulatorRuleError):
             OuterGoldConfig(static2_total_weights=((88, 0),))
+        with self.assertRaises(SimulatorRuleError):
+            OuterGoldConfig(static2_zero_fallback_total_weights=())
+        with self.assertRaises(SimulatorRuleError):
+            OuterGoldConfig(static2_zero_fallback_count_weights=((0, 1),))
+        with self.assertRaises(SimulatorRuleError):
+            OuterGoldConfig(static2_zero_fallback_amount_weights=((1, -1),))
         with self.assertRaises(SimulatorRuleError):
             outer_static2_candidate_cells(built_in_public_map_pool().get(1), 1)
 

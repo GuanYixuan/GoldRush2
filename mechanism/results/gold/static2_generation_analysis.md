@@ -296,7 +296,7 @@ mechanism/data/processed/static2_occupancy_analysis/maps123_static2_occupancy/
 - high batch 选中一个外围 region 后，尝试作用于该 region 内全部 `static_map=2` 候选格。
 - 被玩家/NPC占用的候选格不会获得本次正增量；炸弹格在 clean-visible 口径下不可直接验证，但全量统计同样没有观测到正增量落在炸弹格。
 - 官方没有延后整个 high batch：存在 blocked candidate 时同回合仍在其它合法候选格生成。
-- 当前样本没有出现所有候选格都被占用的极端情况；若模拟器遇到 `legal_candidates=0`，第一版可直接跳过本次 static2 金币分配并继续推进下一次 gap。
+- 地图1/2/3样本没有出现所有候选格都被占用的极端情况；map4 受控堵点实验补充显示，当 high region 的 `legal_candidates=0` 时，本次 high 不会整次跳过，也不会重采样到有 static2 的 region，而是退化为 high region 外外围普通格上的 combined fallback batch；被堵 high region 的 snapshot `gold_generated` 为 `0`，其它外区合计仍为 high-sized total。
 
 金额分配过程更清晰：同一个 full high batch 内，各正增量格子的金额差几乎总是 `0` 或 `1`。因此它更像是先采样 batch total `T`，再把 `T` 均分到合法候选格：
 
@@ -312,6 +312,58 @@ for cell in sample_without_replacement(legal_static2_cells, rem):
 ```
 
 完整可见 full high 样本中，`T` 主要在 `80..112`，且 blocked candidates 为 `0/1/2` 时 mean total 分别约 `95.33/95.18/94.31`，说明 `T` 与动态占用基本无关；占用主要改变分母 `k`，从而提高剩余合法格的单格金额。
+
+## map4 零合法 static2 fallback
+
+map4 的外围 `static_map=2` 候选格明显少于地图1/2/3，其中 region 3 和 region 5 各只有一个候选格。2026-08-15 对这两个单候选外区做了 `40` 局受控堵点实验：
+
+| 批次 | run_id | 局数 | 堵点 | target fallback |
+| --- | --- | ---: | --- | ---: |
+| region5 单堵 | `map4-static2-zero-region5-20260815-20` | `20` | `(2,13)` | `242` |
+| region3 单堵 | `map4-static2-zero-region3-20260815-20` | `20` | `(16,3)` | `237` |
+
+原始 replay：
+
+```text
+mechanism/data/raw/observer_runs/map4-static2-zero-region5-20260815-20/
+mechanism/data/raw/observer_runs/map4-static2-zero-region3-20260815-20/
+```
+
+分析脚本和详细临时记录：
+
+```text
+temp/map4_static2_zero_candidate_experiment/analyze_fallback_events.py
+temp/map4_static2_zero_candidate_experiment/README.md
+```
+
+识别口径：
+
+- 用双方视角抽取 `end[t-1] -> start[t]` 的 clean visible positive cell delta。
+- 正常 high 由 unblocked region 的 `static_map=2` 高额增量识别。
+- fallback 由“无 normal static2 high、恰有一个外区普通格生成量为 `0`、其它外区普通格合计 `>=50` 且正增量格数 `>=5`”识别；该零生成外区视为被选中的 high region。
+- snapshot full total 需按 `end[t-1] -> start[t]` 归入包含 `t-1` 的 snapshot window 对齐。
+
+精细结论：
+
+| 指标 | pooled target fallback |
+| --- | ---: |
+| events | `479` |
+| 有 snapshot full total | `475` |
+| full total mean | `119.11` |
+| full total range | `100..140` |
+| visible static0 count mean | `17.19` |
+| visible static0 sum mean | `112.50` |
+| 估计真实 `k` mean | 约 `18.2` |
+
+这组数据推翻了“三局粗扫后提出的 high total 均分到少数 fallback cells”的假设。target fallback 的单格金额主体是 `1..11`，并有少量 `12..29` 尾部；正常 high 的伴随 static0 对照仅约 `4.2` 个可见格、总量约 `22`。因此更合理的模型是一个 combined fallback static0 batch，而不是“fallback high component + 独立伴随 static0”两个可分事件。
+
+simulator 当前落地为：
+
+- `DEFAULT_STATIC2_ZERO_FALLBACK_TOTAL_WEIGHTS`：pooled target snapshot full total，范围 `100..140`。
+- `DEFAULT_STATIC2_ZERO_FALLBACK_COUNT_WEIGHTS`：基于 visible count 和覆盖补偿后的 pooled target `k` 分布，范围 `12..26`。
+- `DEFAULT_STATIC2_ZERO_FALLBACK_AMOUNT_WEIGHTS`：pooled target visible static0 单格金额经验分布，范围 `1..29`。
+
+生成时先采样 fallback total 和 `k`，从 high region 外外围 `static_map=0` 普通格无放回采样 `k` 个落点，再按 fallback 单格金额经验分布采样并调整到 total；零候选 fallback 分支不再额外生成正常伴随 static0。
 
 ## 单格金额
 
@@ -381,6 +433,12 @@ for each round t:
         if not occupied_by_player_or_npc(cell) and not blocked_by_bomb(cell)
     ]
     if not cells:
+        total = sample_empirical_zero_static2_fallback_total()
+        k = sample_empirical_zero_static2_fallback_count()
+        fallback_cells = sample_without_replacement(static0_cells_outside(high_region), k)
+        amounts = sample_empirical_zero_static2_fallback_amounts_conditioned_on_sum(total, k)
+        for cell, amount in zip(fallback_cells, amounts):
+            add amount
         state.next_static2_round = t + sample_empirical_static2_gap(map_id)
         continue
 
@@ -392,6 +450,7 @@ for each round t:
     for cell in sample_without_replacement(cells, rem):
         add 1
 
+    generate companion outer_static0 outside high_region
     state.next_static2_round = t + sample_empirical_static2_gap(map_id)
 ```
 
@@ -411,6 +470,7 @@ split total nearly evenly over cells
 2. 同一回合同一时间只触发一个外围 region。
 3. 相邻 high batch 的 region 存在一阶 persistence；简化版可近似均匀，拟合版建议使用按地图经验转移矩阵。
 4. high region 内 static2 候选格在未被玩家/NPC占用时全覆盖；占用格不获得本次正增量。
-5. static2 金额不是单格独立采样，而是 batch total 在合法候选格上近似均分。
-6. high batch 所在 region 的普通格近似不生成，小额普通格生成发生在其它外围 region。
-7. 地图3 batch total 较低和 non-high 中等片段较多，应优先解释为地图结构/可见覆盖差异，后续可按地图单独校准参数。
+5. 若 high region 的合法 static2 候选格为 `0`，不跳过、不重采样，而是生成 high region 外外围普通格 combined fallback batch；40 局 map4 单堵点实验支持 full total 范围 `100..140`、均值约 `119`，`k` 均值约 `18`，单格金额主体 `1..11` 且少量 `12..29` 尾部。当前 simulator 采样 fallback total 和 count，再按单格金额经验分布采样并调整到 total。
+6. 正常 static2 金额不是单格独立采样，而是 batch total 在合法候选格上近似均分；零候选 fallback 不支持“把 high total 均分到少数普通格”，更像普通格批量小额生成。
+7. high batch 所在 region 的普通格近似不生成，小额普通格生成发生在其它外围 region。
+8. 地图3 batch total 较低和 non-high 中等片段较多，应优先解释为地图结构/可见覆盖差异，后续可按地图单独校准参数。
