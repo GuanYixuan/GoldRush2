@@ -404,7 +404,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 主线不维护隐式部分加载。当前迁移链路是两步显式 inflation：
 
 1. fast threshold calibrated-base inflation 只支持 feature v2 / `action_head_schema=candidate_cell_residual_v1` checkpoint：补齐 fast threshold residual head，并在 critic value 第一层追加 2 个 `fast_scalars` 输入列且置零，使初始普通动作分布和旧 value 输出保持不变。输出 schema 为 `candidate_cell_residual_v1_fast_threshold_calibrated_base_v1`。
-2. VP final-position inflation 只支持 `candidate_cell_residual_v1_fast_threshold_calibrated_base_v1` checkpoint：把 `vp_head.weight` 从 `[3, actor_hidden]` 扩展到 `[3, actor_hidden + 2 * width]`，旧列照抄，新增 final-position 列置零，使初始 VP logits 完全不变。输出 schema 为当前主线 schema。
+2. VP final-position inflation 只支持 `candidate_cell_residual_v1_fast_threshold_calibrated_base_v1` checkpoint：默认把 `vp_head.weight` 从 `[3, actor_hidden]` 扩展到 `[3, actor_hidden + 2 * width]`，旧列照抄，新增 final-position 列置零，使初始 VP logits 完全不变。若旧 VP head 已饱和到几乎永不买视野，可显式使用 `--reset-vp-head-prior P0 P1 P2`，将 `vp_head.weight` 全置 0、bias 设为 `log([P0, P1, P2])`，用非零 VP 先验换取探索样本。输出 schema 为当前主线 schema。
 
 旧 factorized checkpoint、旧 shared-encoder PPO checkpoint、缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint、旧 `candidate_cell_residual_v1_fast_threshold_v1` checkpoint，以及 schema 元信息缺失或不匹配的 checkpoint 均不兼容当前模型，应 fail-fast。inflation 后不继承旧 optimizer state。
 

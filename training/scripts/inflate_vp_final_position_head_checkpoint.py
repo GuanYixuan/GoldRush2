@@ -18,10 +18,16 @@ from training.models.policy_network import (
 )
 
 
-def inflate_checkpoint_payload(checkpoint: dict[str, Any]) -> dict[str, Any]:
+def inflate_checkpoint_payload(
+    checkpoint: dict[str, Any],
+    *,
+    reset_vp_head_prior: tuple[float, float, float] | None = None,
+) -> dict[str, Any]:
     inflated = copy.deepcopy(checkpoint)
     raw_config = _raw_model_config(inflated)
     _require_fast_threshold_checkpoint(inflated, raw_config)
+    if reset_vp_head_prior is not None:
+        _validate_vp_prior(reset_vp_head_prior)
 
     config = _current_model_config(raw_config)
     model = GoldRushPolicyNetwork(config)
@@ -30,7 +36,13 @@ def inflate_checkpoint_payload(checkpoint: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(state, dict):
         raise ValueError("checkpoint missing model_state_dict")
 
-    _inflate_vp_head(state, initialized, actor_hidden=config.actor_hidden, width=config.width)
+    _inflate_vp_head(
+        state,
+        initialized,
+        actor_hidden=config.actor_hidden,
+        width=config.width,
+        reset_prior=reset_vp_head_prior,
+    )
     _update_model_configs(inflated, asdict(config))
     if "feature_schema" in inflated and inflated["feature_schema"] != FEATURE_SCHEMA:
         raise ValueError(f"checkpoint feature_schema must be {FEATURE_SCHEMA!r}, got {inflated['feature_schema']!r}")
@@ -42,9 +54,21 @@ def inflate_checkpoint_payload(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "to_action_head_schema": ACTION_HEAD_SCHEMA,
         "old_actor_context_columns": int(config.actor_hidden),
         "new_position_columns": int(config.width) * 2,
-        "new_position_init": "zero",
+        "weight_init": "zero" if reset_vp_head_prior is not None else "copy_old_actor_context_and_zero_new_position",
+        "bias_init": "log_prior" if reset_vp_head_prior is not None else "copy_old",
+        "vp_prior": None if reset_vp_head_prior is None else [float(value) for value in reset_vp_head_prior],
     }
     return inflated
+
+
+def _validate_vp_prior(prior: tuple[float, float, float]) -> None:
+    if len(prior) != 3:
+        raise ValueError(f"reset_vp_head_prior must contain exactly 3 probabilities, got {len(prior)}")
+    if any(value <= 0.0 for value in prior):
+        raise ValueError(f"reset_vp_head_prior probabilities must be positive, got {prior}")
+    total = sum(float(value) for value in prior)
+    if abs(total - 1.0) > 1.0e-6:
+        raise ValueError(f"reset_vp_head_prior probabilities must sum to 1.0, got {total}")
 
 
 def _raw_model_config(checkpoint: dict[str, Any]) -> dict[str, Any]:
@@ -97,6 +121,7 @@ def _inflate_vp_head(
     *,
     actor_hidden: int,
     width: int,
+    reset_prior: tuple[float, float, float] | None,
 ) -> None:
     weight_key = "vp_head.weight"
     bias_key = "vp_head.bias"
@@ -117,9 +142,13 @@ def _inflate_vp_head(
     if tuple(old_bias.shape) != tuple(new_bias.shape):
         raise ValueError(f"{bias_key} shape mismatch: old={tuple(old_bias.shape)} new={tuple(new_bias.shape)}")
     inflated_weight = old_weight.new_zeros(new_weight.shape)
-    inflated_weight[:, : old_weight.shape[1]] = old_weight
+    if reset_prior is None:
+        inflated_weight[:, : old_weight.shape[1]] = old_weight
     state[weight_key] = inflated_weight
-    state[bias_key] = old_bias
+    if reset_prior is None:
+        state[bias_key] = old_bias
+    else:
+        state[bias_key] = torch.log(torch.tensor(reset_prior, dtype=old_bias.dtype, device=old_bias.device))
 
 
 def _update_model_configs(checkpoint: dict[str, Any], config: dict[str, Any]) -> None:
@@ -134,12 +163,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Inflate a fast-threshold checkpoint to final-position VP head schema.")
     parser.add_argument("--input", required=True, type=Path, help="Path to a fast-threshold PPO checkpoint.")
     parser.add_argument("--output", required=True, type=Path, help="Path for the inflated checkpoint.")
+    parser.add_argument(
+        "--reset-vp-head-prior",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("P0", "P1", "P2"),
+        help="Reset vp_head weight to zero and bias to log([P0, P1, P2]) instead of preserving old VP logits.",
+    )
     args = parser.parse_args()
 
     checkpoint = torch.load(args.input, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict):
         raise ValueError("checkpoint must be a dict")
-    inflated = inflate_checkpoint_payload(checkpoint)
+    reset_prior = None if args.reset_vp_head_prior is None else tuple(float(value) for value in args.reset_vp_head_prior)
+    inflated = inflate_checkpoint_payload(checkpoint, reset_vp_head_prior=reset_prior)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(inflated, args.output)
     print(

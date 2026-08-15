@@ -261,6 +261,36 @@ def test_inflate_vp_final_position_head_checkpoint_loads_and_is_noop() -> None:
     loaded.load_state_dict(inflated["model_state_dict"])
 
 
+def test_inflate_vp_final_position_head_can_reset_vp_prior() -> None:
+    model = GoldRushPolicyNetwork(_small_config())
+    state = model.state_dict()
+    old_weight = torch.randn(3, model.config.actor_hidden)
+    old_bias = torch.randn(3)
+    checkpoint_state = dict(state)
+    checkpoint_state["vp_head.weight"] = old_weight.clone()
+    checkpoint_state["vp_head.bias"] = old_bias.clone()
+    checkpoint = {
+        "schema": "ppo_train_v1",
+        "feature_schema": "goldrush2_feature_v2",
+        "train_config": {"model": _fast_threshold_model_config()},
+        "model_state_dict": checkpoint_state,
+    }
+    prior = (0.92, 0.06, 0.02)
+
+    inflated = inflate_vp_head_checkpoint_payload(checkpoint, reset_vp_head_prior=prior)
+    inflated_weight = inflated["model_state_dict"]["vp_head.weight"]
+    inflated_bias = inflated["model_state_dict"]["vp_head.bias"]
+
+    assert torch.count_nonzero(inflated_weight).item() == 0
+    assert torch.allclose(inflated_bias, torch.log(torch.tensor(prior, dtype=inflated_bias.dtype)))
+    assert inflated["vp_head_inflation"]["weight_init"] == "zero"
+    assert inflated["vp_head_inflation"]["bias_init"] == "log_prior"
+    assert inflated["vp_head_inflation"]["vp_prior"] == list(prior)
+
+    loaded = GoldRushPolicyNetwork(_small_config())
+    loaded.load_state_dict(inflated["model_state_dict"])
+
+
 def test_inflate_vp_head_rejects_non_fast_threshold_schema() -> None:
     checkpoint = {
         "schema": "ppo_train_v1",
