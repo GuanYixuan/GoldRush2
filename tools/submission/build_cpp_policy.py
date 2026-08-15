@@ -11,6 +11,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 ORT_HEADER_SOURCE = ROOT / "policy_runtime" / "onnxruntime_c_api"
+FAST_OPTION_SOURCE = ROOT / "policy_runtime" / "src" / "fast_option.cpp"
+FAST_OPTION_HEADER_SOURCE = ROOT / "policy_runtime" / "include" / "policy_runtime" / "fast_option.h"
 SAFE_SO_BYTES = 15_500_000
 EXPECTED_ONNX_SCHEMA = "goldrush2_stochastic_actor_onnx_export_v1"
 EXPECTED_INPUTS = {
@@ -49,10 +51,13 @@ def main() -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     _copy_ort_headers(output_dir / "ort_include")
+    fast_core_one_tu = args.fast_runtime_mode == "release"
+    if fast_core_one_tu:
+        _copy_release_fast_core(output_dir)
     _write(output_dir / "model_bytes.h", _model_bytes_header(onnx_path.read_bytes()))
-    _write(output_dir / "player.cpp", _player_cpp(module_name))
+    _write(output_dir / "player.cpp", _player_cpp(module_name, fast_core_one_tu=fast_core_one_tu))
     fast_debug = 1 if args.fast_runtime_mode == "debug" else 0
-    _write(output_dir / "Makefile", _makefile(module_name, fast_debug=fast_debug))
+    _write(output_dir / "Makefile", _makefile(module_name, fast_debug=fast_debug, fast_core_one_tu=fast_core_one_tu))
 
     so_path = output_dir / f"{module_name}.so"
     if not args.no_build:
@@ -79,6 +84,7 @@ def main() -> None:
         "critic_exported": False,
         "fast_runtime_mode": args.fast_runtime_mode,
         "policy_runtime_fast_debug": fast_debug,
+        "fast_core_one_tu": fast_core_one_tu,
     }
     _write(output_dir / "assembly_metadata.json", json.dumps(metadata, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
     print(json.dumps(metadata, sort_keys=True))
@@ -96,6 +102,17 @@ def _copy_ort_headers(dst: Path) -> None:
     dst.mkdir(parents=True, exist_ok=True)
     for name in ("onnxruntime_c_api.h", "onnxruntime_error_code.h", "onnxruntime_ep_c_api.h"):
         shutil.copy2(ORT_HEADER_SOURCE / name, dst / name)
+
+
+def _copy_release_fast_core(output_dir: Path) -> None:
+    if not FAST_OPTION_SOURCE.exists():
+        raise FileNotFoundError(f"missing fast option source: {FAST_OPTION_SOURCE}")
+    if not FAST_OPTION_HEADER_SOURCE.exists():
+        raise FileNotFoundError(f"missing fast option header: {FAST_OPTION_HEADER_SOURCE}")
+    shutil.copy2(FAST_OPTION_SOURCE, output_dir / "fast_option_one_tu.cpp")
+    header_dir = output_dir / "policy_runtime"
+    header_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(FAST_OPTION_HEADER_SOURCE, header_dir / "fast_option.h")
 
 
 def _load_onnx_metadata(onnx_path: Path) -> dict[str, Any]:
@@ -144,18 +161,21 @@ def _model_bytes_header(data: bytes) -> str:
     return "\n".join(lines)
 
 
-def _makefile(module_name: str, *, fast_debug: int) -> str:
+def _makefile(module_name: str, *, fast_debug: int, fast_core_one_tu: bool) -> str:
+    include_flags = "-I. -I$(REPO_ROOT) -I$(REPO_ROOT)/policy_runtime/include" if fast_core_one_tu else "-I$(REPO_ROOT) -I$(REPO_ROOT)/policy_runtime/include -I."
+    src = "player.cpp $(REPO_ROOT)/policy_runtime/src/feature_extractor.cpp" if fast_core_one_tu else "player.cpp $(REPO_ROOT)/policy_runtime/src/feature_extractor.cpp $(REPO_ROOT)/policy_runtime/src/fast_option.cpp"
+    extra_deps = " fast_option_one_tu.cpp policy_runtime/fast_option.h" if fast_core_one_tu else ""
     return f"""CXX ?= g++
 REPO_ROOT := {ROOT}
-CXXFLAGS ?= -std=c++17 -O3 -fPIC -Wall -Wextra -DPOLICY_RUNTIME_FAST_DEBUG={fast_debug} -I$(REPO_ROOT) -I$(REPO_ROOT)/policy_runtime/include -I.
+CXXFLAGS ?= -std=c++17 -O3 -fPIC -Wall -Wextra -DPOLICY_RUNTIME_FAST_DEBUG={fast_debug} {include_flags}
 LDFLAGS ?= -shared
 LDLIBS ?= -ldl
 TARGET = {module_name}.so
-SRC = player.cpp $(REPO_ROOT)/policy_runtime/src/feature_extractor.cpp $(REPO_ROOT)/policy_runtime/src/fast_option.cpp
+SRC = {src}
 
 all: $(TARGET)
 
-$(TARGET): $(SRC) model_bytes.h
+$(TARGET): $(SRC) model_bytes.h{extra_deps}
 \t$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(SRC) $(LDLIBS)
 
 clean:
@@ -163,7 +183,8 @@ clean:
 """
 
 
-def _player_cpp(module_name: str) -> str:
+def _player_cpp(module_name: str, *, fast_core_one_tu: bool) -> str:
+    fast_core_include = '\n#include "fast_option_one_tu.cpp"\n' if fast_core_one_tu else ""
     return f"""#include "official_sdk/code/game_api.h"
 #include "policy_runtime/fast_option.h"
 #include "ort_include/onnxruntime_c_api.h"
@@ -177,6 +198,7 @@ def _player_cpp(module_name: str) -> str:
 #include <dlfcn.h>
 #include <exception>
 #include <random>
+{fast_core_include}
 
 namespace {{
 

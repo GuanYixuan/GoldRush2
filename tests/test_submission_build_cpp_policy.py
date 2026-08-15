@@ -39,8 +39,12 @@ def test_build_cpp_policy_no_build_generates_fast_runtime_release_assets() -> No
         metadata = json.loads((output_dir / "assembly_metadata.json").read_text(encoding="utf-8"))
 
         assert "-DPOLICY_RUNTIME_FAST_DEBUG=0" in makefile
-        assert "policy_runtime/src/fast_option.cpp" in makefile
+        assert "policy_runtime/src/fast_option.cpp" not in makefile
+        assert "fast_option_one_tu.cpp" in makefile
+        assert (output_dir / "fast_option_one_tu.cpp").exists()
+        assert (output_dir / "policy_runtime" / "fast_option.h").exists()
         assert '#include "policy_runtime/fast_option.h"' in player_cpp
+        assert '#include "fast_option_one_tu.cpp"' in player_cpp
         assert "policy_runtime::FastRuntimeState runtime_" in player_cpp
         assert "runtime_.try_fast_output(*input, &fast_output)" in player_cpp
         assert "runtime_.prepare_neural(*input)" in player_cpp
@@ -52,6 +56,7 @@ def test_build_cpp_policy_no_build_generates_fast_runtime_release_assets() -> No
         assert metadata["schema"] == "goldrush2_cpp_policy_assembly_v1"
         assert metadata["fast_runtime_mode"] == "release"
         assert metadata["policy_runtime_fast_debug"] == 0
+        assert metadata["fast_core_one_tu"] is True
         assert metadata["stochastic"] is True
         assert metadata["critic_exported"] is False
 
@@ -82,11 +87,17 @@ def test_build_cpp_policy_no_build_generates_debug_fast_macro_when_requested() -
         )
 
         makefile = (output_dir / "Makefile").read_text(encoding="utf-8")
+        player_cpp = (output_dir / "player.cpp").read_text(encoding="utf-8")
         metadata = json.loads((output_dir / "assembly_metadata.json").read_text(encoding="utf-8"))
 
         assert "-DPOLICY_RUNTIME_FAST_DEBUG=1" in makefile
+        assert "policy_runtime/src/fast_option.cpp" in makefile
+        assert "fast_option_one_tu.cpp" not in makefile
+        assert '#include "fast_option_one_tu.cpp"' not in player_cpp
+        assert not (output_dir / "fast_option_one_tu.cpp").exists()
         assert metadata["fast_runtime_mode"] == "debug"
         assert metadata["policy_runtime_fast_debug"] == 1
+        assert metadata["fast_core_one_tu"] is False
 
 
 def test_build_cpp_policy_requires_explicit_fast_runtime_mode() -> None:

@@ -90,7 +90,7 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
   --fast-runtime-mode release
 ```
 
-`--fast-runtime-mode` 必须显式填写。正式平台提交使用 `release`；训练、eval 或本地调试需要保留 fast debug 结果时使用 `debug`。
+`--fast-runtime-mode` 必须显式填写。正式平台提交使用 `release`；训练、eval 或本地调试需要保留 fast debug 结果时使用 `debug`。`release` 会将 fast core 复制到生成目录并由 `player.cpp` 同编译单元 include，以减少正式平台热路径的跨编译单元开销；`debug` 保持分编译单元，便于诊断。
 
 `smoke_cpp_policy.py` 在本地 simulator 中加载 `.so` 做短局 smoke，不会访问平台。
 

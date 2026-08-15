@@ -51,7 +51,7 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 
 `--fast-runtime-mode` 必须显式填写：
 
-- `release`：正式平台提交模式，`POLICY_RUNTIME_FAST_DEBUG=0`，关闭 fast debug result 热路径。
+- `release`：正式平台提交模式，`POLICY_RUNTIME_FAST_DEBUG=0`，关闭 fast debug result 热路径，并将 fast core 复制到生成目录由 `player.cpp` 同编译单元 include。
 - `debug`：本地训练/调试模式，`POLICY_RUNTIME_FAST_DEBUG=1`，保留完整 fast debug result。
 
 正式平台 self-play、挑战版本和最终提交均应使用 `release`。不要省略该参数；工具会 fail-fast。
