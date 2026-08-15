@@ -11,7 +11,7 @@ from policy_runtime import (
     simulate_known_gold_pickups,
     try_fast_gold_grab,
 )
-from simulator.observation.sdk import GameInput, NpcInfo
+from simulator.observation.sdk import GameInput, NpcInfo, RegionStat, Snapshot
 from simulator.types import Action, GameOutput
 
 
@@ -68,6 +68,19 @@ class FastOptionTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["target"], (8, 9))
         self.assertGreater(result["action_count"], 0)
+
+    def test_try_fast_gold_grab_uses_owner_role_for_second_scan(self) -> None:
+        game_input = _basic_input(round_index=1)
+        game_input.my_units = [(0, 0), (8, 8)]
+        game_input.grid[8][7] = 20
+
+        result = try_fast_gold_grab(game_input, 12)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["role"], 1)
+        self.assertEqual(result["target"], (8, 7))
+        self.assertEqual(result["output"]["k"], 0)
+        self.assertEqual(result["output"]["order"], 1)
 
     def test_simulate_known_gold_pickups_counts_path_and_bounce(self) -> None:
         game_input = _basic_input(round_index=0)
@@ -200,6 +213,12 @@ class FastOptionTests(unittest.TestCase):
         first = _feature_rich_input(round_index=0)
         fast_round = _feature_rich_input(round_index=1)
         fast_round.grid[7][8] = 20
+        fast_round.snapshot_valid = True
+        fast_round.snapshot = _snapshot(
+            gold=(20, 40, 60, 80, 100),
+            occupants=(1, 2, 3, 4, 5),
+            generated=(5, 10, 15, 20, 25),
+        )
         now = _feature_rich_input(round_index=2)
 
         first_runtime = runtime.prepare_neural(first)["actor_features"]
@@ -251,6 +270,27 @@ def _feature_rich_input(round_index: int) -> GameInput:
     game_input.visible_enemies = [(9, 9), (-1, -1)]
     game_input.visible_npcs = [NpcInfo(id=1, row=8, col=9), NpcInfo(id=2, row=8, col=9), NpcInfo(id=3, row=8, col=9)]
     return game_input
+
+
+def _snapshot(
+    *,
+    gold: tuple[int, int, int, int, int],
+    occupants: tuple[int, int, int, int, int],
+    generated: tuple[int, int, int, int, int],
+) -> Snapshot:
+    return Snapshot(
+        window_begin=0,
+        window_end=4,
+        regions=[
+            RegionStat(
+                id=idx + 1,
+                gold_generated=generated[idx],
+                gold_remaining=gold[idx],
+                occupants=occupants[idx],
+            )
+            for idx in range(5)
+        ],
+    )
 
 
 def _output_from_dict(payload: dict) -> GameOutput:

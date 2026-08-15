@@ -117,14 +117,8 @@ bool choose_target_padded(
         }
         const int row = u0r + kScan5x5RowDelta[i];
         const int col = u0c + kScan5x5ColDelta[i];
-        const int d0r = row - u0r;
-        const int d0c = col - u0c;
-        const int d1r = row - u1r;
-        const int d1c = col - u1c;
-        const int d0 = (d0r < 0 ? -d0r : d0r) + (d0c < 0 ? -d0c : d0c);
-        const int d1 = (d1r < 0 ? -d1r : d1r) + (d1c < 0 ? -d1c : d1c);
         *target = Position{row, col};
-        *role = d1 < d0 ? 1 : 0;
+        *role = 0;
         return true;
     }
 
@@ -136,14 +130,8 @@ bool choose_target_padded(
         }
         const int row = u1r + kScan5x5RowDelta[i];
         const int col = u1c + kScan5x5ColDelta[i];
-        const int d0r = row - u0r;
-        const int d0c = col - u0c;
-        const int d1r = row - u1r;
-        const int d1c = col - u1c;
-        const int d0 = (d0r < 0 ? -d0r : d0r) + (d0c < 0 ? -d0c : d0c);
-        const int d1 = (d1r < 0 ? -d1r : d1r) + (d1c < 0 ? -d1c : d1c);
         *target = Position{row, col};
-        *role = d1 < d0 ? 1 : 0;
+        *role = 1;
         return true;
     }
 
