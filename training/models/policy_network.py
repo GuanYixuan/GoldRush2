@@ -13,7 +13,8 @@ from simulator.types import Action, GameOutput
 FEATURE_SCHEMA = "goldrush2_feature_v2"
 SPATIAL_CHANNELS = 43
 SCALAR_FEATURES = 10
-ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1_fast_threshold_calibrated_base_v1"
+ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1_fast_threshold_calibrated_base_v1_vp_final_position_v1"
+FAST_THRESHOLD_ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1_fast_threshold_calibrated_base_v1"
 CANDIDATE_ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1"
 LEGACY_ACTION_HEAD_SCHEMA = "autoregressive_head_v1"
 CRITIC_FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v1"
@@ -322,7 +323,7 @@ class GoldRushPolicyNetwork(nn.Module):
             _activation(activation),
         )
         self.ko_head = nn.Linear(self.config.actor_hidden, KO_COUNT)
-        self.vp_head = nn.Linear(self.config.actor_hidden, 3)
+        self.vp_head = nn.Linear(self.config.actor_hidden + width * 2, 3)
 
         self.ko_embedding = nn.Embedding(KO_COUNT, embedding)
         self.role_embedding = nn.Embedding(2, embedding)
@@ -532,18 +533,11 @@ class GoldRushPolicyNetwork(nn.Module):
                 f"sample_uniforms must have shape Bx{MOVE_BUDGET + 3}, got {tuple(sample_uniforms.shape)}"
             )
         ko_logits = self.ko_head(encoded.actor_context)
-        vp_logits = self.vp_head(encoded.actor_context)
         ko, ko_logprob = _select_logits(
             ko_logits,
             deterministic=deterministic,
             generator=generator,
             sample_uniform=None if sample_uniforms is None else sample_uniforms[:, 0],
-        )
-        vp, vp_logprob = _select_logits(
-            vp_logits,
-            deterministic=deterministic,
-            generator=generator,
-            sample_uniform=None if sample_uniforms is None else sample_uniforms[:, 1],
         )
         decoded = self._decode(
             encoded,
@@ -552,6 +546,13 @@ class GoldRushPolicyNetwork(nn.Module):
             forced_actions=None,
             generator=generator,
             sample_uniforms=None if sample_uniforms is None else sample_uniforms[:, 2 : 2 + MOVE_BUDGET],
+        )
+        vp_logits = self._vp_logits(encoded, decoded)
+        vp, vp_logprob = _select_logits(
+            vp_logits,
+            deterministic=deterministic,
+            generator=generator,
+            sample_uniform=None if sample_uniforms is None else sample_uniforms[:, 1],
         )
         threshold = self._select_threshold(
             encoded,
@@ -660,10 +661,10 @@ class GoldRushPolicyNetwork(nn.Module):
         encoded = self._encode_actor(spatial_planes, scalars)
         ko = 2 * k.long() + order.long()
         ko_logits = self.ko_head(encoded.actor_context)
-        vp_logits = self.vp_head(encoded.actor_context)
         decoded = self._decode(encoded, ko, deterministic=False, forced_actions=actions.long())
         if not bool(decoded.all_forced_actions_valid.all().item()):
             raise ValueError("teacher-forced action is invalid under the autoregressive movement mask")
+        vp_logits = self._vp_logits(encoded, decoded)
 
         ko_logprob = _logprob(ko_logits, ko)
         vp_logprob = _logprob(vp_logits, vp.long())
@@ -767,6 +768,11 @@ class GoldRushPolicyNetwork(nn.Module):
 
     def _threshold_mu(self, encoded: _EncodedState, decoded: _DecodedActions, fast_scalars: Tensor) -> Tensor:
         return self._threshold_components(encoded, decoded, fast_scalars)[2]
+
+    def _vp_logits(self, encoded: _EncodedState, decoded: _DecodedActions) -> Tensor:
+        final_unit0_local = _gather_position(encoded.spatial_features, decoded.final_unit0_position)
+        final_unit1_local = _gather_position(encoded.spatial_features, decoded.final_unit1_position)
+        return self.vp_head(torch.cat((encoded.actor_context, final_unit0_local, final_unit1_local), dim=1))
 
     def _threshold_components(
         self,
@@ -1236,9 +1242,10 @@ def _validate_config(config: PolicyNetworkConfig) -> None:
         raise ValueError(
             f"critic_scalar_features must be {CRITIC_SCALAR_FEATURES}, got {config.critic_scalar_features}"
         )
-    if config.action_head_schema not in {ACTION_HEAD_SCHEMA, CANDIDATE_ACTION_HEAD_SCHEMA}:
+    if config.action_head_schema not in {ACTION_HEAD_SCHEMA, FAST_THRESHOLD_ACTION_HEAD_SCHEMA, CANDIDATE_ACTION_HEAD_SCHEMA}:
         raise ValueError(
-            f"action_head_schema must be {ACTION_HEAD_SCHEMA!r} or {CANDIDATE_ACTION_HEAD_SCHEMA!r}, "
+            "action_head_schema must be one of "
+            f"{ACTION_HEAD_SCHEMA!r}, {FAST_THRESHOLD_ACTION_HEAD_SCHEMA!r}, or {CANDIDATE_ACTION_HEAD_SCHEMA!r}; "
             f"got {config.action_head_schema!r}"
         )
     if config.fast_scalar_features != FAST_SCALAR_FEATURES:

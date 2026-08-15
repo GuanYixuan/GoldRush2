@@ -17,6 +17,7 @@ from training.models import (
     policy_action_to_game_output,
     safe_game_output,
 )
+from training.models.policy_network import _EncodedState
 from training.opponents import OpponentSpec
 from training.rl import BatchRolloutSampler, RuntimePolicyWrapper, SingleAgentEnvConfig
 
@@ -111,6 +112,47 @@ class PolicyNetworkTests(unittest.TestCase):
         base_logits = model.decoder_action_head(hidden)
 
         self.assertTrue(torch.allclose(logits, base_logits, atol=0.0, rtol=0.0))
+
+    def test_vp_head_can_condition_on_decoded_final_positions(self) -> None:
+        model = _small_model()
+        with torch.no_grad():
+            model.vp_head.weight.zero_()
+            model.vp_head.bias.zero_()
+            model.vp_head.weight[1, model.config.actor_hidden] = 1.0
+        spatial, scalars = _feature_tensors(batch_size=1, unit0=(1, 1), unit1=(15, 15))
+        encoded = model._encode(spatial, scalars)
+        controlled_features = torch.zeros_like(encoded.spatial_features)
+        controlled_features[:, 0, 1, 1] = 1.0
+        controlled_features[:, 0, 3, 3] = 3.0
+        controlled_encoded = _EncodedState(
+            spatial_features=controlled_features,
+            actor_context=torch.zeros_like(encoded.actor_context),
+            known_obstacles=encoded.known_obstacles,
+            unit0_position=encoded.unit0_position,
+            unit1_position=encoded.unit1_position,
+        )
+        stay_decoded = model._decode(
+            encoded,
+            torch.tensor([12]),
+            deterministic=False,
+            forced_actions=torch.tensor([[Action.STAY] * 6], dtype=torch.long),
+        )
+        move_decoded = model._decode(
+            encoded,
+            torch.tensor([12]),
+            deterministic=False,
+            forced_actions=torch.tensor(
+                [[Action.DOWN, Action.DOWN, Action.RIGHT, Action.RIGHT, Action.STAY, Action.STAY]],
+                dtype=torch.long,
+            ),
+        )
+
+        stay_logits = model._vp_logits(controlled_encoded, stay_decoded)
+        move_logits = model._vp_logits(controlled_encoded, move_decoded)
+
+        self.assertEqual(stay_decoded.final_unit0_position.item(), 1 * 17 + 1)
+        self.assertEqual(move_decoded.final_unit0_position.item(), 3 * 17 + 3)
+        self.assertGreater(move_logits[0, 1].item(), stay_logits[0, 1].item())
 
     def test_actor_and_critic_parameters_are_disjoint(self) -> None:
         model = _small_model()

@@ -10,6 +10,9 @@ from training.scripts.inflate_actor_feature_v2_checkpoint import inflate_checkpo
 from training.scripts.inflate_fast_threshold_head_checkpoint import (
     inflate_checkpoint_payload as inflate_fast_threshold_checkpoint_payload,
 )
+from training.scripts.inflate_vp_final_position_head_checkpoint import (
+    inflate_checkpoint_payload as inflate_vp_head_checkpoint_payload,
+)
 
 
 def test_inflate_bc_checkpoint_to_actor_feature_v2() -> None:
@@ -218,6 +221,61 @@ def test_inflate_fast_threshold_rejects_non_candidate_schema() -> None:
         raise AssertionError("expected ValueError")
 
 
+def test_inflate_vp_final_position_head_checkpoint_loads_and_is_noop() -> None:
+    model = GoldRushPolicyNetwork(_small_config())
+    state = model.state_dict()
+    old_weight = torch.randn(3, model.config.actor_hidden)
+    old_bias = torch.randn(3)
+    checkpoint_state = dict(state)
+    checkpoint_state["vp_head.weight"] = old_weight.clone()
+    checkpoint_state["vp_head.bias"] = old_bias.clone()
+    checkpoint = {
+        "schema": "ppo_train_v1",
+        "feature_schema": "goldrush2_feature_v2",
+        "train_config": {"model": _fast_threshold_model_config()},
+        "model_state_dict": checkpoint_state,
+        "optimizer_state_dict": {"state": {"stale": True}},
+    }
+
+    inflated = inflate_vp_head_checkpoint_payload(checkpoint)
+    inflated_weight = inflated["model_state_dict"]["vp_head.weight"]
+    inflated_bias = inflated["model_state_dict"]["vp_head.bias"]
+
+    assert (
+        inflated["train_config"]["model"]["action_head_schema"]
+        == "candidate_cell_residual_v1_fast_threshold_calibrated_base_v1_vp_final_position_v1"
+    )
+    assert "optimizer_state_dict" not in inflated
+    assert inflated["optimizer_state_dict_dropped_for_vp_head_inflation"] is True
+    assert tuple(inflated_weight.shape) == (3, model.config.actor_hidden + model.config.width * 2)
+    assert torch.equal(inflated_weight[:, : model.config.actor_hidden], old_weight)
+    assert torch.count_nonzero(inflated_weight[:, model.config.actor_hidden :]).item() == 0
+    assert torch.equal(inflated_bias, old_bias)
+    context = torch.randn(5, model.config.actor_hidden)
+    position_features = torch.randn(5, model.config.width * 2)
+    old_logits = torch.nn.functional.linear(context, old_weight, old_bias)
+    new_logits = torch.nn.functional.linear(torch.cat((context, position_features), dim=1), inflated_weight, inflated_bias)
+    assert torch.allclose(old_logits, new_logits, atol=0.0, rtol=0.0)
+
+    loaded = GoldRushPolicyNetwork(_small_config())
+    loaded.load_state_dict(inflated["model_state_dict"])
+
+
+def test_inflate_vp_head_rejects_non_fast_threshold_schema() -> None:
+    checkpoint = {
+        "schema": "ppo_train_v1",
+        "train_config": {"model": {**_fast_threshold_model_config(), "action_head_schema": "candidate_cell_residual_v1"}},
+        "model_state_dict": {},
+    }
+
+    try:
+        inflate_vp_head_checkpoint_payload(checkpoint)
+    except ValueError as exc:
+        assert "action_head_schema" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
+
+
 def _small_config() -> PolicyNetworkConfig:
     return PolicyNetworkConfig(
         width=16,
@@ -267,5 +325,32 @@ def _candidate_model_config() -> dict[str, object]:
         "decoder_hidden": config.decoder_hidden,
         "decoder_embedding": config.decoder_embedding,
         "action_head_schema": "candidate_cell_residual_v1",
+        "activation": config.activation,
+    }
+
+
+def _fast_threshold_model_config() -> dict[str, object]:
+    config = _small_config()
+    return {
+        "actor_spatial_channels": config.actor_spatial_channels,
+        "actor_scalar_features": config.actor_scalar_features,
+        "critic_spatial_channels": config.critic_spatial_channels,
+        "critic_scalar_features": config.critic_scalar_features,
+        "width": config.width,
+        "residual_blocks": config.residual_blocks,
+        "se_reduction": config.se_reduction,
+        "scalar_hidden": config.scalar_hidden,
+        "actor_hidden": config.actor_hidden,
+        "critic_hidden": config.critic_hidden,
+        "decoder_hidden": config.decoder_hidden,
+        "decoder_embedding": config.decoder_embedding,
+        "action_head_schema": "candidate_cell_residual_v1_fast_threshold_calibrated_base_v1",
+        "fast_scalar_features": config.fast_scalar_features,
+        "threshold_initial": config.threshold_initial,
+        "threshold_hidden": config.threshold_hidden,
+        "threshold_log_std_initial": config.threshold_log_std_initial,
+        "threshold_log_std_min": config.threshold_log_std_min,
+        "threshold_log_std_max": config.threshold_log_std_max,
+        "threshold_entropy_coef": config.threshold_entropy_coef,
         "activation": config.activation,
     }

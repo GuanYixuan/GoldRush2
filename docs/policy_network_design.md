@@ -11,7 +11,7 @@ actor_spatial_planes: B x 43 x 17 x 17
 actor_scalars: B x 10
 fast_scalars: B x 2
 actor_feature_schema: goldrush2_feature_v2
-action_head_schema: candidate_cell_residual_v1_fast_threshold_calibrated_base_v1
+action_head_schema: candidate_cell_residual_v1_fast_threshold_calibrated_base_v1_vp_final_position_v1
 ```
 
 critic 输入使用训练期 privileged critic feature：
@@ -391,6 +391,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - `ko/vp/decoder_action` 输出层使用 `std=0.01` 小初始化。
 - `candidate_action_head` 最后一层权重和 bias 为 0，使 residual 初始严格为 0。
 - `threshold_mlp` 最后一层权重和 bias 为 0，使 threshold residual 初始严格为 0；初始 threshold 由 calibrated base 决定。
+- `vp_head` 接收 `actor_context` 与动作解码后的两个己方角色 final-position local feature；从旧 fast-threshold checkpoint inflation 时，旧 `actor_context` 权重照抄，新增 final-position 列置 0。
 - `threshold_log_std` 初始约为 `-1.3`，训练时 clamp 到稳定范围。
 - `vp` bias 保持初始先验 `(0.90,0.07,0.03)`。
 - GRU input weight 使用 Xavier，hidden weight 使用 orthogonal，bias 为 0。
@@ -398,7 +399,10 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - value 输出层使用小初始化，使初始 value 接近 0。
 - BC 训练只优化 actor 参数。PPO 从 BC checkpoint 初始化时，只加载 actor 路径；critic encoder 与 critic head 按 privileged critic schema 随机初始化或从专门 critic checkpoint 加载，不能默认拷贝 actor encoder，因为 actor/critic 输入 channel 与语义不同。
 
-主线不维护隐式部分加载。fast threshold calibrated-base 接入时，显式 inflation 工具只支持当前稳定的 feature v2 / `action_head_schema=candidate_cell_residual_v1` checkpoint：补齐 fast threshold residual head，并在 critic value 第一层追加 2 个 `fast_scalars` 输入列且置零，使初始普通动作分布和旧 value 输出保持不变。
+主线不维护隐式部分加载。当前迁移链路是两步显式 inflation：
+
+1. fast threshold calibrated-base inflation 只支持 feature v2 / `action_head_schema=candidate_cell_residual_v1` checkpoint：补齐 fast threshold residual head，并在 critic value 第一层追加 2 个 `fast_scalars` 输入列且置零，使初始普通动作分布和旧 value 输出保持不变。输出 schema 为 `candidate_cell_residual_v1_fast_threshold_calibrated_base_v1`。
+2. VP final-position inflation 只支持 `candidate_cell_residual_v1_fast_threshold_calibrated_base_v1` checkpoint：把 `vp_head.weight` 从 `[3, actor_hidden]` 扩展到 `[3, actor_hidden + 2 * width]`，旧列照抄，新增 final-position 列置零，使初始 VP logits 完全不变。输出 schema 为当前主线 schema。
 
 旧 factorized checkpoint、旧 shared-encoder PPO checkpoint、缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint、旧 `candidate_cell_residual_v1_fast_threshold_v1` checkpoint，以及 schema 元信息缺失或不匹配的 checkpoint 均不兼容当前模型，应 fail-fast。inflation 后不继承旧 optimizer state。
 
@@ -414,6 +418,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - rollout 与 teacher forcing logprob 等价。
 - candidate-cell residual head 初始为零扰动；旧 head checkpoint inflation 后在同一随机种子或 deterministic 检查下官方动作完全等价。
 - fast threshold residual head 初始为零扰动；`p_fast_full_realization` 为 0.8 时 calibrated base 输出 `threshold_int=6`，为 0.3/0.6 时分别输出约 11/6。
+- VP final-position head inflation 后旧 `actor_context` logits 完全等价，新增 final-position 列为 0；teacher-forced actions 改变 final positions 时 VP logits 能条件化变化。
 - threshold raw teacher forcing logprob 等价，部署 stochastic 采样语义与训练分布一致。
 - PPO 双输入中 actor feature 只影响 policy/logprob，critic feature 只影响 value。
 - critic 四角色 gather 的 channel index、shape 和 P1/P2 视角。

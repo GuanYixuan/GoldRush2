@@ -52,10 +52,10 @@ class StochasticActorExport(nn.Module):
         encoded = self.model._encode_actor(actor_planes, actor_scalars)
 
         ko_logits = self.model.ko_head(encoded.actor_context)
-        vp_logits = self.model.vp_head(encoded.actor_context)
         ko = _gumbel_argmax(ko_logits, rand_ko)
-        vp = _gumbel_argmax(vp_logits, rand_vp)
         actions, final_unit0_position, final_unit1_position = self._decode(encoded, ko, rand_action)
+        vp_logits = self._vp_logits(encoded, final_unit0_position, final_unit1_position)
+        vp = _gumbel_argmax(vp_logits, rand_vp)
         threshold_mu_raw = self._threshold_mu(encoded, final_unit0_position, final_unit1_position, fast_scalars)
         threshold_log_std = self.model._threshold_log_std().expand_as(threshold_mu_raw)
         k = torch.div(ko, 2, rounding_mode="floor")
@@ -120,6 +120,16 @@ class StochasticActorExport(nn.Module):
             unit0_position,
             unit1_position,
         )
+
+    def _vp_logits(
+        self,
+        encoded: _EncodedState,
+        final_unit0_position: Tensor,
+        final_unit1_position: Tensor,
+    ) -> Tensor:
+        final_unit0_local = _gather_position(encoded.spatial_features, final_unit0_position)
+        final_unit1_local = _gather_position(encoded.spatial_features, final_unit1_position)
+        return self.model.vp_head(torch.cat((encoded.actor_context, final_unit0_local, final_unit1_local), dim=1))
 
     def _threshold_mu(
         self,
