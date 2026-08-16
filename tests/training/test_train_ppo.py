@@ -151,6 +151,29 @@ class TrainPpoTests(unittest.TestCase):
             self.assertTrue(torch.allclose(initial_stem[:, 38:43], final_stem[:, 38:43], atol=0.0, rtol=0.0) is False)
             self.assertTrue(torch.allclose(initial_stem[:, :38], final_stem[:, :38], atol=1.0e-8, rtol=0.0))
 
+    def test_critic_stem_actor_info_lr_only_updates_actor_info_stem_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = _smoke_config(
+                output_dir=Path(tmpdir),
+                total_updates=1,
+                critic_warmup_updates=1,
+                critic_learning_rate=1.0e-4,
+                critic_stem_actor_info_learning_rate=1.0e-3,
+            )
+            torch.manual_seed(config.seed)
+            initial_model = GoldRushPolicyNetwork(_small_model_config())
+            initial_stem = initial_model.critic_encoder.stem[0].weight.detach().clone()
+
+            result = run_training(config)
+
+            records = _read_jsonl(Path(tmpdir) / "metrics.jsonl")
+            self.assertAlmostEqual(float(records[0]["critic_lr"]), 1.0e-4)
+            self.assertAlmostEqual(float(records[0]["critic_stem_actor_info_lr"]), 1.0e-3)
+            model, _checkpoint = load_checkpoint(result.latest_checkpoint, model_config=_small_model_config())
+            final_stem = model.critic_encoder.stem[0].weight.detach().cpu()
+            self.assertTrue(torch.allclose(initial_stem[:, 26:39], final_stem[:, 26:39], atol=0.0, rtol=0.0) is False)
+            self.assertTrue(torch.allclose(initial_stem[:, :26], final_stem[:, :26], atol=1.0e-8, rtol=0.0))
+
     def test_fast_threshold_lr_uses_separate_optimizer_group(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _smoke_config(
@@ -497,6 +520,8 @@ def _smoke_config(
     stem_new_channel_learning_rate: float | None = None,
     fast_threshold_learning_rate: float | None = None,
     vp_head_learning_rate: float | None = None,
+    critic_learning_rate: float = 5.0e-4,
+    critic_stem_actor_info_learning_rate: float | None = None,
     freeze_ko_vp_heads: bool = False,
     fork_ppo_checkpoint: Path | None = None,
     rollout_seed_base: int | None = None,
@@ -535,6 +560,8 @@ def _smoke_config(
         stem_new_channel_learning_rate=stem_new_channel_learning_rate,
         fast_threshold_learning_rate=fast_threshold_learning_rate,
         vp_head_learning_rate=vp_head_learning_rate,
+        critic_learning_rate=critic_learning_rate,
+        critic_stem_actor_info_learning_rate=critic_stem_actor_info_learning_rate,
         critic_warmup_updates=critic_warmup_updates,
         actor_lr_ramp_updates=actor_lr_ramp_updates,
         freeze_ko_vp_heads=freeze_ko_vp_heads,
