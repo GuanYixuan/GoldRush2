@@ -127,6 +127,7 @@ def built_in_public_map_pool() -> MapPool:
             _template_from_cells(2, "official_map_2", _MAP2_OBSTACLES, _MAP2_SPECIAL),
             _template_from_cells(3, "official_map_3", _MAP3_OBSTACLES, _MAP3_SPECIAL),
             _template_from_static_rows(4, "official_map_4", _MAP4_STATIC_ROWS),
+            _template_from_static_rows(5, "official_map_5", _MAP5_STATIC_ROWS),
         )
     )
 
@@ -138,6 +139,9 @@ def built_in_training_map_pool() -> MapPool:
     map4_rot90 = rotate_template(public_templates[3], turns=1, map_key="official_map_4_rot90", name="official_map_4_rot90")
     map4_rot180 = rotate_template(public_templates[3], turns=2, map_key="official_map_4_rot180", name="official_map_4_rot180")
     map4_rot270 = rotate_template(public_templates[3], turns=3, map_key="official_map_4_rot270", name="official_map_4_rot270")
+    map5_rot90 = rotate_template(public_templates[4], turns=1, map_key="official_map_5_rot90", name="official_map_5_rot90")
+    map5_rot180 = rotate_template(public_templates[4], turns=2, map_key="official_map_5_rot180", name="official_map_5_rot180")
+    map5_rot270 = rotate_template(public_templates[4], turns=3, map_key="official_map_5_rot270", name="official_map_5_rot270")
     map101 = _template_from_cells(101, "training_axis_cross_101", _MAP101_OBSTACLES, _MAP101_SPECIAL)
     map101_rot90 = rotate_template(map101, turns=1, map_key="training_axis_cross_101_rot90", name="training_axis_cross_101_rot90")
     map111 = _template_from_cells(111, "training_left_right_111", _MAP111_OBSTACLES, _MAP111_SPECIAL)
@@ -159,6 +163,10 @@ def built_in_training_map_pool() -> MapPool:
             map4_rot90,
             map4_rot180,
             map4_rot270,
+            public_templates[4],
+            map5_rot90,
+            map5_rot180,
+            map5_rot270,
             map101,
             map101_rot90,
             map111,
@@ -547,6 +555,27 @@ _MAP4_STATIC_ROWS = (
     "00000000000000000",
     "01110111011101110",
     "00120010201002100",
+)
+
+
+_MAP5_STATIC_ROWS = (
+    "00002000000020000",
+    "11111110001111111",
+    "00000000000000000",
+    "00000000000000000",
+    "00000000100000000",
+    "00001010001010000",
+    "00100100000100100",
+    "20100001010000100",
+    "00101000000010102",
+    "20100001010000100",
+    "00100100000100100",
+    "00001010001010000",
+    "00000000100000000",
+    "00000000000000000",
+    "00000000000000000",
+    "11111110001111111",
+    "00002000000020000",
 )
 
 
