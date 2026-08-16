@@ -273,7 +273,7 @@ own_unit1_mask:      channel 25
 
 NPC 不阻挡玩家。可见敌人的执行时位置不确定，不进入 hard mask。被确定阻挡的动作 logits 被 mask；`STAY` 始终提供合法等待。采样动作后只更新当前执行角色的位置，后一步继续使用更新后的两个位置。
 
-这里模拟的是当前 obstacle belief，不是真实地图保证。feature v1 的对称障碍推断无法与直接观测区分；该风险由 feature schema 本身决定。
+这里模拟的是当前 obstacle belief，不是真实地图保证。障碍推断与直接观测的区分能力由 actor feature schema 本身决定。
 
 实现约束：
 
@@ -366,7 +366,7 @@ multiprocess rollout 的 worker 负责提取两套 feature：
 ```text
 policy_runtime.FeatureExtractor.observe(GameInput) -> actor feature
 Fast Full-Realization Belief runtime state -> fast_scalars
-extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent_player_id) -> critic feature
+extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent_player_id, actor_features) -> critic feature
 ```
 
 主进程/GPU 只负责批量推理。shared memory 与 PPO batch 保存两套 feature，shape 固定为：
@@ -401,10 +401,11 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - value 输出层使用小初始化，使初始 value 接近 0。
 - BC 训练只优化 actor 参数。PPO 从 BC checkpoint 初始化时，只加载 actor 路径；critic encoder 与 critic head 按 privileged critic schema 随机初始化或从专门 critic checkpoint 加载，不能默认拷贝 actor encoder，因为 actor/critic 输入 channel 与语义不同。
 
-主线不维护隐式部分加载。当前迁移链路是两步显式 inflation：
+主线不维护隐式部分加载。当前迁移链路由显式 inflation 工具承担：
 
 1. fast threshold calibrated-base inflation 只支持 feature v2 / `action_head_schema=candidate_cell_residual_v1` checkpoint：补齐 fast threshold residual head，并在 critic value 第一层追加 2 个 `fast_scalars` 输入列且置零，使初始普通动作分布和旧 value 输出保持不变。输出 schema 为 `candidate_cell_residual_v1_fast_threshold_calibrated_base_v1`。
 2. VP final-position inflation 只支持 `candidate_cell_residual_v1_fast_threshold_calibrated_base_v1` checkpoint：默认把 `vp_head.weight` 从 `[3, actor_hidden]` 扩展到 `[3, actor_hidden + 2 * width]`，旧列照抄，新增 final-position 列置零，使初始 VP logits 完全不变。若旧 VP head 已饱和到几乎永不买视野，可显式使用 `--reset-vp-head-prior P0 P1 P2`，将 `vp_head.weight` 全置 0、bias 设为 `log([P0, P1, P2])`，用非零 VP 先验换取探索样本。输出 schema 为当前主线 schema。
+3. privileged critic feature v2 inflation 应在动作头 schema 已经升级到当前主线后执行，只支持 critic feature v1 shape 的 PPO checkpoint：把 critic stem 从 `26 -> 39`、critic scalar tower 从 `17 -> 20`，旧输入权重照抄，新增 actor-info 通道/列置零，使初始 value 与旧 critic 完全一致。输出 `critic_feature_schema=goldrush2_privileged_critic_feature_v2`。
 
 旧 factorized checkpoint、旧 shared-encoder PPO checkpoint、缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint、旧 `candidate_cell_residual_v1_fast_threshold_v1` checkpoint，以及 schema 元信息缺失或不匹配的 checkpoint 均不兼容当前模型，应 fail-fast。inflation 后不继承旧 optimizer state。
 

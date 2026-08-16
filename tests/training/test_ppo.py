@@ -117,8 +117,8 @@ class PpoTests(unittest.TestCase):
         self.assertEqual(batch.episode_ids[1], "pair-000000-seed-5-second")
         self.assertEqual(tuple(batch.spatial_planes.shape), (2, 43, 17, 17))
         self.assertEqual(tuple(batch.fast_scalars.shape), (2, 2))
-        self.assertEqual(tuple(batch.critic_planes.shape), (2, 26, 17, 17))
-        self.assertEqual(tuple(batch.critic_scalars.shape), (2, 17))
+        self.assertEqual(tuple(batch.critic_planes.shape), (2, 39, 17, 17))
+        self.assertEqual(tuple(batch.critic_scalars.shape), (2, 20))
         self.assertTrue(torch.allclose(batch.fast_scalars, torch.tensor(INITIAL_FAST_SCALARS).expand(2, -1)))
         self.assertTrue(torch.isfinite(batch.threshold_raw).all().item())
         self.assertTrue(((batch.threshold_int >= 4) & (batch.threshold_int <= 30)).all().item())
@@ -190,8 +190,8 @@ def _feature_tensors(*, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _critic_feature_tensors(*, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-    spatial = torch.zeros(batch_size, 26, 17, 17)
-    scalars = torch.zeros(batch_size, 17)
+    spatial = torch.zeros(batch_size, 39, 17, 17)
+    scalars = torch.zeros(batch_size, 20)
     spatial[:, 9, 0, 0] = 1.0
     spatial[:, 10, 16, 16] = 1.0
     spatial[:, 11, 0, 16] = 1.0

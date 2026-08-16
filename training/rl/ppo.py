@@ -407,7 +407,7 @@ def _collect_one_ppo_episode(
             raise SimulatorRuleError(f"unexpected feature schema: {features['feature_schema']!r}")
         spatial_planes = torch.as_tensor(features["planes"], dtype=torch.float32, device=device).unsqueeze(0)
         scalars = torch.as_tensor(features["scalars"], dtype=torch.float32, device=device).unsqueeze(0)
-        critic_features = _extract_critic_features(env, agent_player_id)
+        critic_features = _extract_critic_features(env, agent_player_id, features)
         critic_planes = torch.as_tensor(critic_features["planes"], dtype=torch.float32, device=device).unsqueeze(0)
         critic_scalars = torch.as_tensor(critic_features["scalars"], dtype=torch.float32, device=device).unsqueeze(0)
         fast_scalars = torch.tensor(INITIAL_FAST_SCALARS, dtype=torch.float32, device=device).unsqueeze(0)
@@ -453,7 +453,7 @@ def _collect_one_ppo_episode(
     return int(reset.info["map_id"]), reset.info["map_key"], reset.info["opponent_spec"]
 
 
-def _extract_critic_features(env: SingleAgentGoldRushEnv, agent_player_id: int) -> dict[str, object]:
+def _extract_critic_features(env: SingleAgentGoldRushEnv, agent_player_id: int, actor_features: dict[str, object]) -> dict[str, object]:
     if env.round_env is None:
         raise SimulatorRuleError("single-agent env has no round_env while extracting critic features")
     if env.round_env.state is None or env.round_env.template is None or env.round_env.outer_state is None:
@@ -463,6 +463,7 @@ def _extract_critic_features(env: SingleAgentGoldRushEnv, agent_player_id: int) 
         template=env.round_env.template,
         outer_state=env.round_env.outer_state,
         agent_player_id=agent_player_id,
+        actor_features=actor_features,
         round_count=env.round_env.config.episode.rules.round_count,
     )
 

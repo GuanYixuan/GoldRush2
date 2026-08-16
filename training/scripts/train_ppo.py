@@ -16,7 +16,7 @@ from simulator.errors import SimulatorRuleError
 from simulator.mechanisms.maps import SpawnConfig
 from training.bc.schema import BC_CHECKPOINT_SCHEMA, FEATURE_SCHEMA as BC_FEATURE_SCHEMA
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
-from training.models.policy_network import ACTION_HEAD_SCHEMA
+from training.models.policy_network import ACTION_HEAD_SCHEMA, CRITIC_FEATURE_SCHEMA, FEATURE_SCHEMA
 from training.opponents import OpponentSpec
 from training.rl import (
     BatchRolloutSampler,
@@ -899,6 +899,8 @@ def _save_checkpoint(
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     payload = {
         "schema": "ppo_train_v1",
+        "feature_schema": FEATURE_SCHEMA,
+        "critic_feature_schema": CRITIC_FEATURE_SCHEMA,
         "update_index": update_index,
         "optimizer_phase": optimizer_phase,
         "init_source": init_source,

@@ -250,6 +250,7 @@ v2 改变 critic input shape，但前 26 个 plane 和前 17 个 scalar 与 v1 �
 - critic 参数从 v1 checkpoint 零扰动 inflation 到 v2。
 - optimizer state 不继承。
 - 不允许隐式部分加载；schema 不匹配时必须通过显式 inflation 工具。
+- critic v2 inflation 工具只处理 critic 输入 shape 迁移，要求 action head schema 已经是当前主线版本；更旧动作头 checkpoint 应先走对应动作头 inflation。
 - inflation 后 checkpoint metadata 必须包含：
 
 ```text

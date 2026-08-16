@@ -17,9 +17,9 @@ ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1_fast_threshold_calibrated_base_
 FAST_THRESHOLD_ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1_fast_threshold_calibrated_base_v1"
 CANDIDATE_ACTION_HEAD_SCHEMA = "candidate_cell_residual_v1"
 LEGACY_ACTION_HEAD_SCHEMA = "autoregressive_head_v1"
-CRITIC_FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v1"
-CRITIC_SPATIAL_CHANNELS = 26
-CRITIC_SCALAR_FEATURES = 17
+CRITIC_FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v2"
+CRITIC_SPATIAL_CHANNELS = 39
+CRITIC_SCALAR_FEATURES = 20
 FAST_SCALAR_FEATURES = 2
 INITIAL_FAST_SCALARS = (0.8, 0.25)
 GRID_SIZE = 17
@@ -980,7 +980,9 @@ class GoldRushPolicyNetwork(nn.Module):
         if critic_planes.ndim != 4:
             raise ValueError(f"critic_planes must have shape BxCx17x17, got {tuple(critic_planes.shape)}")
         if critic_scalars.ndim != 2:
-            raise ValueError(f"critic_scalars must have shape Bx17, got {tuple(critic_scalars.shape)}")
+            raise ValueError(
+                f"critic_scalars must have shape Bx{self.config.critic_scalar_features}, got {tuple(critic_scalars.shape)}"
+            )
         if critic_planes.shape[1:] != (self.config.critic_spatial_channels, GRID_SIZE, GRID_SIZE):
             raise ValueError(
                 "critic_planes must have shape "

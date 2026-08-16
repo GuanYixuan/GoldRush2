@@ -47,9 +47,9 @@ class PolicyNetworkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "scalars must have 10 features"):
             model.act_actor_only(spatial, scalars[:, :9])
         with self.assertRaisesRegex(ValueError, "critic_planes must have shape"):
-            model.act(spatial, scalars, critic_spatial[:, :25], critic_scalars)
-        with self.assertRaisesRegex(ValueError, "critic_scalars must have 17 features"):
-            model.act(spatial, scalars, critic_spatial, critic_scalars[:, :16])
+            model.act(spatial, scalars, critic_spatial[:, :38], critic_scalars)
+        with self.assertRaisesRegex(ValueError, "critic_scalars must have 20 features"):
+            model.act(spatial, scalars, critic_spatial, critic_scalars[:, :19])
         with self.assertRaisesRegex(ValueError, "actor/critic batch size mismatch"):
             model.act(spatial, scalars, *_critic_feature_tensors(batch_size=2))
 
@@ -521,8 +521,8 @@ def _feature_tensors(
 def _critic_feature_tensors(
     *, batch_size: int, unit0: tuple[int, int] = (1, 1), unit1: tuple[int, int] = (15, 15)
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    spatial = torch.zeros(batch_size, 26, 17, 17)
-    scalars = torch.zeros(batch_size, 17)
+    spatial = torch.zeros(batch_size, 39, 17, 17)
+    scalars = torch.zeros(batch_size, 20)
     spatial[:, 9, unit0[0], unit0[1]] = 1.0
     spatial[:, 10, unit1[0], unit1[1]] = 1.0
     spatial[:, 11, 2, 14] = 1.0

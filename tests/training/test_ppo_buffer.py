@@ -15,8 +15,8 @@ class PpoBufferTests(unittest.TestCase):
         self.assertEqual(tuple(batch.spatial_planes.shape), (1, 43, 17, 17))
         self.assertEqual(tuple(batch.scalars.shape), (1, 10))
         self.assertEqual(tuple(batch.fast_scalars.shape), (1, 2))
-        self.assertEqual(tuple(batch.critic_planes.shape), (1, 26, 17, 17))
-        self.assertEqual(tuple(batch.critic_scalars.shape), (1, 17))
+        self.assertEqual(tuple(batch.critic_planes.shape), (1, 39, 17, 17))
+        self.assertEqual(tuple(batch.critic_scalars.shape), (1, 20))
         self.assertEqual(tuple(batch.actions.shape), (1, 6))
         self.assertEqual(batch.episode_ids, ("ep-0",))
         self.assertEqual(batch.map_ids, (1,))
@@ -26,8 +26,8 @@ class PpoBufferTests(unittest.TestCase):
             spatial_planes=torch.zeros(2, 43, 17, 17),
             scalars=torch.zeros(2, 10),
             fast_scalars=torch.zeros(2, 2),
-            critic_planes=torch.zeros(2, 26, 17, 17),
-            critic_scalars=torch.zeros(2, 17),
+            critic_planes=torch.zeros(2, 39, 17, 17),
+            critic_scalars=torch.zeros(2, 20),
             actions=torch.tensor([[4, 4, 4, 4, 4, 4], [0, 1, 2, 3, 4, 0]]),
             k=torch.tensor([3, 2]),
             order=torch.tensor([0, 1]),
@@ -61,8 +61,8 @@ class PpoBufferTests(unittest.TestCase):
             spatial_planes=torch.zeros(3, 43, 17, 17),
             scalars=torch.zeros(3, 10),
             fast_scalars=torch.zeros(3, 2),
-            critic_planes=torch.zeros(3, 26, 17, 17),
-            critic_scalars=torch.zeros(3, 17),
+            critic_planes=torch.zeros(3, 39, 17, 17),
+            critic_scalars=torch.zeros(3, 20),
             actions=torch.zeros(3, 6),
             k=torch.zeros(3),
             order=torch.zeros(3),
@@ -106,8 +106,8 @@ class PpoBufferTests(unittest.TestCase):
             spatial_planes=torch.zeros(2, 43, 17, 17),
             scalars=torch.zeros(2, 10),
             fast_scalars=torch.zeros(2, 2),
-            critic_planes=torch.zeros(2, 26, 17, 17),
-            critic_scalars=torch.zeros(2, 17),
+            critic_planes=torch.zeros(2, 39, 17, 17),
+            critic_scalars=torch.zeros(2, 20),
             actions=torch.zeros(2, 6),
             k=torch.zeros(2),
             order=torch.zeros(2),
@@ -170,7 +170,7 @@ class PpoBufferTests(unittest.TestCase):
 
         self.assertEqual([minibatch.transition_count for minibatch in minibatches], [2, 2, 1])
         self.assertEqual(tuple(minibatches[0].spatial_planes.shape), (2, 43, 17, 17))
-        self.assertEqual(tuple(minibatches[0].critic_planes.shape), (2, 26, 17, 17))
+        self.assertEqual(tuple(minibatches[0].critic_planes.shape), (2, 39, 17, 17))
 
 
 def _transition(
@@ -184,8 +184,8 @@ def _transition(
         spatial_planes=torch.zeros(43, 17, 17),
         scalars=torch.zeros(10),
         fast_scalars=torch.tensor([0.8, 0.25]),
-        critic_planes=torch.zeros(26, 17, 17),
-        critic_scalars=torch.zeros(17),
+        critic_planes=torch.zeros(39, 17, 17),
+        critic_scalars=torch.zeros(20),
         actions=torch.tensor([4, 4, 4, 4, 4, 4]),
         k=torch.tensor(3),
         order=torch.tensor(0),

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import torch
 
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
@@ -12,6 +14,9 @@ from training.scripts.inflate_fast_threshold_head_checkpoint import (
 )
 from training.scripts.inflate_vp_final_position_head_checkpoint import (
     inflate_checkpoint_payload as inflate_vp_head_checkpoint_payload,
+)
+from training.scripts.inflate_privileged_critic_feature_v2_checkpoint import (
+    inflate_checkpoint_payload as inflate_critic_feature_checkpoint_payload,
 )
 
 
@@ -165,8 +170,8 @@ def test_inflate_fast_threshold_checkpoint_loads_and_preserves_old_value() -> No
         "model_state_dict": old_state,
         "optimizer_state_dict": {"state": {"stale": True}},
     }
-    critic_planes = torch.zeros(2, 26, 17, 17)
-    critic_scalars = torch.zeros(2, 17)
+    critic_planes = torch.zeros(2, 39, 17, 17)
+    critic_scalars = torch.zeros(2, 20)
     critic_planes[:, 9, 1, 1] = 1.0
     critic_planes[:, 10, 15, 15] = 1.0
     critic_planes[:, 11, 2, 14] = 1.0
@@ -204,6 +209,65 @@ def test_inflate_fast_threshold_checkpoint_loads_and_preserves_old_value() -> No
     assert "threshold_log_std" in inflated["model_state_dict"]
     assert inflated["model_state_dict"]["critic_mlp.0.weight"].shape[1] == old_state["critic_mlp.0.weight"].shape[1] + 2
     assert torch.allclose(old_value, new_value, atol=1e-7, rtol=1e-7)
+
+
+def test_inflate_privileged_critic_feature_v2_preserves_old_value() -> None:
+    old_config = _small_v1_critic_config()
+    reference_model = GoldRushPolicyNetwork(_small_config())
+    reference_state = {
+        key: value.clone()
+        for key, value in reference_model.state_dict().items()
+    }
+    reference_state["critic_encoder.stem.0.weight"][:, 26:] = 0.0
+    reference_state["critic_encoder.scalar_tower.0.weight"][:, 17:] = 0.0
+    reference_model.load_state_dict(reference_state)
+    checkpoint_state = {
+        key: value.clone()
+        for key, value in reference_state.items()
+    }
+    checkpoint_state["critic_encoder.stem.0.weight"] = checkpoint_state["critic_encoder.stem.0.weight"][:, :26].clone()
+    checkpoint_state["critic_encoder.scalar_tower.0.weight"] = checkpoint_state["critic_encoder.scalar_tower.0.weight"][:, :17].clone()
+    checkpoint = {
+        "schema": "ppo_train_v1",
+        "feature_schema": "goldrush2_feature_v2",
+        "critic_feature_schema": "goldrush2_privileged_critic_feature_v1",
+        "train_config": {"model": asdict(old_config)},
+        "model_state_dict": checkpoint_state,
+        "optimizer_state_dict": {"state": {"stale": True}},
+    }
+    old_critic_planes = torch.zeros(2, 26, 17, 17)
+    old_critic_scalars = torch.zeros(2, 17)
+    old_critic_planes[:, 9, 1, 1] = 1.0
+    old_critic_planes[:, 10, 15, 15] = 1.0
+    old_critic_planes[:, 11, 2, 14] = 1.0
+    old_critic_planes[:, 12, 14, 2] = 1.0
+    fast_scalars = torch.zeros(2, 2)
+
+    inflated = inflate_critic_feature_checkpoint_payload(checkpoint)
+    model = GoldRushPolicyNetwork(_small_config())
+    model.load_state_dict(inflated["model_state_dict"])
+    new_critic_planes = torch.randn(2, 39, 17, 17)
+    new_critic_scalars = torch.randn(2, 20)
+    new_critic_planes[:, :26] = old_critic_planes
+    new_critic_scalars[:, :17] = old_critic_scalars
+    with torch.no_grad():
+        old_value = reference_model._critic_value(new_critic_planes, new_critic_scalars, fast_scalars)
+        new_value = model._critic_value(new_critic_planes, new_critic_scalars, fast_scalars)
+
+    stem_weight = inflated["model_state_dict"]["critic_encoder.stem.0.weight"]
+    scalar_weight = inflated["model_state_dict"]["critic_encoder.scalar_tower.0.weight"]
+    assert inflated["train_config"]["model"]["critic_spatial_channels"] == 39
+    assert inflated["train_config"]["model"]["critic_scalar_features"] == 20
+    assert inflated["critic_feature_schema"] == "goldrush2_privileged_critic_feature_v2"
+    assert inflated["inflated_from_critic_feature_schema"] == "goldrush2_privileged_critic_feature_v1"
+    assert inflated["critic_inflation"] == "v1_to_v2_zero_actor_info"
+    assert "optimizer_state_dict" not in inflated
+    assert inflated["optimizer_state_dict_dropped_for_critic_feature_inflation"] is True
+    assert torch.equal(stem_weight[:, :26], checkpoint["model_state_dict"]["critic_encoder.stem.0.weight"])
+    assert torch.count_nonzero(stem_weight[:, 26:]).item() == 0
+    assert torch.equal(scalar_weight[:, :17], checkpoint["model_state_dict"]["critic_encoder.scalar_tower.0.weight"])
+    assert torch.count_nonzero(scalar_weight[:, 17:]).item() == 0
+    assert torch.allclose(old_value, new_value, atol=1e-6, rtol=1e-6)
 
 
 def test_inflate_fast_threshold_rejects_non_candidate_schema() -> None:
@@ -316,6 +380,33 @@ def _small_config() -> PolicyNetworkConfig:
         critic_hidden=(32, 16),
         decoder_hidden=16,
         decoder_embedding=4,
+    )
+
+
+def _small_v1_critic_config() -> PolicyNetworkConfig:
+    base = _small_config()
+    return PolicyNetworkConfig(
+        actor_spatial_channels=base.actor_spatial_channels,
+        actor_scalar_features=base.actor_scalar_features,
+        critic_spatial_channels=26,
+        critic_scalar_features=17,
+        width=base.width,
+        residual_blocks=base.residual_blocks,
+        se_reduction=base.se_reduction,
+        scalar_hidden=base.scalar_hidden,
+        actor_hidden=base.actor_hidden,
+        critic_hidden=base.critic_hidden,
+        decoder_hidden=base.decoder_hidden,
+        decoder_embedding=base.decoder_embedding,
+        action_head_schema=base.action_head_schema,
+        fast_scalar_features=base.fast_scalar_features,
+        threshold_initial=base.threshold_initial,
+        threshold_hidden=base.threshold_hidden,
+        threshold_log_std_initial=base.threshold_log_std_initial,
+        threshold_log_std_min=base.threshold_log_std_min,
+        threshold_log_std_max=base.threshold_log_std_max,
+        threshold_entropy_coef=base.threshold_entropy_coef,
+        activation=base.activation,
     )
 
 
