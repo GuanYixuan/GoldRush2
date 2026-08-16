@@ -100,12 +100,14 @@ class RoundStepEnv:
         self.pending_bomb_refresh_event: BombRefreshEvent | None = None
         self.terminated = False
 
-    def reset(self, *, seed: int | None = None, map_id: int | None = None) -> dict[int, GameInput]:
+    def reset(self, *, seed: int | None = None, map_id: int | None = None, map_key: str | None = None) -> dict[int, GameInput]:
         episode = self.config.episode
         if seed is not None:
             episode = replace(episode, seed=seed)
         if map_id is not None:
             episode = replace(episode, map_id=map_id)
+        if map_key is not None:
+            episode = replace(episode, map_key=map_key)
         self.config = replace(self.config, episode=episode)
 
         rng_streams = make_simulator_rng_streams(episode.seed)
@@ -114,7 +116,7 @@ class RoundStepEnv:
         self.bomb_rng = rng_streams.bomb
         self.center_gold_rng = rng_streams.center_gold
         self.outer_gold_rng = rng_streams.outer_gold
-        self.template = _select_map(self.map_pool, episode.map_id, self.rng)
+        self.template = _select_map(self.map_pool, episode.map_id, episode.map_key, self.rng)
         self.state = build_initial_state(self.template, self.spawn)
         self.snapshot_accumulator = SnapshotAccumulator(episode.rules)
         self.visible_snapshot = None
@@ -238,7 +240,9 @@ class RoundStepEnv:
             raise SimulatorRuleError("round-step environment is not reset")
 
 
-def _select_map(map_pool: MapPool, map_id: int | None, rng: random.Random) -> MapTemplate:
+def _select_map(map_pool: MapPool, map_id: int | None, map_key: str | None, rng: random.Random) -> MapTemplate:
+    if map_key is not None:
+        return map_pool.get_by_key(map_key)
     if map_id is None:
         return map_pool.sample(rng)
     return map_pool.get(map_id)

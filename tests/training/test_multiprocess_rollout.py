@@ -83,10 +83,13 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertIn("events", batch.infos[0])
         self.assertIn("game_result", batch.infos[0])
         self.assertIn("latent_first_rate", batch.infos[0])
+        self.assertIn("map_key", batch.infos[0])
         self.assertIn("scores", batch.infos[1])
         self.assertIn("events", batch.infos[1])
         self.assertIn("game_result", batch.infos[1])
         self.assertIn("latent_first_rate", batch.infos[1])
+        self.assertIn("map_key", batch.infos[1])
+        self.assertEqual(batch.infos[0]["map_key"], batch.infos[1]["map_key"])
         self.assertEqual(stats["rollout_mode"], "multiprocess")
         self.assertEqual(stats["first_started"], 1)
         self.assertEqual(stats["second_started"], 1)
@@ -205,7 +208,7 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertEqual(batch.transition_count, 4)
         self.assertEqual(
             set(batch.infos[0]),
-            {"first_player_id", "agent_decision_mode", "latent_first_rate", "fast_order_sampled", "agent_first"},
+            {"first_player_id", "agent_decision_mode", "latent_first_rate", "fast_order_sampled", "agent_first", "map_key"},
         )
         self.assertEqual(batch.infos[0]["agent_decision_mode"], "neural")
         self.assertFalse(batch.infos[0]["fast_order_sampled"])
@@ -215,7 +218,7 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertIn("latent_first_rate", batch.infos[1])
         self.assertEqual(
             set(batch.infos[2]),
-            {"first_player_id", "agent_decision_mode", "latent_first_rate", "fast_order_sampled", "agent_first"},
+            {"first_player_id", "agent_decision_mode", "latent_first_rate", "fast_order_sampled", "agent_first", "map_key"},
         )
         self.assertIn("scores", batch.infos[3])
         self.assertIn("events", batch.infos[3])
@@ -463,12 +466,13 @@ class _FastFoldEnv:
         *,
         seed: int | None = None,
         map_id: int | None = None,
+        map_key: str | None = None,
         agent_player_id: int | None = None,
         opponent_spec: OpponentSpec | None = None,
     ) -> ResetResult:
         return ResetResult(
             observation=_fake_observation(0),
-            info={"map_id": 1, "opponent_spec": opponent_spec or _stay_opponent_spec()},
+            info={"map_id": 1, "map_key": map_key or "official_map_1", "opponent_spec": opponent_spec or _stay_opponent_spec()},
         )
 
     def step(self, agent_output: GameOutput, *, agent_decision_mode: str = "neural") -> StepResult:

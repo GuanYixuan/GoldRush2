@@ -27,6 +27,7 @@ class SimulatorReplayRecorder:
             source={
                 "seed": seed,
                 "map_id": map_template.map_id,
+                "map_key": map_template.map_key,
                 "map_name": map_template.name,
                 "mechanisms": mechanisms or {},
             },

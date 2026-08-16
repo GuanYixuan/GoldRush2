@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from simulator.errors import SimulatorRuleError
+from simulator.mechanisms.maps import MapPool
 from training.models import GoldRushPolicyNetwork, policy_action_is_finite
 from training.opponents import OpponentSpec
 
@@ -30,8 +31,9 @@ def scheduler_loop(
     config: MultiprocessRolloutConfig,
     feature_shared: FeatureSharedMemory,
     rollout_id: str,
+    map_pool: MapPool | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    pending_tasks = initial_tasks(seed=seed, pair_count=pair_count, map_ids=map_ids, opponent_specs=opponent_specs)
+    pending_tasks = initial_tasks(seed=seed, pair_count=pair_count, map_ids=map_ids, opponent_specs=opponent_specs, map_pool=map_pool)
     idle_workers = list(range(len(command_queues)))
     active_tasks: dict[str, EpisodeTask] = {}
     payloads: list[dict[str, Any]] = []
@@ -107,6 +109,7 @@ def scheduler_loop(
                                 agent_player_id=2,
                                 opponent_spec=msg["opponent_spec"],
                                 transition_slot=task.transition_slot + 1,
+                                map_key=msg.get("map_key"),
                             )
                         )
                 else:

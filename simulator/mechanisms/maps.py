@@ -21,18 +21,28 @@ class MapTemplate:
     static_grid: StaticGrid
     obstacles: frozenset[Position]
     special_cells: frozenset[Position]
+    map_key: str = ""
 
     @staticmethod
-    def from_static_grid(map_id: int, name: str, static_grid: Sequence[Sequence[int]]) -> MapTemplate:
+    def from_static_grid(map_id: int, name: str, static_grid: Sequence[Sequence[int]], *, map_key: str | None = None) -> MapTemplate:
         grid = _normalize_static_grid(static_grid)
         obstacles = frozenset(Position(row, col) for row in range(GRID_SIZE) for col in range(GRID_SIZE) if grid[row][col] == STATIC_OBSTACLE)
         special_cells = frozenset(
             Position(row, col) for row in range(GRID_SIZE) for col in range(GRID_SIZE) if grid[row][col] == STATIC_SPECIAL_NON_BLOCKING
         )
-        return MapTemplate(map_id=map_id, name=name, static_grid=grid, obstacles=obstacles, special_cells=special_cells)
+        return MapTemplate(
+            map_id=map_id,
+            name=name,
+            static_grid=grid,
+            obstacles=obstacles,
+            special_cells=special_cells,
+            map_key=name if map_key is None else map_key,
+        )
 
     def __post_init__(self) -> None:
         grid = _normalize_static_grid(self.static_grid)
+        if not self.map_key:
+            object.__setattr__(self, "map_key", self.name)
         expected_obstacles = frozenset(
             Position(row, col) for row in range(GRID_SIZE) for col in range(GRID_SIZE) if grid[row][col] == STATIC_OBSTACLE
         )
@@ -70,9 +80,9 @@ class MapPool:
     def __post_init__(self) -> None:
         if not self.templates:
             raise SimulatorRuleError("map pool cannot be empty")
-        ids = [template.map_id for template in self.templates]
-        if len(set(ids)) != len(ids):
-            raise SimulatorRuleError(f"map ids must be unique: {ids}")
+        keys = [template.map_key for template in self.templates]
+        if len(set(keys)) != len(keys):
+            raise SimulatorRuleError(f"map keys must be unique: {keys}")
 
     def sample(self, rng: random.Random) -> MapTemplate:
         return self.templates[rng.randrange(len(self.templates))]
@@ -82,6 +92,18 @@ class MapPool:
             if template.map_id == map_id:
                 return template
         raise KeyError(f"unknown map_id: {map_id}")
+
+    def get_by_key(self, map_key: str) -> MapTemplate:
+        for template in self.templates:
+            if template.map_key == map_key:
+                return template
+        raise KeyError(f"unknown map_key: {map_key}")
+
+    def sample_variant(self, map_id: int, rng: random.Random) -> MapTemplate:
+        variants = tuple(template for template in self.templates if template.map_id == map_id)
+        if not variants:
+            raise KeyError(f"unknown map_id: {map_id}")
+        return variants[rng.randrange(len(variants))]
 
 
 def build_initial_state(template: MapTemplate, spawn: SpawnConfig | None = None) -> GameState:
@@ -111,12 +133,42 @@ def built_in_public_map_pool() -> MapPool:
 
 def built_in_training_map_pool() -> MapPool:
     public_templates = built_in_public_map_pool().templates
+    map1_rot90 = rotate_template(public_templates[0], turns=1, map_key="official_map_1_rot90", name="official_map_1_rot90")
+    map3_rot90 = rotate_template(public_templates[2], turns=1, map_key="official_map_3_rot90", name="official_map_3_rot90")
+    map4_rot90 = rotate_template(public_templates[3], turns=1, map_key="official_map_4_rot90", name="official_map_4_rot90")
+    map4_rot180 = rotate_template(public_templates[3], turns=2, map_key="official_map_4_rot180", name="official_map_4_rot180")
+    map4_rot270 = rotate_template(public_templates[3], turns=3, map_key="official_map_4_rot270", name="official_map_4_rot270")
+    map101 = _template_from_cells(101, "training_axis_cross_101", _MAP101_OBSTACLES, _MAP101_SPECIAL)
+    map101_rot90 = rotate_template(map101, turns=1, map_key="training_axis_cross_101_rot90", name="training_axis_cross_101_rot90")
+    map111 = _template_from_cells(111, "training_left_right_111", _MAP111_OBSTACLES, _MAP111_SPECIAL)
+    map111_rot90 = rotate_template(map111, turns=1, map_key="training_left_right_111_rot90", name="training_left_right_111_rot90")
+    map111_rot180 = rotate_template(map111, turns=2, map_key="training_left_right_111_rot180", name="training_left_right_111_rot180")
+    map111_rot270 = rotate_template(map111, turns=3, map_key="training_left_right_111_rot270", name="training_left_right_111_rot270")
+    map121 = _template_from_cells(121, "training_up_down_121", _MAP121_OBSTACLES, _MAP121_SPECIAL)
+    map121_rot90 = rotate_template(map121, turns=1, map_key="training_up_down_121_rot90", name="training_up_down_121_rot90")
+    map121_rot180 = rotate_template(map121, turns=2, map_key="training_up_down_121_rot180", name="training_up_down_121_rot180")
+    map121_rot270 = rotate_template(map121, turns=3, map_key="training_up_down_121_rot270", name="training_up_down_121_rot270")
     pool = MapPool(
         templates=(
-            *public_templates,
-            _template_from_cells(101, "training_axis_cross_101", _MAP101_OBSTACLES, _MAP101_SPECIAL),
-            _template_from_cells(111, "training_left_right_111", _MAP111_OBSTACLES, _MAP111_SPECIAL),
-            _template_from_cells(121, "training_up_down_121", _MAP121_OBSTACLES, _MAP121_SPECIAL),
+            public_templates[0],
+            map1_rot90,
+            public_templates[1],
+            public_templates[2],
+            map3_rot90,
+            public_templates[3],
+            map4_rot90,
+            map4_rot180,
+            map4_rot270,
+            map101,
+            map101_rot90,
+            map111,
+            map111_rot90,
+            map111_rot180,
+            map111_rot270,
+            map121,
+            map121_rot90,
+            map121_rot180,
+            map121_rot270,
         )
     )
     for template in pool.templates:
@@ -199,6 +251,8 @@ def _template_from_cells(
     name: str,
     obstacle_coords: tuple[tuple[int, int], ...],
     special_coords: tuple[tuple[int, int], ...],
+    *,
+    map_key: str | None = None,
 ) -> MapTemplate:
     overlap = set(obstacle_coords) & set(special_coords)
     if overlap:
@@ -209,11 +263,34 @@ def _template_from_cells(
         grid[row][col] = STATIC_OBSTACLE
     for row, col in special_coords:
         grid[row][col] = STATIC_SPECIAL_NON_BLOCKING
-    return MapTemplate.from_static_grid(map_id, name, grid)
+    return MapTemplate.from_static_grid(map_id, name, grid, map_key=map_key)
 
 
-def _template_from_static_rows(map_id: int, name: str, rows: tuple[str, ...]) -> MapTemplate:
-    return MapTemplate.from_static_grid(map_id, name, tuple(tuple(int(value) for value in row) for row in rows))
+def _template_from_static_rows(map_id: int, name: str, rows: tuple[str, ...], *, map_key: str | None = None) -> MapTemplate:
+    return MapTemplate.from_static_grid(map_id, name, tuple(tuple(int(value) for value in row) for row in rows), map_key=map_key)
+
+
+def rotate_static_grid_90(static_grid: Sequence[Sequence[int]]) -> StaticGrid:
+    grid = _normalize_static_grid(static_grid)
+    return tuple(tuple(grid[GRID_SIZE - 1 - col][row] for col in range(GRID_SIZE)) for row in range(GRID_SIZE))
+
+
+def rotate_template_90(template: MapTemplate, *, map_key: str, name: str | None = None) -> MapTemplate:
+    return rotate_template(template, turns=1, map_key=map_key, name=name)
+
+
+def rotate_template(template: MapTemplate, *, turns: int, map_key: str, name: str | None = None) -> MapTemplate:
+    if turns < 0:
+        raise SimulatorRuleError(f"rotation turns must be non-negative, got {turns}")
+    grid = template.static_grid
+    for _ in range(turns % 4):
+        grid = rotate_static_grid_90(grid)
+    return MapTemplate.from_static_grid(
+        template.map_id,
+        template.name if name is None else name,
+        grid,
+        map_key=map_key,
+    )
 
 
 def _normalize_static_grid(static_grid: Sequence[Sequence[int]]) -> StaticGrid:
@@ -693,5 +770,8 @@ __all__ = [
     "build_initial_state",
     "built_in_public_map_pool",
     "built_in_training_map_pool",
+    "rotate_static_grid_90",
+    "rotate_template",
+    "rotate_template_90",
     "validate_competition_training_map",
 ]

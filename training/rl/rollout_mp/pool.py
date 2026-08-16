@@ -92,6 +92,7 @@ class MultiprocessRolloutPool:
                 config=self.config,
                 feature_shared=self.feature_shared,
                 rollout_id=rollout_id,
+                map_pool=self.sampler.map_pool,
             )
             scheduler_ns = time.perf_counter_ns() - scheduler_start
             batch_assembly_start = time.perf_counter_ns()

@@ -45,4 +45,5 @@ class EpisodeConfig:
     rules: RulesConfig = field(default_factory=RulesConfig)
     seed: int | None = None
     map_id: int | None = None
+    map_key: str | None = None
     mechanism_profile: str = "default"

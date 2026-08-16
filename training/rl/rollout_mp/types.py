@@ -30,6 +30,7 @@ class EpisodeTask:
     agent_player_id: int
     opponent_spec: OpponentSpec | None
     transition_slot: int
+    map_key: str | None = None
 
 
 @dataclass(frozen=True)

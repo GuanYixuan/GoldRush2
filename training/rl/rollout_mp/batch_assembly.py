@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import random
 from collections.abc import Sequence
 from typing import Any
 
 from simulator.errors import SimulatorRuleError
+from simulator.mechanisms.maps import MapPool, built_in_training_map_pool
 from training.opponents import OpponentSpec
 from training.rl.ppo_buffer import PpoBatch
 
@@ -17,10 +19,12 @@ def initial_tasks(
     pair_count: int,
     map_ids: Sequence[int] | None,
     opponent_specs: Sequence[OpponentSpec] | None,
+    map_pool: MapPool | None = None,
 ) -> list[EpisodeTask]:
     tasks: list[EpisodeTask] = []
     for pair_index in range(pair_count):
         episode_seed = seed + pair_index
+        requested_map_id = map_ids[pair_index % len(map_ids)] if map_ids is not None else None
         pair_id = f"pair-{pair_index:06d}-seed-{episode_seed}"
         tasks.append(
             EpisodeTask(
@@ -28,10 +32,11 @@ def initial_tasks(
                 pair_id=pair_id,
                 pair_role="first",
                 seed=episode_seed,
-                map_id=map_ids[pair_index % len(map_ids)] if map_ids is not None else None,
+                map_id=requested_map_id,
                 agent_player_id=1,
                 opponent_spec=opponent_specs[pair_index % len(opponent_specs)] if opponent_specs is not None else None,
                 transition_slot=pair_index * 2,
+                map_key=_sample_training_map_key(map_pool, requested_map_id, episode_seed),
             )
         )
     return tasks
@@ -108,7 +113,7 @@ def episode_payloads_to_batch(payloads: list[dict[str, Any]], transition_shared:
             raise SimulatorRuleError(
                 f"episode payload {payload['task_id']!r} infos length {len(episode_infos)} != {episode_length}"
             )
-        infos.extend(episode_infos)
+        infos.extend(dict(info, map_key=payload.get("map_key")) for info in episode_infos)
 
     return PpoBatch.from_arrays(
         spatial_planes=np.concatenate(actor_planes, axis=0),
@@ -136,3 +141,10 @@ def episode_payloads_to_batch(payloads: list[dict[str, Any]], transition_shared:
         agent_player_ids=np.asarray(agent_player_ids, dtype=np.int64),
         infos=tuple(infos),
     )
+
+
+def _sample_training_map_key(map_pool: MapPool | None, map_id: int | None, seed: int | None) -> str | None:
+    if map_id is None:
+        return None
+    pool = built_in_training_map_pool() if map_pool is None else map_pool
+    return pool.sample_variant(int(map_id), random.Random(seed)).map_key

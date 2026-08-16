@@ -34,7 +34,7 @@ class FastProbeOuterStatic2MapAwareOpponent(FastProbeV3BfsOpponent):
 
     def reset(self, seed: int, episode_context: EpisodeContext) -> None:
         super().reset(seed, episode_context)
-        self._template = _template_for_map_id(episode_context.map_id)
+        self._template = _template_for_context(episode_context)
         self._commit_region = None
         self._commit_until_round = -1
 
@@ -138,11 +138,17 @@ class FastProbeOuterStatic2MapAwareOpponent(FastProbeV3BfsOpponent):
         return GameOutput(actions=output.actions, k=output.k, order=output.order, vp=vp)
 
 
-def _template_for_map_id(map_id: int | None) -> MapTemplate | None:
-    if map_id is None:
+def _template_for_context(episode_context: EpisodeContext) -> MapTemplate | None:
+    pool = built_in_training_map_pool()
+    if episode_context.map_key is not None:
+        try:
+            return pool.get_by_key(episode_context.map_key)
+        except KeyError:
+            return None
+    if episode_context.map_id is None:
         return None
     try:
-        return built_in_training_map_pool().get(int(map_id))
+        return pool.get(int(episode_context.map_id))
     except KeyError:
         return None
 

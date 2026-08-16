@@ -95,7 +95,7 @@ def run_duel(
     mechanisms = DuelMechanisms() if mechanisms is None else mechanisms
     rng_streams = make_simulator_rng_streams(config.episode.seed)
     rng = rng_streams.environment
-    template = _select_map(map_pool or built_in_training_map_pool(), config.episode.map_id, rng)
+    template = _select_map(map_pool or built_in_training_map_pool(), config.episode.map_id, config.episode.map_key, rng)
     state = build_initial_state(template, spawn)
     snapshot_accumulator = SnapshotAccumulator(config.episode.rules)
     visible_snapshot: Snapshot | None = None
@@ -187,7 +187,9 @@ def run_duel(
     )
 
 
-def _select_map(map_pool: MapPool, map_id: int | None, rng: random.Random) -> MapTemplate:
+def _select_map(map_pool: MapPool, map_id: int | None, map_key: str | None, rng: random.Random) -> MapTemplate:
+    if map_key is not None:
+        return map_pool.get_by_key(map_key)
     if map_id is None:
         return map_pool.sample(rng)
     return map_pool.get(map_id)

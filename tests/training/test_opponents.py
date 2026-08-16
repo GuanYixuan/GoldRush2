@@ -7,7 +7,7 @@ from simulator.config import EpisodeConfig, RulesConfig
 from simulator.envs.duel import DuelConfig, DuelMechanisms, DuelOrderMode, run_duel
 from simulator.mechanisms.bombs import BernoulliBombRefresher, BombConfig
 from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, OuterGoldConfig, OuterGoldGenerator
-from simulator.mechanisms.maps import SpawnConfig
+from simulator.mechanisms.maps import SpawnConfig, built_in_training_map_pool
 from simulator.observation.sdk import GameInput
 from simulator.types import Action, GameOutput, RegionStat, Snapshot
 from training.opponents import EpisodeContext, LeagueEntry, OpponentLeague, OpponentSpec, build_runner
@@ -211,6 +211,14 @@ class OpponentTests(unittest.TestCase):
         self.assertEqual(output.order, 0)
         self.assertEqual(output.k, 6)
         self.assertEqual(output.actions[:2], (int(Action.RIGHT), int(Action.RIGHT)))
+
+    def test_outer_static2_mapaware_prefers_actual_map_key(self) -> None:
+        opponent = FastProbeOuterStatic2MapAwareOpponent()
+
+        opponent.reset(1, EpisodeContext(map_id=1, map_key="official_map_1_rot90"))
+
+        self.assertIsNotNone(opponent._template)
+        self.assertEqual(opponent._template, built_in_training_map_pool().get_by_key("official_map_1_rot90"))
 
     def test_build_runner_accepts_outer_static2_mapaware(self) -> None:
         runner = build_runner(OpponentSpec(kind="python", name="fast_probe_outer_static2_mapaware"))

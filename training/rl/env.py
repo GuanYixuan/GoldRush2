@@ -78,6 +78,7 @@ class SingleAgentGoldRushEnv:
         *,
         seed: int | None = None,
         map_id: int | None = None,
+        map_key: str | None = None,
         agent_player_id: int | None = None,
         opponent_spec: OpponentSpec | None = None,
     ) -> ResetResult:
@@ -88,6 +89,7 @@ class SingleAgentGoldRushEnv:
 
         episode_seed = self.config.episode.seed if seed is None else seed
         episode_map_id = self.config.episode.map_id if map_id is None else map_id
+        episode_map_key = self.config.episode.map_key if map_key is None else map_key
         sampled_spec = opponent_spec or self._sample_opponent_spec(episode_seed)
         self.opponent_spec = sampled_spec
         self.opponent_runner = build_runner(sampled_spec)
@@ -97,6 +99,7 @@ class SingleAgentGoldRushEnv:
                 player_id=self.opponent_player_id,
                 opponent_id=self.agent_player_id,
                 map_id=episode_map_id,
+                map_key=episode_map_key,
                 seed=episode_seed,
                 tags=("rl_env",),
             ),
@@ -111,7 +114,7 @@ class SingleAgentGoldRushEnv:
             player_names={self.agent_player_id: "agent", self.opponent_player_id: "opponent"},
             p90_latency_ns=_agent_slow_p90(self.agent_player_id),
         )
-        self.observations = self.round_env.reset(seed=episode_seed, map_id=episode_map_id)
+        self.observations = self.round_env.reset(seed=episode_seed, map_id=episode_map_id, map_key=episode_map_key)
         self.latent_first_rate = sample_latent_first_rate(
             make_latent_first_rate_rng(episode_seed),
             self.config.fast_order,
@@ -188,6 +191,7 @@ class SingleAgentGoldRushEnv:
         return {
             "seed": seed,
             "map_id": self.round_env.template.map_id,
+            "map_key": self.round_env.template.map_key,
             "map_name": self.round_env.template.name,
             "agent_player_id": self.agent_player_id,
             "opponent_player_id": self.opponent_player_id,

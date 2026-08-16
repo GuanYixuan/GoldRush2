@@ -110,7 +110,13 @@ def run_worker_episode(
         spawn=static_config["spawn"],
         reward_fn=copy.deepcopy(static_config["reward_fn"]),
     )
-    reset = env.reset(seed=task.seed, map_id=task.map_id, agent_player_id=task.agent_player_id, opponent_spec=task.opponent_spec)
+    reset = env.reset(
+        seed=task.seed,
+        map_id=task.map_id,
+        map_key=task.map_key,
+        agent_player_id=task.agent_player_id,
+        opponent_spec=task.opponent_spec,
+    )
     result_queue.put(
         {
             "type": "episode_started",
@@ -121,6 +127,7 @@ def run_worker_episode(
             "pair_role": task.pair_role,
             "seed": task.seed,
             "map_id": int(reset.info["map_id"]),
+            "map_key": reset.info["map_key"],
             "agent_player_id": int(task.agent_player_id),
             "opponent_spec": reset.info["opponent_spec"],
         }
@@ -329,6 +336,7 @@ def run_worker_episode(
             "pair_role": task.pair_role,
             "seed": task.seed,
             "map_id": int(reset.info["map_id"]),
+            "map_key": reset.info["map_key"],
             "agent_player_id": int(task.agent_player_id),
             "opponent_spec": reset.info["opponent_spec"],
             "transition_slot": transition_slot,

@@ -18,6 +18,7 @@ class EpisodeContext:
     player_id: int = 2
     opponent_id: int = 1
     map_id: int | None = None
+    map_key: str | None = None
     seed: int | None = None
     tags: tuple[str, ...] = ()
 

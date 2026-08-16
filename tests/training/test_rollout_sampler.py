@@ -45,9 +45,23 @@ class RolloutSamplerTests(unittest.TestCase):
         self.assertEqual(first.pair_id, second.pair_id)
         self.assertEqual(first.seed, second.seed)
         self.assertEqual(first.map_id, second.map_id)
+        self.assertEqual(first.map_key, second.map_key)
+        self.assertEqual(first.transitions[0].info["map_key"], first.map_key)
+        self.assertEqual(second.transitions[0].info["map_key"], second.map_key)
         self.assertEqual(first.opponent_spec, second.opponent_spec)
         self.assertEqual((first.agent_player_id, second.agent_player_id), (1, 2))
         self.assertEqual((first.pair_role, second.pair_role), ("first", "second"))
+
+    def test_map_id_family_samples_registered_variants(self) -> None:
+        sampler = _sampler(_one_round_episode(), _stay_opponent_spec())
+
+        batch = sampler.collect(_stay_policy, pair_count=8, seed=123, map_ids=(1,))
+        by_pair: dict[str, set[str | None]] = {}
+        for trajectory in batch.trajectories:
+            by_pair.setdefault(trajectory.pair_id, set()).add(trajectory.map_key)
+
+        self.assertEqual(set().union(*by_pair.values()), {"official_map_1", "official_map_1_rot90"})
+        self.assertTrue(all(len(keys) == 1 for keys in by_pair.values()))
 
     def test_metrics_include_win_rate_and_pair_score(self) -> None:
         sampler = _sampler(_one_round_episode(), _stay_opponent_spec())

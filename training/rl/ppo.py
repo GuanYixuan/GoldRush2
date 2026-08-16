@@ -23,7 +23,7 @@ from training.opponents import OpponentSpec
 from .env import SingleAgentGoldRushEnv
 from .ppo_buffer import PpoBatch, PpoMiniBatch, PpoTransition
 from .privileged_critic_features import extract_privileged_critic_features
-from .sampler import BatchRolloutSampler
+from .sampler import BatchRolloutSampler, _sample_training_map_key
 
 
 @dataclass(frozen=True)
@@ -87,10 +87,11 @@ def collect_ppo_rollouts(
         for pair_index in range(pair_count):
             episode_seed = seed + pair_index
             requested_map_id = map_ids[pair_index % len(map_ids)] if map_ids is not None else None
+            requested_map_key = _sample_training_map_key(sampler.map_pool, requested_map_id, episode_seed)
             requested_opponent_spec = opponent_specs[pair_index % len(opponent_specs)] if opponent_specs is not None else None
             pair_id = f"pair-{pair_index:06d}-seed-{episode_seed}"
 
-            first_map_id, first_opponent_spec = _collect_one_ppo_episode(
+            first_map_id, first_map_key, first_opponent_spec = _collect_one_ppo_episode(
                 model,
                 sampler,
                 transitions,
@@ -98,6 +99,7 @@ def collect_ppo_rollouts(
                 pair_role="first",
                 seed=episode_seed,
                 map_id=requested_map_id,
+                map_key=requested_map_key,
                 agent_player_id=1,
                 opponent_spec=requested_opponent_spec,
                 device=rollout_device,
@@ -110,6 +112,7 @@ def collect_ppo_rollouts(
                 pair_role="second",
                 seed=episode_seed,
                 map_id=first_map_id,
+                map_key=first_map_key,
                 agent_player_id=2,
                 opponent_spec=first_opponent_spec if requested_opponent_spec is None else requested_opponent_spec,
                 device=rollout_device,
@@ -335,10 +338,11 @@ def _collect_one_ppo_episode(
     pair_role: str,
     seed: int,
     map_id: int | None,
+    map_key: str | None,
     agent_player_id: int,
     opponent_spec: OpponentSpec | None,
     device: torch.device,
-) -> tuple[int, OpponentSpec]:
+) -> tuple[int, str | None, OpponentSpec]:
     env = SingleAgentGoldRushEnv(
         config=sampler.env_config,
         mechanisms=sampler.mechanisms,
@@ -346,7 +350,7 @@ def _collect_one_ppo_episode(
         spawn=sampler.spawn,
         reward_fn=sampler.reward_fn,
     )
-    reset = env.reset(seed=seed, map_id=map_id, agent_player_id=agent_player_id, opponent_spec=opponent_spec)
+    reset = env.reset(seed=seed, map_id=map_id, map_key=map_key, agent_player_id=agent_player_id, opponent_spec=opponent_spec)
     extractor = FeatureExtractor(player_id=agent_player_id)
     observation = reset.observation
     episode_id = f"{pair_id}-{pair_role}"
@@ -368,6 +372,8 @@ def _collect_one_ppo_episode(
         game_output = policy_action_to_game_output(policy_action)
         extractor.commit_action(game_output)
         step = env.step(game_output)
+        info = dict(step.info)
+        info["map_key"] = reset.info["map_key"]
         transitions.append(
             PpoTransition(
                 spatial_planes=spatial_planes.squeeze(0).detach().cpu(),
@@ -393,12 +399,12 @@ def _collect_one_ppo_episode(
                 round_index=int(observation.round),
                 map_id=reset.info["map_id"],
                 agent_player_id=agent_player_id,
-                info=step.info,
+                info=info,
             )
         )
         observation = step.observation
 
-    return int(reset.info["map_id"]), reset.info["opponent_spec"]
+    return int(reset.info["map_id"]), reset.info["map_key"], reset.info["opponent_spec"]
 
 
 def _extract_critic_features(env: SingleAgentGoldRushEnv, agent_player_id: int) -> dict[str, object]:

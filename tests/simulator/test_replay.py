@@ -97,6 +97,7 @@ class ReplayTests(unittest.TestCase):
         self.assertEqual(payload["format_version"], SIMULATOR_FULL_REPLAY_VERSION)
         self.assertEqual(payload["source"]["seed"], 123)
         self.assertEqual(payload["source"]["map_id"], 99)
+        self.assertEqual(payload["source"]["map_key"], "empty_test_map")
         self.assertEqual(payload["players"], {"player1": "policy_a", "player2": "policy_b"})
         self.assertEqual(len(payload["rounds"]), 1)
 

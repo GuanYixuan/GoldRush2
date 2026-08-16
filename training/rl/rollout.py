@@ -34,6 +34,7 @@ class Trajectory:
     agent_player_id: int
     opponent_spec: OpponentSpec
     transitions: tuple[Transition, ...]
+    map_key: str | None = None
 
     @property
     def total_reward(self) -> float:
