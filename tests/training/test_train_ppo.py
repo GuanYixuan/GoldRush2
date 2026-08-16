@@ -392,6 +392,31 @@ class TrainPpoTests(unittest.TestCase):
             self.assertTrue(config.enable_fast_runtime_features)
             self.assertTrue(config.multiprocess_rollout.enable_fast_runtime_features)
 
+    def test_cli_vision_info_reward_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parser = build_arg_parser()
+            args = parser.parse_args(
+                [
+                    "--output-dir",
+                    tmpdir,
+                    "--beta-vision-info",
+                    "0.02",
+                    "--vision-info-scale",
+                    "80",
+                    "--vision-info-reward-cap",
+                    "0.01",
+                    "--vision-info-recent-window",
+                    "7",
+                ]
+            )
+
+            config = config_from_args(args)
+
+            self.assertEqual(config.beta_vision_info, 0.02)
+            self.assertEqual(config.vision_info_scale, 80.0)
+            self.assertEqual(config.vision_info_reward_cap, 0.01)
+            self.assertEqual(config.vision_info_recent_window, 7)
+
     def test_cli_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             cmd = [
@@ -584,6 +609,9 @@ def _diagnostic_keys() -> tuple[str, ...]:
         "reward_net_gold_gain_mean",
         "reward_clipped_net_gold_gain_mean",
         "reward_net_gold_gain_reward_mean",
+        "reward_vision_info_gold_mean",
+        "reward_vision_info_cells_mean",
+        "reward_vision_info_reward_mean",
         "return_mean",
         "return_std",
         "value_mean",

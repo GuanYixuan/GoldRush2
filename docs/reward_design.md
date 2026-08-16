@@ -55,9 +55,9 @@ DeltaM_t = M_{t+1} - M_t
 - 己方购买视野：即时负成本。
 - 对手购买视野：相对正收益。
 
-## PPO Reward: Win / Margin / Gold Gain
+## PPO Reward: Win / Margin / Gold Gain / Vision Info
 
-当前 PPO reward 拆成四个独立系数：
+当前 PPO reward 拆成五个独立系数：
 
 ```text
 reward_schema = "terminal_win_margin_gold_gain_v1"
@@ -68,12 +68,17 @@ gold_gain_t = max(0, G_agent(t+1) - G_agent(t))
 gold_gain_reward_t = clip(gold_gain_t / gold_gain_scale, 0, 1)
 net_gold_gain_t = W_agent(t+1) - W_agent(t)
 net_gold_gain_reward_t = clip(net_gold_gain_t / net_gold_gain_scale, -1, 1)
+vision_info_reward_t = min(
+    vision_info_reward_cap,
+    beta_vision_info * min(1, fresh_extra_gold_t / vision_info_scale)
+)
 
 r_t =
     beta_win * r_win_t
     + beta_margin * shaping_t
     + beta_gold_gain * gold_gain_reward_t
     + beta_net_gold_gain * net_gold_gain_reward_t
+    + vision_info_reward_t
 ```
 
 其中：
@@ -88,6 +93,7 @@ r_t =
 - `margin_scale=200` 是当前默认尺度；该项只在 `beta_margin > 0` 时影响 reward。
 - `gold_gain_scale=100` 是第一版 dense gold 尺度，单回合吃到 100 金币即达到该项上限。
 - `net_gold_gain_scale=50` 是默认净金币 dense 尺度；单回合净赚 50 金币达到正向上限，单回合净亏 50 金币达到负向下限。
+- `beta_vision_info=0.0` 默认关闭；开启后只奖励购买视野带来的“新鲜额外可见金币”信息，不改变 actor observation。
 - 实现上该 reward 在 `env.reset()` 后用初始 `GameState` 初始化 `Phi_t`；如果未 reset 就调用，会 fail-fast。
 
 设计理由：
@@ -99,6 +105,37 @@ r_t =
 - net dense gold 项直接补充“发现金币、走过去、吃掉金币、控制视野成本”的短期信号，并通过双向 clip 限制偶发大额变化造成的 advantage 方差。
 
 `beta_margin=0, beta_gold_gain=0, beta_net_gold_gain=0` smoke 的验收目标不是胜率提升，而是 loss 有限、无 NaN、GAE/terminal 处理正确、KL/clip fraction/value 输出可解释。
+
+## 购买视野信息 Reward
+
+`vision_info_reward_t` 是用于唤醒视野购买探索的可选辅助项，默认关闭。它不直接补贴视野成本，而是奖励“购买视野后额外看到此前难以确认的新鲜金币信息”。
+
+`TerminalWinMarginGoldGainReward` 维护两个 `17x17` 小表：
+
+- `last_seen_round[row][col]`：agent 最近一次实际看见该格的回合。
+- `last_gold_increase_round[row][col]`：该格最近一次由下一轮金币生成事件增加的回合。
+
+每次 `RoundStepEnv.step()` 非终局时会先结算本轮行动，再为下一轮 observation 生成并应用金币；这些下一轮金币生成事件通过 `RoundStepResult.next_round_gold_generated` 暴露给 reward。若 agent 本轮 `vp > 0`，reward 在下一轮 observation 中计算：
+
+```text
+extra_cells = actual_visible_cells - base_radius_2_visible_cells
+```
+
+只统计 `extra_cells` 中当前 observation 可见且金币金额大于 `0` 的格子。一个金币格会被视为“新鲜信息”，当且仅当：
+
+```text
+round_index - last_seen_round[pos] > vision_info_recent_window
+or last_seen_round[pos] < last_gold_increase_round[pos]
+```
+
+因此：
+
+- 靠移动自然进入基础 `5x5` 视野看到的金币不奖励。
+- 买视野看到额外环带金币才可能奖励。
+- 最近看过且金币没有新增的格子不重复奖励。
+- 最近看过空地，但之后该格刷出或增加金币，再通过购买视野看到，会奖励。
+
+训练入口参数为 `--beta-vision-info`、`--vision-info-scale`、`--vision-info-reward-cap`、`--vision-info-recent-window`。开实验时应同时关注 `vp_fraction_1/2`、`vp_nonzero_fraction`、`reward_vision_info_*`、`train_agent_vision_spent_mean` 和固定 seed eval，避免策略学成无条件买视野。
 
 ## 终局胜负 Reward
 

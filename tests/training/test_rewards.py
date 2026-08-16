@@ -4,13 +4,14 @@ import math
 import unittest
 
 from simulator.config import EpisodeConfig, RulesConfig
-from simulator.envs.round_step import RoundStepMechanisms, RoundStepResult
+from simulator.envs.round_step import RoundStepMechanisms, RoundStepResult, RoundStepTrace
 from simulator.mechanisms.bombs import BernoulliBombRefresher, BombConfig
 from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, OuterGoldConfig, OuterGoldGenerator
 from simulator.mechanisms.maps import SpawnConfig
+from simulator.observation.sdk import GameInput
 from simulator.rules.scoring import GameResult
 from simulator.state import GameState, PlayerState, UnitState
-from simulator.types import Action, GameOutput, Position
+from simulator.types import Action, GameOutput, GoldGenerationEvent, Position
 from training.opponents import OpponentSpec
 from training.rl import BatchRolloutSampler, SingleAgentEnvConfig, SingleAgentGoldRushEnv, TerminalWinMarginGoldGainReward
 
@@ -195,6 +196,118 @@ class RewardTests(unittest.TestCase):
         self.assertEqual(reward.beta_net_gold_gain, 0.1)
         self.assertEqual(reward.net_gold_gain_scale, 50.0)
 
+    def test_vision_info_reward_ignores_no_purchase(self) -> None:
+        reward = TerminalWinMarginGoldGainReward(
+            beta_win=0.0,
+            beta_margin=0.0,
+            beta_gold_gain=0.0,
+            beta_net_gold_gain=0.0,
+            beta_vision_info=1.0,
+        )
+        reward.reset(_vision_state(round_index=0), agent_player_id=1)
+
+        value = reward(
+            _vision_result(round_index=1, vp=0, gold={(8, 11): 7}, next_gold_generated=()),
+            agent_player_id=1,
+        )
+
+        self.assertEqual(value, 0.0)
+        assert reward.last_components is not None
+        self.assertEqual(reward.last_components["vision_info_gold"], 0.0)
+
+    def test_vision_info_reward_ignores_base_radius_gold(self) -> None:
+        reward = TerminalWinMarginGoldGainReward(
+            beta_win=0.0,
+            beta_margin=0.0,
+            beta_gold_gain=0.0,
+            beta_net_gold_gain=0.0,
+            beta_vision_info=1.0,
+        )
+        reward.reset(_vision_state(round_index=0), agent_player_id=1)
+
+        value = reward(
+            _vision_result(round_index=1, vp=1, gold={(8, 10): 9}, next_gold_generated=()),
+            agent_player_id=1,
+        )
+
+        self.assertEqual(value, 0.0)
+        assert reward.last_components is not None
+        self.assertEqual(reward.last_components["vision_info_gold"], 0.0)
+
+    def test_vision_info_reward_counts_fresh_extra_ring_gold(self) -> None:
+        reward = TerminalWinMarginGoldGainReward(
+            beta_win=0.0,
+            beta_margin=0.0,
+            beta_gold_gain=0.0,
+            beta_net_gold_gain=0.0,
+            beta_vision_info=1.0,
+            vision_info_scale=100.0,
+            vision_info_reward_cap=1.0,
+        )
+        reward.reset(_vision_state(round_index=0), agent_player_id=1)
+
+        value = reward(
+            _vision_result(round_index=1, vp=1, gold={(8, 11): 7}, next_gold_generated=()),
+            agent_player_id=1,
+        )
+
+        self.assertEqual(value, 0.07)
+        assert reward.last_components is not None
+        self.assertEqual(reward.last_components["vision_info_gold"], 7.0)
+        self.assertEqual(reward.last_components["vision_info_cells"], 1.0)
+        self.assertEqual(reward.last_components["vision_info_reward"], 0.07)
+
+    def test_vision_info_reward_requires_fresh_or_increased_gold(self) -> None:
+        reward = TerminalWinMarginGoldGainReward(
+            beta_win=0.0,
+            beta_margin=0.0,
+            beta_gold_gain=0.0,
+            beta_net_gold_gain=0.0,
+            beta_vision_info=1.0,
+            vision_info_scale=100.0,
+            vision_info_reward_cap=1.0,
+            vision_info_recent_window=5,
+        )
+        reward.reset(_vision_state(round_index=0, active_vision_radius=3), agent_player_id=1)
+
+        stale_value = reward(
+            _vision_result(round_index=1, vp=1, gold={(8, 11): 7}, next_gold_generated=()),
+            agent_player_id=1,
+        )
+        increased_value = reward(
+            _vision_result(
+                round_index=2,
+                vp=1,
+                gold={(8, 11): 8},
+                next_gold_generated=(GoldGenerationEvent(Position(8, 11), 1),),
+            ),
+            agent_player_id=1,
+        )
+
+        self.assertEqual(stale_value, 0.0)
+        self.assertEqual(increased_value, 0.08)
+        assert reward.last_components is not None
+        self.assertEqual(reward.last_components["vision_info_gold"], 8.0)
+
+    def test_vision_info_reward_is_capped(self) -> None:
+        reward = TerminalWinMarginGoldGainReward(
+            beta_win=0.0,
+            beta_margin=0.0,
+            beta_gold_gain=0.0,
+            beta_net_gold_gain=0.0,
+            beta_vision_info=1.0,
+            vision_info_scale=100.0,
+            vision_info_reward_cap=0.03,
+        )
+        reward.reset(_vision_state(round_index=0), agent_player_id=1)
+
+        value = reward(
+            _vision_result(round_index=1, vp=1, gold={(8, 11): 70}, next_gold_generated=()),
+            agent_player_id=1,
+        )
+
+        self.assertEqual(value, 0.03)
+
 
 def _state(
     *,
@@ -217,6 +330,72 @@ def _state(
                 vision_spent=p2_vision,
             ),
         },
+    )
+
+
+def _vision_state(
+    *,
+    round_index: int,
+    active_vision_radius: int = 2,
+    gold: dict[tuple[int, int], int] | None = None,
+) -> GameState:
+    return GameState(
+        round_index=round_index,
+        players={
+            1: PlayerState(
+                id=1,
+                units=[UnitState(id=0, position=Position(8, 8)), UnitState(id=1, position=Position(0, 0))],
+                active_vision_radius=active_vision_radius,
+            ),
+            2: PlayerState(
+                id=2,
+                units=[UnitState(id=0, position=Position(16, 16)), UnitState(id=1, position=Position(16, 15))],
+            ),
+        },
+        gold={Position(row, col): amount for (row, col), amount in (gold or {}).items()},
+    )
+
+
+def _vision_result(
+    *,
+    round_index: int,
+    vp: int,
+    gold: dict[tuple[int, int], int],
+    next_gold_generated: tuple[GoldGenerationEvent, ...],
+) -> RoundStepResult:
+    state = _vision_state(round_index=round_index, active_vision_radius=3 if vp == 1 else 4 if vp == 2 else 2, gold=gold)
+    return RoundStepResult(
+        observations={1: _vision_observation(round_index=round_index, gold=gold)},
+        terminated=False,
+        trace=RoundStepTrace(
+            round_index=round_index - 1,
+            first_player_id=2,
+            player_outputs={1: GameOutput(actions=(int(Action.STAY),) * 6, k=3, order=0, vp=vp), 2: _stay_output()},
+            npc_order=(),
+            npc_actions={},
+            gold_generated=(),
+            bomb_refresh_event=None,  # type: ignore[arg-type]
+            transition_result=None,  # type: ignore[arg-type]
+        ),
+        state=state,
+        next_round_gold_generated=next_gold_generated,
+    )
+
+
+def _vision_observation(*, round_index: int, gold: dict[tuple[int, int], int]) -> GameInput:
+    grid = [[0 for _col in range(17)] for _row in range(17)]
+    for (row, col), amount in gold.items():
+        grid[row][col] = amount
+    return GameInput(
+        round=round_index,
+        grid=grid,
+        my_units=[(8, 8), (0, 0)],
+        my_units_gold=(0, 0),
+        gold_opp=0,
+        visible_enemies=[(-1, -1), (-1, -1)],
+        visible_npcs=[],
+        snapshot_valid=False,
+        snapshot=None,
     )
 
 
