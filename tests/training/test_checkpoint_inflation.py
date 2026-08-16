@@ -325,6 +325,44 @@ def test_inflate_vp_final_position_head_checkpoint_loads_and_is_noop() -> None:
     loaded.load_state_dict(inflated["model_state_dict"])
 
 
+def test_inflate_vp_final_position_can_chain_before_critic_feature_v2() -> None:
+    model = GoldRushPolicyNetwork(_small_config())
+    checkpoint_state = {
+        key: value.clone()
+        for key, value in model.state_dict().items()
+    }
+    old_weight = torch.randn(3, model.config.actor_hidden)
+    old_bias = torch.randn(3)
+    checkpoint_state["vp_head.weight"] = old_weight.clone()
+    checkpoint_state["vp_head.bias"] = old_bias.clone()
+    checkpoint_state["critic_encoder.stem.0.weight"] = checkpoint_state["critic_encoder.stem.0.weight"][:, :26].clone()
+    checkpoint_state["critic_encoder.scalar_tower.0.weight"] = (
+        checkpoint_state["critic_encoder.scalar_tower.0.weight"][:, :17].clone()
+    )
+    raw_config = asdict(_small_v1_critic_config())
+    raw_config["action_head_schema"] = "candidate_cell_residual_v1_fast_threshold_calibrated_base_v1"
+    checkpoint = {
+        "schema": "ppo_train_v1",
+        "feature_schema": "goldrush2_feature_v2",
+        "critic_feature_schema": "goldrush2_privileged_critic_feature_v1",
+        "train_config": {"model": raw_config},
+        "model_state_dict": checkpoint_state,
+        "optimizer_state_dict": {"state": {"stale": True}},
+    }
+
+    vp_inflated = inflate_vp_head_checkpoint_payload(checkpoint)
+    critic_inflated = inflate_critic_feature_checkpoint_payload(vp_inflated)
+
+    assert critic_inflated["train_config"]["model"]["action_head_schema"] == _small_config().action_head_schema
+    assert critic_inflated["train_config"]["model"]["critic_spatial_channels"] == 39
+    assert critic_inflated["train_config"]["model"]["critic_scalar_features"] == 20
+    assert "optimizer_state_dict" not in critic_inflated
+    assert critic_inflated["optimizer_state_dict_dropped_for_vp_head_inflation"] is True
+    assert "optimizer_state_dict_dropped_for_critic_feature_inflation" not in critic_inflated
+    loaded = GoldRushPolicyNetwork(_small_config())
+    loaded.load_state_dict(critic_inflated["model_state_dict"])
+
+
 def test_inflate_vp_final_position_head_can_reset_vp_prior() -> None:
     model = GoldRushPolicyNetwork(_small_config())
     state = model.state_dict()

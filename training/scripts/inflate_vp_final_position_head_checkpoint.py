@@ -13,7 +13,6 @@ from training.models.policy_network import (
     ACTION_HEAD_SCHEMA,
     FAST_THRESHOLD_ACTION_HEAD_SCHEMA,
     FEATURE_SCHEMA,
-    GoldRushPolicyNetwork,
     PolicyNetworkConfig,
 )
 
@@ -30,15 +29,12 @@ def inflate_checkpoint_payload(
         _validate_vp_prior(reset_vp_head_prior)
 
     config = _current_model_config(raw_config)
-    model = GoldRushPolicyNetwork(config)
-    initialized = model.state_dict()
     state = inflated.get("model_state_dict")
     if not isinstance(state, dict):
         raise ValueError("checkpoint missing model_state_dict")
 
     _inflate_vp_head(
         state,
-        initialized,
         actor_hidden=config.actor_hidden,
         width=config.width,
         reset_prior=reset_vp_head_prior,
@@ -117,7 +113,6 @@ def _current_model_config(raw: dict[str, Any]) -> PolicyNetworkConfig:
 
 def _inflate_vp_head(
     state: dict[str, Any],
-    initialized: dict[str, torch.Tensor],
     *,
     actor_hidden: int,
     width: int,
@@ -127,8 +122,6 @@ def _inflate_vp_head(
     bias_key = "vp_head.bias"
     old_weight = state.get(weight_key)
     old_bias = state.get(bias_key)
-    new_weight = initialized[weight_key]
-    new_bias = initialized[bias_key]
     if not isinstance(old_weight, torch.Tensor):
         raise ValueError(f"checkpoint missing {weight_key}")
     if not isinstance(old_bias, torch.Tensor):
@@ -137,11 +130,9 @@ def _inflate_vp_head(
     expected_new_shape = (3, int(actor_hidden) + int(width) * 2)
     if tuple(old_weight.shape) != expected_old_shape:
         raise ValueError(f"{weight_key} must have old shape {expected_old_shape}, got {tuple(old_weight.shape)}")
-    if tuple(new_weight.shape) != expected_new_shape:
-        raise ValueError(f"new {weight_key} must have shape {expected_new_shape}, got {tuple(new_weight.shape)}")
-    if tuple(old_bias.shape) != tuple(new_bias.shape):
-        raise ValueError(f"{bias_key} shape mismatch: old={tuple(old_bias.shape)} new={tuple(new_bias.shape)}")
-    inflated_weight = old_weight.new_zeros(new_weight.shape)
+    if tuple(old_bias.shape) != (3,):
+        raise ValueError(f"{bias_key} must have shape (3,), got {tuple(old_bias.shape)}")
+    inflated_weight = old_weight.new_zeros(expected_new_shape)
     if reset_prior is None:
         inflated_weight[:, : old_weight.shape[1]] = old_weight
     state[weight_key] = inflated_weight
