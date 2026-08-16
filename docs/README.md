@@ -9,7 +9,7 @@
 - `reward_design.md`：当前 PPO reward 项、dense gold/net gold、BC 与 PPO 的关系。
 - `features/README.md`：actor/critic feature schema 索引。
 - `features/actor_feature_v1.md`：可部署 actor feature schema。
-- `features/privileged_critic_feature_v1.md`：训练期 privileged critic feature schema。
+- `features/privileged_critic_feature_v2.md`：当前训练期 privileged critic feature schema；v1 文档仅用于历史追溯和 checkpoint inflation。
 
 ## Replay 与派生格式
 

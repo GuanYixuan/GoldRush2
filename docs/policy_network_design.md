@@ -17,10 +17,10 @@ action_head_schema: candidate_cell_residual_v1_fast_threshold_calibrated_base_v1
 critic 输入使用训练期 privileged critic feature：
 
 ```text
-critic_spatial_planes: B x 26 x 17 x 17
-critic_scalars: B x 17
+critic_spatial_planes: B x 39 x 17 x 17
+critic_scalars: B x 20
 fast_scalars: B x 2
-critic_feature_schema: goldrush2_privileged_critic_feature_v1
+critic_feature_schema: goldrush2_privileged_critic_feature_v2
 ```
 
 网络输出官方动作字段和 value：
@@ -62,17 +62,17 @@ Backbone:
     8 x SE-ResidualBlock(width=96, reduction=4)
 ```
 
-critic encoder 使用同型结构，但 stem 输入为 `26`，scalar tower 输入为 `17`：
+critic encoder 使用同型结构，但 stem 输入为 `39`，scalar tower 输入为 `20`：
 
 ```text
 Critic stem:
-    Conv3x3(26 -> 96)
+    Conv3x3(39 -> 96)
     SiLU
     Conv3x3(96 -> 96)
     SiLU
 
 Critic scalar tower:
-    Linear(17 -> 96)
+    Linear(20 -> 96)
     SiLU
     Linear(96 -> 96)
     SiLU
@@ -374,7 +374,7 @@ extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent
 ```text
 actor:  43 x 17 x 17, scalars 10
 fast:   scalars 2
-critic: 26 x 17 x 17, scalars 17
+critic: 39 x 17 x 17, scalars 20
 ```
 
 自回归前的完整模型双实例基线约为：
