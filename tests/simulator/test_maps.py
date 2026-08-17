@@ -78,11 +78,11 @@ class MapsTests(unittest.TestCase):
         self.assertEqual(training_pool.get_by_key("official_map_5_rot90").static_grid, rotate_static_grid_90(public_pool.get(5).static_grid))
         self.assertEqual(len(training_pool.get(5).obstacles), 58)
         self.assertEqual(len(training_pool.get(5).special_cells), 7)
-        self.assertEqual(len(training_pool.get(101).obstacles), 38)
+        self.assertEqual(len(training_pool.get(101).obstacles), 60)
         self.assertEqual(len(training_pool.get(101).special_cells), 20)
-        self.assertEqual(len(training_pool.get(111).obstacles), 42)
+        self.assertEqual(len(training_pool.get(111).obstacles), 51)
         self.assertEqual(len(training_pool.get(111).special_cells), 20)
-        self.assertEqual(len(training_pool.get(121).obstacles), 52)
+        self.assertEqual(len(training_pool.get(121).obstacles), 76)
         self.assertEqual(len(training_pool.get(121).special_cells), 20)
 
     def test_training_map_one_rot90_variant_is_valid_and_sampled_by_family(self) -> None:
