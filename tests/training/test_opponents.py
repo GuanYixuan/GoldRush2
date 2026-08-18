@@ -7,9 +7,9 @@ from simulator.config import EpisodeConfig, RulesConfig
 from simulator.envs.duel import DuelConfig, DuelMechanisms, DuelOrderMode, run_duel
 from simulator.mechanisms.bombs import BernoulliBombRefresher, BombConfig
 from simulator.mechanisms.gold import CenterGoldConfig, CenterGoldGenerator, OuterGoldConfig, OuterGoldGenerator
-from simulator.mechanisms.maps import SpawnConfig, built_in_training_map_pool
+from simulator.mechanisms.maps import MapTemplate, SpawnConfig, built_in_training_map_pool
 from simulator.observation.sdk import GameInput
-from simulator.types import Action, GameOutput, RegionStat, Snapshot
+from simulator.types import Action, GameOutput, Position, RegionStat, Snapshot
 from training.opponents import EpisodeContext, LeagueEntry, OpponentLeague, OpponentSpec, build_runner
 from training.opponents.params import ParamSpace, categorical, choice, int_uniform, uniform
 from training.opponents.scripted import (
@@ -182,6 +182,18 @@ class OpponentTests(unittest.TestCase):
         self.assertEqual(first.vp, 0)
         self.assertEqual(second.vp, 2)
 
+    def test_fast_probe_v3_bfs_center_fallback_uses_static_bfs(self) -> None:
+        opponent = FastProbeV3BfsOpponent(enable_vision=False)
+        opponent.reset(1, EpisodeContext())
+        opponent._bfs_template = _horizontal_wall_with_left_gap()
+        game_input = _basic_input()
+        game_input.my_units = [(12, 8), (16, 16)]
+
+        plan = opponent._build_center_fallback_plan(game_input, role=0, max_steps=6, extra_block=None)
+
+        self.assertEqual(plan.actions, (int(Action.LEFT),) * 6)
+        self.assertEqual(plan.end, Position(12, 2))
+
     def test_outer_static2_mapaware_commits_to_snapshot_region_then_buys_vision_once(self) -> None:
         opponent = FastProbeOuterStatic2MapAwareOpponent()
         opponent.reset(1, EpisodeContext(map_id=2))
@@ -260,6 +272,13 @@ def _snapshot_with_region_gold(region_id: int, generated: int, remaining: int) -
         for id_ in range(1, 6)
     ]
     return Snapshot(window_begin=0, window_end=4, regions=regions)
+
+
+def _horizontal_wall_with_left_gap() -> MapTemplate:
+    grid = [[0 for _ in range(17)] for _ in range(17)]
+    for col in range(1, 17):
+        grid[11][col] = 1
+    return MapTemplate.from_static_grid(9001, "test_horizontal_wall_left_gap", grid)
 
 
 def _quiet_mechanisms() -> DuelMechanisms:
