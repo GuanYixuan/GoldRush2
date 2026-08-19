@@ -13,8 +13,8 @@ from simulator.errors import SimulatorRuleError
 ACTOR_SPATIAL_CHANNELS = 43
 ACTOR_SCALAR_FEATURES = 10
 FAST_SCALAR_FEATURES = 2
-CRITIC_SPATIAL_CHANNELS = 26
-CRITIC_SCALAR_FEATURES = 17
+CRITIC_SPATIAL_CHANNELS = 39
+CRITIC_SCALAR_FEATURES = 20
 GRID_SIZE = 17
 MOVE_BUDGET = 6
 
@@ -334,9 +334,9 @@ def _validate_transitions(transitions: list[PpoTransition] | tuple[PpoTransition
         if tuple(transition.fast_scalars.shape) != (FAST_SCALAR_FEATURES,):
             raise ValueError(f"transition {idx} fast_scalars must have shape 2")
         if tuple(transition.critic_planes.shape) != (CRITIC_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
-            raise ValueError(f"transition {idx} critic_planes must have shape 26x17x17")
+            raise ValueError(f"transition {idx} critic_planes must have shape 39x17x17")
         if tuple(transition.critic_scalars.shape) != (CRITIC_SCALAR_FEATURES,):
-            raise ValueError(f"transition {idx} critic_scalars must have shape 17")
+            raise ValueError(f"transition {idx} critic_scalars must have shape 20")
         if tuple(transition.actions.shape) != (MOVE_BUDGET,):
             raise ValueError(f"transition {idx} actions must have shape 6")
         if transition.tau <= 0:
@@ -358,9 +358,9 @@ def _validate_batch_arrays(batch: PpoBatch) -> None:
     if tuple(batch.fast_scalars.shape) != (transition_count, FAST_SCALAR_FEATURES):
         raise ValueError(f"fast_scalars must have shape Nx2, got {tuple(batch.fast_scalars.shape)}")
     if tuple(batch.critic_planes.shape) != (transition_count, CRITIC_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE):
-        raise ValueError(f"critic_planes must have shape Nx26x17x17, got {tuple(batch.critic_planes.shape)}")
+        raise ValueError(f"critic_planes must have shape Nx39x17x17, got {tuple(batch.critic_planes.shape)}")
     if tuple(batch.critic_scalars.shape) != (transition_count, CRITIC_SCALAR_FEATURES):
-        raise ValueError(f"critic_scalars must have shape Nx17, got {tuple(batch.critic_scalars.shape)}")
+        raise ValueError(f"critic_scalars must have shape Nx20, got {tuple(batch.critic_scalars.shape)}")
     if tuple(batch.actions.shape) != (transition_count, MOVE_BUDGET):
         raise ValueError(f"actions must have shape Nx6, got {tuple(batch.actions.shape)}")
     if tuple(batch.reward_sums.shape) != (transition_count,):

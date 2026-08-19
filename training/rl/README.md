@@ -60,6 +60,7 @@ rollout_seed = base + (u - 1) * pair_count
 主线训练入口支持：
 
 - `--actor-learning-rate` / `--critic-learning-rate`
+- `--candidate-action-learning-rate` / `--fast-threshold-learning-rate` / `--vp-head-learning-rate`：按 actor 子头拆 optimizer group；实际 ramp 后学习率写入 metrics。
 - `--critic-warmup-updates`
 - `--actor-lr-ramp-updates`
 - `--init-model-checkpoint`

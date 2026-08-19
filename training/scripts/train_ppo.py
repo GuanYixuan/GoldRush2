@@ -16,7 +16,7 @@ from simulator.errors import SimulatorRuleError
 from simulator.mechanisms.maps import SpawnConfig
 from training.bc.schema import BC_CHECKPOINT_SCHEMA, FEATURE_SCHEMA as BC_FEATURE_SCHEMA
 from training.models import GoldRushPolicyNetwork, PolicyNetworkConfig
-from training.models.policy_network import ACTION_HEAD_SCHEMA
+from training.models.policy_network import ACTION_HEAD_SCHEMA, CRITIC_FEATURE_SCHEMA, FEATURE_SCHEMA
 from training.opponents import OpponentSpec
 from training.rl import (
     BatchRolloutSampler,
@@ -56,11 +56,17 @@ class TrainPpoConfig:
     margin_scale: float = 200.0
     gold_gain_scale: float = 100.0
     net_gold_gain_scale: float = 50.0
+    beta_vision_info: float = 0.0
+    vision_info_scale: float = 100.0
+    vision_info_reward_cap: float = 0.03
+    vision_info_recent_window: int = 5
     actor_learning_rate: float = 5.0e-5
     candidate_action_learning_rate: float | None = None
     stem_new_channel_learning_rate: float | None = None
     fast_threshold_learning_rate: float | None = None
+    vp_head_learning_rate: float | None = None
     critic_learning_rate: float = 5.0e-4
+    critic_stem_actor_info_learning_rate: float | None = None
     critic_warmup_updates: int = 0
     actor_lr_ramp_updates: int = 100
     freeze_ko_vp_heads: bool = False
@@ -181,11 +187,15 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "candidate_action_lr": learning_rates["candidate_action_lr"],
                 "stem_new_channel_lr": learning_rates["stem_new_channel_lr"],
                 "fast_threshold_lr": learning_rates["fast_threshold_lr"],
+                "vp_head_lr": learning_rates["vp_head_lr"],
                 "critic_lr": learning_rates["critic_lr"],
+                "critic_stem_actor_info_lr": learning_rates["critic_stem_actor_info_lr"],
                 "actor_lr_ramp_updates": config.actor_lr_ramp_updates,
                 "candidate_action_learning_rate": config.candidate_action_learning_rate,
                 "stem_new_channel_learning_rate": config.stem_new_channel_learning_rate,
                 "fast_threshold_learning_rate": config.fast_threshold_learning_rate,
+                "vp_head_learning_rate": config.vp_head_learning_rate,
+                "critic_stem_actor_info_learning_rate": config.critic_stem_actor_info_learning_rate,
                 "freeze_ko_vp_heads": config.freeze_ko_vp_heads,
                 "critic_warmup_updates": config.critic_warmup_updates,
                 "transition_count": batch.transition_count,
@@ -195,12 +205,26 @@ def run_training(config: TrainPpoConfig) -> TrainPpoResult:
                 "beta_margin": config.beta_margin,
                 "beta_gold_gain": config.beta_gold_gain,
                 "beta_net_gold_gain": config.beta_net_gold_gain,
+                "beta_vision_info": config.beta_vision_info,
                 "margin_scale": config.margin_scale,
                 "gold_gain_scale": config.gold_gain_scale,
                 "net_gold_gain_scale": config.net_gold_gain_scale,
+                "vision_info_scale": config.vision_info_scale,
+                "vision_info_reward_cap": config.vision_info_reward_cap,
+                "vision_info_recent_window": config.vision_info_recent_window,
                 "policy_loss": stats.policy_loss,
                 "value_loss": stats.value_loss,
                 "entropy_bonus": stats.entropy_bonus,
+                "action_entropy_mean": stats.action_entropy_mean,
+                "ko_entropy_mean": stats.ko_entropy_mean,
+                "vp_entropy_mean": stats.vp_entropy_mean,
+                "action_entropy_bonus": stats.action_entropy_bonus,
+                "ko_entropy_bonus": stats.ko_entropy_bonus,
+                "vp_entropy_bonus": stats.vp_entropy_bonus,
+                "threshold_entropy_bonus": stats.threshold_entropy_bonus,
+                "ppo_entropy_action_coef": config.ppo.entropy_action_coef,
+                "ppo_entropy_ko_coef": config.ppo.entropy_ko_coef,
+                "ppo_entropy_vp_coef": config.ppo.entropy_vp_coef,
                 "loss": stats.loss,
                 "approx_joint_kl": stats.approx_joint_kl,
                 "clip_fraction": stats.clip_fraction,
@@ -329,14 +353,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--beta-margin", type=float, default=0.0)
     parser.add_argument("--beta-gold-gain", type=float, default=0.0)
     parser.add_argument("--beta-net-gold-gain", type=float, default=0.1)
+    parser.add_argument("--beta-vision-info", type=float, default=0.0)
     parser.add_argument("--margin-scale", type=float, default=200.0)
     parser.add_argument("--gold-gain-scale", type=float, default=100.0)
     parser.add_argument("--net-gold-gain-scale", type=float, default=50.0)
+    parser.add_argument("--vision-info-scale", type=float, default=100.0)
+    parser.add_argument("--vision-info-reward-cap", type=float, default=0.03)
+    parser.add_argument("--vision-info-recent-window", type=int, default=5)
     parser.add_argument("--actor-learning-rate", type=float, default=5.0e-5)
     parser.add_argument("--candidate-action-learning-rate", type=float, default=None)
     parser.add_argument("--stem-new-channel-learning-rate", type=float, default=None)
     parser.add_argument("--fast-threshold-learning-rate", type=float, default=None)
+    parser.add_argument("--vp-head-learning-rate", type=float, default=None)
     parser.add_argument("--critic-learning-rate", type=float, default=5.0e-4)
+    parser.add_argument("--critic-stem-actor-info-learning-rate", type=float, default=None)
     parser.add_argument("--critic-warmup-updates", type=int, default=0)
     parser.add_argument("--actor-lr-ramp-updates", type=int, default=100)
     parser.add_argument("--freeze-ko-vp-heads", action="store_true")
@@ -362,6 +392,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ppo-clip-range", type=float, default=0.20)
     parser.add_argument("--ppo-value-clip-range", type=float, default=0.20)
     parser.add_argument("--ppo-value-coef", type=float, default=0.50)
+    parser.add_argument("--ppo-entropy-action-coef", type=float, default=0.0100)
+    parser.add_argument("--ppo-entropy-ko-coef", type=float, default=0.0040)
+    parser.add_argument("--ppo-entropy-vp-coef", type=float, default=0.0003)
     parser.add_argument("--ppo-huber-delta", type=float, default=1.0)
     parser.add_argument("--ppo-max-grad-norm", type=float, default=0.5)
     parser.add_argument("--ppo-minibatch-size", type=int, default=512)
@@ -387,6 +420,9 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         clip_range=float(args.ppo_clip_range),
         value_clip_range=float(args.ppo_value_clip_range),
         value_coef=float(args.ppo_value_coef),
+        entropy_action_coef=float(args.ppo_entropy_action_coef),
+        entropy_ko_coef=float(args.ppo_entropy_ko_coef),
+        entropy_vp_coef=float(args.ppo_entropy_vp_coef),
         huber_delta=float(args.ppo_huber_delta),
         max_grad_norm=float(args.ppo_max_grad_norm),
         minibatch_size=int(args.ppo_minibatch_size),
@@ -431,9 +467,13 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         beta_margin=float(args.beta_margin),
         beta_gold_gain=float(args.beta_gold_gain),
         beta_net_gold_gain=float(args.beta_net_gold_gain),
+        beta_vision_info=float(args.beta_vision_info),
         margin_scale=float(args.margin_scale),
         gold_gain_scale=float(args.gold_gain_scale),
         net_gold_gain_scale=float(args.net_gold_gain_scale),
+        vision_info_scale=float(args.vision_info_scale),
+        vision_info_reward_cap=float(args.vision_info_reward_cap),
+        vision_info_recent_window=int(args.vision_info_recent_window),
         actor_learning_rate=float(args.actor_learning_rate),
         candidate_action_learning_rate=(
             None if args.candidate_action_learning_rate is None else float(args.candidate_action_learning_rate)
@@ -444,7 +484,13 @@ def config_from_args(args: argparse.Namespace) -> TrainPpoConfig:
         fast_threshold_learning_rate=(
             None if args.fast_threshold_learning_rate is None else float(args.fast_threshold_learning_rate)
         ),
+        vp_head_learning_rate=None if args.vp_head_learning_rate is None else float(args.vp_head_learning_rate),
         critic_learning_rate=float(args.critic_learning_rate),
+        critic_stem_actor_info_learning_rate=(
+            None
+            if args.critic_stem_actor_info_learning_rate is None
+            else float(args.critic_stem_actor_info_learning_rate)
+        ),
         critic_warmup_updates=int(args.critic_warmup_updates),
         actor_lr_ramp_updates=int(args.actor_lr_ramp_updates),
         freeze_ko_vp_heads=bool(args.freeze_ko_vp_heads),
@@ -482,6 +528,10 @@ def _sampler(config: TrainPpoConfig) -> BatchRolloutSampler:
             margin_scale=config.margin_scale,
             gold_gain_scale=config.gold_gain_scale,
             net_gold_gain_scale=config.net_gold_gain_scale,
+            beta_vision_info=config.beta_vision_info,
+            vision_info_scale=config.vision_info_scale,
+            vision_info_reward_cap=config.vision_info_reward_cap,
+            vision_info_recent_window=config.vision_info_recent_window,
             gamma=config.ppo.gamma,
         ),
     )
@@ -548,6 +598,20 @@ def _install_stem_new_channel_gradient_mask(model: GoldRushPolicyNetwork, config
     setattr(stem_weight, "_goldrush_new_channel_hook", True)
 
 
+def _install_critic_stem_actor_info_gradient_mask(model: GoldRushPolicyNetwork, config: TrainPpoConfig) -> None:
+    if config.critic_stem_actor_info_learning_rate is None:
+        return
+    stem_weight = model.critic_encoder.stem[0].weight
+    if getattr(stem_weight, "_goldrush_actor_info_hook", None):
+        return
+    if tuple(stem_weight.shape[1:]) != (39, 3, 3):
+        raise ValueError(f"critic stem first weight must have input shape 39x3x3, got {tuple(stem_weight.shape)}")
+    mask = torch.zeros_like(stem_weight)
+    mask[:, 26:39, :, :] = 1.0
+    stem_weight.register_hook(lambda grad: grad * mask.to(device=grad.device, dtype=grad.dtype))
+    setattr(stem_weight, "_goldrush_actor_info_hook", True)
+
+
 def _make_optimizer(
     model: GoldRushPolicyNetwork,
     *,
@@ -555,13 +619,35 @@ def _make_optimizer(
     config: TrainPpoConfig,
 ) -> torch.optim.Optimizer:
     _install_stem_new_channel_gradient_mask(model, config)
+    _install_critic_stem_actor_info_gradient_mask(model, config)
     if optimizer_phase == "critic":
-        params: Any = [{"params": list(model.critic_parameters()), "lr": config.critic_learning_rate, "name": "critic"}]
+        critic_stem_params = (
+            _critic_stem_actor_info_parameters(model)
+            if config.critic_stem_actor_info_learning_rate is not None
+            else tuple()
+        )
+        critic_stem_ids = {id(parameter) for parameter in critic_stem_params}
+        critic_params = [
+            parameter
+            for parameter in model.critic_parameters()
+            if id(parameter) not in critic_stem_ids and parameter.requires_grad
+        ]
+        params: Any = [{"params": critic_params, "lr": config.critic_learning_rate, "name": "critic"}]
+        if config.critic_stem_actor_info_learning_rate is not None:
+            params.append(
+                {
+                    "params": _trainable_parameters(critic_stem_params),
+                    "lr": config.critic_stem_actor_info_learning_rate,
+                    "name": "critic_stem_actor_info",
+                }
+            )
     elif optimizer_phase == "full":
         params = _full_optimizer_param_groups(model, config)
     else:
         raise ValueError(f"unknown optimizer_phase: {optimizer_phase!r}")
-    return torch.optim.Adam(params, lr=config.critic_learning_rate, eps=config.adam_eps)
+    optimizer = torch.optim.Adam(params, lr=config.critic_learning_rate, eps=config.adam_eps)
+    _validate_optimizer_param_coverage(model, optimizer)
+    return optimizer
 
 
 def _set_learning_rates_for_update(
@@ -572,14 +658,31 @@ def _set_learning_rates_for_update(
     update_index: int,
 ) -> dict[str, float | None]:
     if optimizer_phase == "critic":
+        expected_group_names = ["critic"]
+        if config.critic_stem_actor_info_learning_rate is not None:
+            expected_group_names.append("critic_stem_actor_info")
+        group_names = [group.get("name") for group in optimizer.param_groups]
+        if group_names != expected_group_names:
+            raise RuntimeError(
+                f"critic PPO optimizer groups must be ordered {expected_group_names}, "
+                f"got {group_names}"
+            )
         for group in optimizer.param_groups:
-            group["lr"] = config.critic_learning_rate
+            name = group.get("name")
+            if name == "critic":
+                group["lr"] = config.critic_learning_rate
+            elif name == "critic_stem_actor_info":
+                group["lr"] = config.critic_stem_actor_info_learning_rate
+            else:
+                raise RuntimeError(f"unknown optimizer group name: {name!r}")
         return {
             "actor_lr": None,
             "candidate_action_lr": None,
             "stem_new_channel_lr": None,
             "fast_threshold_lr": None,
+            "vp_head_lr": None,
             "critic_lr": config.critic_learning_rate,
+            "critic_stem_actor_info_lr": config.critic_stem_actor_info_learning_rate,
         }
     if optimizer_phase != "full":
         raise ValueError(f"unknown optimizer_phase: {optimizer_phase!r}")
@@ -588,8 +691,9 @@ def _set_learning_rates_for_update(
     candidate_lr = None if config.candidate_action_learning_rate is None else _ramped_actor_lr(config.candidate_action_learning_rate, config=config, update_index=update_index)
     stem_new_channel_lr = None if config.stem_new_channel_learning_rate is None else _ramped_actor_lr(config.stem_new_channel_learning_rate, config=config, update_index=update_index)
     fast_threshold_lr = None if config.fast_threshold_learning_rate is None else _ramped_actor_lr(config.fast_threshold_learning_rate, config=config, update_index=update_index)
+    vp_head_lr = None if config.vp_head_learning_rate is None else _ramped_actor_lr(config.vp_head_learning_rate, config=config, update_index=update_index)
     group_names = [group.get("name") for group in optimizer.param_groups]
-    if config.candidate_action_learning_rate is None and config.fast_threshold_learning_rate is None:
+    if _uses_single_actor_optimizer_group(config):
         expected_group_names = ["actor", "critic"]
     else:
         expected_group_names = ["actor_body"]
@@ -599,7 +703,11 @@ def _set_learning_rates_for_update(
             expected_group_names.append("candidate_action")
         if config.fast_threshold_learning_rate is not None:
             expected_group_names.append("fast_threshold")
+        if config.vp_head_learning_rate is not None:
+            expected_group_names.append("vp_head")
         expected_group_names.append("critic")
+    if config.critic_stem_actor_info_learning_rate is not None:
+        expected_group_names.append("critic_stem_actor_info")
     if group_names != expected_group_names:
         raise RuntimeError(
             f"full PPO optimizer groups must be ordered {expected_group_names}, "
@@ -615,8 +723,12 @@ def _set_learning_rates_for_update(
             group["lr"] = candidate_lr
         elif name == "fast_threshold":
             group["lr"] = fast_threshold_lr
+        elif name == "vp_head":
+            group["lr"] = vp_head_lr
         elif name == "critic":
             group["lr"] = config.critic_learning_rate
+        elif name == "critic_stem_actor_info":
+            group["lr"] = config.critic_stem_actor_info_learning_rate
         else:
             raise RuntimeError(f"unknown optimizer group name: {name!r}")
     return {
@@ -624,7 +736,9 @@ def _set_learning_rates_for_update(
         "candidate_action_lr": candidate_lr,
         "stem_new_channel_lr": stem_new_channel_lr,
         "fast_threshold_lr": fast_threshold_lr,
+        "vp_head_lr": vp_head_lr,
         "critic_lr": config.critic_learning_rate,
+        "critic_stem_actor_info_lr": config.critic_stem_actor_info_learning_rate,
     }
 
 
@@ -637,19 +751,42 @@ def _ramped_actor_lr(target_lr: float, *, config: TrainPpoConfig, update_index: 
 
 
 def _full_optimizer_param_groups(model: GoldRushPolicyNetwork, config: TrainPpoConfig) -> list[dict[str, Any]]:
-    critic_params = _trainable_parameters(model.critic_parameters())
-    if config.candidate_action_learning_rate is None and config.fast_threshold_learning_rate is None:
+    critic_stem_params = (
+        _critic_stem_actor_info_parameters(model)
+        if config.critic_stem_actor_info_learning_rate is not None
+        else tuple()
+    )
+    critic_stem_ids = {id(parameter) for parameter in critic_stem_params}
+    critic_params = [
+        parameter
+        for parameter in model.critic_parameters()
+        if id(parameter) not in critic_stem_ids and parameter.requires_grad
+    ]
+    if _uses_single_actor_optimizer_group(config):
         if config.stem_new_channel_learning_rate is not None:
             raise ValueError("stem_new_channel_learning_rate requires candidate_action_learning_rate")
-        return [
+        groups = [
             {"params": _trainable_parameters(model.actor_parameters()), "lr": config.actor_learning_rate, "name": "actor"},
             {"params": critic_params, "lr": config.critic_learning_rate, "name": "critic"},
         ]
+        if config.critic_stem_actor_info_learning_rate is not None:
+            groups.append(
+                {
+                    "params": _trainable_parameters(critic_stem_params),
+                    "lr": config.critic_stem_actor_info_learning_rate,
+                    "name": "critic_stem_actor_info",
+                }
+            )
+        return groups
 
-    candidate_params = _candidate_action_parameters(model)
-    threshold_params = _fast_threshold_parameters(model)
+    candidate_params = (
+        _candidate_action_parameters(model) if config.candidate_action_learning_rate is not None else tuple()
+    )
+    threshold_params = _fast_threshold_parameters(model) if config.fast_threshold_learning_rate is not None else tuple()
+    vp_head_params = _vp_head_parameters(model) if config.vp_head_learning_rate is not None else tuple()
     candidate_ids = {id(parameter) for parameter in candidate_params}
     threshold_ids = {id(parameter) for parameter in threshold_params}
+    vp_head_ids = {id(parameter) for parameter in vp_head_params}
     stem_new_channel_params = tuple()
     stem_new_channel_ids: set[int] = set()
     if config.stem_new_channel_learning_rate is not None:
@@ -661,6 +798,7 @@ def _full_optimizer_param_groups(model: GoldRushPolicyNetwork, config: TrainPpoC
         if (
             id(parameter) not in candidate_ids
             and id(parameter) not in threshold_ids
+            and id(parameter) not in vp_head_ids
             and id(parameter) not in stem_new_channel_ids
             and parameter.requires_grad
         )
@@ -692,8 +830,53 @@ def _full_optimizer_param_groups(model: GoldRushPolicyNetwork, config: TrainPpoC
                 "name": "fast_threshold",
             }
         )
+    if config.vp_head_learning_rate is not None:
+        groups.append(
+            {
+                "params": _trainable_parameters(vp_head_params),
+                "lr": config.vp_head_learning_rate,
+                "name": "vp_head",
+            }
+        )
     groups.append({"params": critic_params, "lr": config.critic_learning_rate, "name": "critic"})
+    if config.critic_stem_actor_info_learning_rate is not None:
+        groups.append(
+            {
+                "params": _trainable_parameters(critic_stem_params),
+                "lr": config.critic_stem_actor_info_learning_rate,
+                "name": "critic_stem_actor_info",
+            }
+        )
     return groups
+
+
+def _validate_optimizer_param_coverage(model: GoldRushPolicyNetwork, optimizer: torch.optim.Optimizer) -> None:
+    grouped_params = [
+        parameter
+        for group in optimizer.param_groups
+        for parameter in group["params"]
+    ]
+    grouped_ids = [id(parameter) for parameter in grouped_params]
+    duplicate_count = len(grouped_ids) - len(set(grouped_ids))
+    if duplicate_count:
+        raise RuntimeError(f"optimizer parameter groups contain duplicate parameters: {duplicate_count}")
+    trainable_ids = {id(parameter) for parameter in model.parameters() if parameter.requires_grad}
+    grouped_id_set = set(grouped_ids)
+    missing = trainable_ids - grouped_id_set
+    unexpected = grouped_id_set - trainable_ids
+    if missing or unexpected:
+        raise RuntimeError(
+            "optimizer parameter groups must exactly cover trainable parameters; "
+            f"missing={len(missing)}, unexpected={len(unexpected)}"
+        )
+
+
+def _uses_single_actor_optimizer_group(config: TrainPpoConfig) -> bool:
+    return (
+        config.candidate_action_learning_rate is None
+        and config.fast_threshold_learning_rate is None
+        and config.vp_head_learning_rate is None
+    )
 
 
 def _trainable_parameters(parameters) -> list[torch.nn.Parameter]:
@@ -709,8 +892,16 @@ def _stem_new_channel_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn
     return (model.actor_encoder.stem[0].weight,)
 
 
+def _critic_stem_actor_info_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn.Parameter, ...]:
+    return (model.critic_encoder.stem[0].weight,)
+
+
 def _fast_threshold_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn.Parameter, ...]:
     return tuple(model.threshold_parameters())
+
+
+def _vp_head_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn.Parameter, ...]:
+    return tuple(model.vp_head.parameters())
 
 
 def _ko_vp_parameters(model: GoldRushPolicyNetwork) -> tuple[torch.nn.Parameter, ...]:
@@ -803,6 +994,8 @@ def _save_checkpoint(
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
     payload = {
         "schema": "ppo_train_v1",
+        "feature_schema": FEATURE_SCHEMA,
+        "critic_feature_schema": CRITIC_FEATURE_SCHEMA,
         "update_index": update_index,
         "optimizer_phase": optimizer_phase,
         "init_source": init_source,
@@ -1041,6 +1234,12 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
         raise ValueError(
             "TrainPpoConfig.enable_fast_runtime_features must match eval_mp.enable_fast_runtime_features"
         )
+    if config.ppo.entropy_action_coef < 0.0:
+        raise ValueError(f"ppo.entropy_action_coef must be non-negative, got {config.ppo.entropy_action_coef}")
+    if config.ppo.entropy_ko_coef < 0.0:
+        raise ValueError(f"ppo.entropy_ko_coef must be non-negative, got {config.ppo.entropy_ko_coef}")
+    if config.ppo.entropy_vp_coef < 0.0:
+        raise ValueError(f"ppo.entropy_vp_coef must be non-negative, got {config.ppo.entropy_vp_coef}")
     if config.enable_fast_runtime_features:
         if config.model.action_head_schema != ACTION_HEAD_SCHEMA:
             raise ValueError(
@@ -1067,12 +1266,33 @@ def _validate_train_config(config: TrainPpoConfig) -> None:
             "fast_threshold_learning_rate must be positive when set, "
             f"got {config.fast_threshold_learning_rate}"
         )
+    if config.vp_head_learning_rate is not None:
+        if config.vp_head_learning_rate <= 0.0:
+            raise ValueError(
+                "vp_head_learning_rate must be positive when set, "
+                f"got {config.vp_head_learning_rate}"
+            )
+        if config.freeze_ko_vp_heads:
+            raise ValueError("vp_head_learning_rate cannot be combined with freeze_ko_vp_heads")
     if config.critic_learning_rate <= 0.0:
         raise ValueError(f"critic_learning_rate must be positive, got {config.critic_learning_rate}")
+    if config.critic_stem_actor_info_learning_rate is not None and config.critic_stem_actor_info_learning_rate <= 0.0:
+        raise ValueError(
+            "critic_stem_actor_info_learning_rate must be positive when set, "
+            f"got {config.critic_stem_actor_info_learning_rate}"
+        )
     if config.critic_warmup_updates < 0:
         raise ValueError(f"critic_warmup_updates must be non-negative, got {config.critic_warmup_updates}")
     if config.actor_lr_ramp_updates < 0:
         raise ValueError(f"actor_lr_ramp_updates must be non-negative, got {config.actor_lr_ramp_updates}")
+    if config.beta_vision_info < 0.0:
+        raise ValueError(f"beta_vision_info must be non-negative, got {config.beta_vision_info}")
+    if config.vision_info_scale <= 0.0:
+        raise ValueError(f"vision_info_scale must be positive, got {config.vision_info_scale}")
+    if config.vision_info_reward_cap < 0.0:
+        raise ValueError(f"vision_info_reward_cap must be non-negative, got {config.vision_info_reward_cap}")
+    if config.vision_info_recent_window < 0:
+        raise ValueError(f"vision_info_recent_window must be non-negative, got {config.vision_info_recent_window}")
     init_modes = sum(
         item is not None
         for item in (config.resume_checkpoint, config.init_model_checkpoint, config.fork_ppo_checkpoint)
@@ -1294,6 +1514,9 @@ def _reward_component_diagnostics(infos: tuple[dict[str, Any], ...]) -> dict[str
             "reward_net_gold_gain_mean": 0.0,
             "reward_clipped_net_gold_gain_mean": 0.0,
             "reward_net_gold_gain_reward_mean": 0.0,
+            "reward_vision_info_gold_mean": 0.0,
+            "reward_vision_info_cells_mean": 0.0,
+            "reward_vision_info_reward_mean": 0.0,
             "reward_component_total_mean": 0.0,
         }
     return {
@@ -1307,6 +1530,9 @@ def _reward_component_diagnostics(infos: tuple[dict[str, Any], ...]) -> dict[str
         "reward_net_gold_gain_mean": _component_mean(components, "net_gold_gain"),
         "reward_clipped_net_gold_gain_mean": _component_mean(components, "clipped_net_gold_gain"),
         "reward_net_gold_gain_reward_mean": _component_mean(components, "net_gold_gain_reward"),
+        "reward_vision_info_gold_mean": _component_mean(components, "vision_info_gold"),
+        "reward_vision_info_cells_mean": _component_mean(components, "vision_info_cells"),
+        "reward_vision_info_reward_mean": _component_mean(components, "vision_info_reward"),
         "reward_component_total_mean": _component_mean(components, "total"),
     }
 

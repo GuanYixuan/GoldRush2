@@ -55,6 +55,29 @@ class PpoTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(torch.tensor(stats.loss)).item())
         self.assertFalse(torch.allclose(before, after))
 
+    def test_ppo_update_weights_entropy_heads_from_config(self) -> None:
+        model = _small_model()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.0)
+        batch = _batch_from_model(model).compute_gae(gamma=1.0, gae_lambda=1.0)
+        config = PpoConfig(
+            update_epochs=1,
+            minibatch_size=batch.transition_count,
+            target_joint_kl=None,
+            entropy_action_coef=0.0,
+            entropy_ko_coef=0.0,
+            entropy_vp_coef=0.123,
+        )
+        with torch.no_grad():
+            evaluation = evaluate_actions(model, batch)
+            expected = 0.123 * float(evaluation.vp_entropy.mean().item())
+
+        stats = ppo_update(model, optimizer, batch, config)
+
+        self.assertAlmostEqual(stats.entropy_bonus, expected)
+        self.assertEqual(stats.action_entropy_bonus, 0.0)
+        self.assertEqual(stats.ko_entropy_bonus, 0.0)
+        self.assertAlmostEqual(stats.vp_entropy_bonus, expected)
+
     def test_ppo_update_can_early_stop_on_joint_kl(self) -> None:
         model = _small_model()
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -94,8 +117,8 @@ class PpoTests(unittest.TestCase):
         self.assertEqual(batch.episode_ids[1], "pair-000000-seed-5-second")
         self.assertEqual(tuple(batch.spatial_planes.shape), (2, 43, 17, 17))
         self.assertEqual(tuple(batch.fast_scalars.shape), (2, 2))
-        self.assertEqual(tuple(batch.critic_planes.shape), (2, 26, 17, 17))
-        self.assertEqual(tuple(batch.critic_scalars.shape), (2, 17))
+        self.assertEqual(tuple(batch.critic_planes.shape), (2, 39, 17, 17))
+        self.assertEqual(tuple(batch.critic_scalars.shape), (2, 20))
         self.assertTrue(torch.allclose(batch.fast_scalars, torch.tensor(INITIAL_FAST_SCALARS).expand(2, -1)))
         self.assertTrue(torch.isfinite(batch.threshold_raw).all().item())
         self.assertTrue(((batch.threshold_int >= 4) & (batch.threshold_int <= 30)).all().item())
@@ -167,8 +190,8 @@ def _feature_tensors(*, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _critic_feature_tensors(*, batch_size: int) -> tuple[torch.Tensor, torch.Tensor]:
-    spatial = torch.zeros(batch_size, 26, 17, 17)
-    scalars = torch.zeros(batch_size, 17)
+    spatial = torch.zeros(batch_size, 39, 17, 17)
+    scalars = torch.zeros(batch_size, 20)
     spatial[:, 9, 0, 0] = 1.0
     spatial[:, 10, 16, 16] = 1.0
     spatial[:, 11, 0, 16] = 1.0

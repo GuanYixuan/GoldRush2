@@ -69,8 +69,8 @@ class MultiprocessRolloutTests(unittest.TestCase):
         self.assertEqual(tuple(batch.spatial_planes.shape), (2, 43, 17, 17))
         self.assertEqual(tuple(batch.scalars.shape), (2, 10))
         self.assertEqual(tuple(batch.fast_scalars.shape), (2, 2))
-        self.assertEqual(tuple(batch.critic_planes.shape), (2, 26, 17, 17))
-        self.assertEqual(tuple(batch.critic_scalars.shape), (2, 17))
+        self.assertEqual(tuple(batch.critic_planes.shape), (2, 39, 17, 17))
+        self.assertEqual(tuple(batch.critic_scalars.shape), (2, 20))
         self.assertTrue(torch.allclose(batch.fast_scalars, torch.tensor(INITIAL_FAST_SCALARS).expand(2, -1)))
         self.assertEqual(tuple(batch.threshold_raw.shape), (2,))
         self.assertEqual(tuple(batch.threshold_int.shape), (2,))
@@ -542,8 +542,8 @@ def _fake_observation(round_index: int) -> GameInput:
 
 def _fake_critic_features(*_: object, **__: object) -> dict:
     return {
-        "planes": torch.zeros(26, 17, 17).numpy(),
-        "scalars": torch.zeros(17).numpy(),
+        "planes": torch.zeros(39, 17, 17).numpy(),
+        "scalars": torch.zeros(20).numpy(),
     }
 
 

@@ -13,7 +13,7 @@ fast opponent action -> NPC action -> neural agent action
 模型使用 actor/critic 双输入：
 
 - actor 使用可提交的 `goldrush2_feature_v2`，由 `policy_runtime.FeatureExtractor` 从官方 `GameInput` 提取。
-- critic 使用训练期 `goldrush2_privileged_critic_feature_v1`，由 simulator full state 提取。
+- critic 使用训练期 `goldrush2_privileged_critic_feature_v2`，由 simulator full state 与同 transition 的 actor 信息态共同构造。
 - PPO policy loss 只更新 actor 路径；value loss 只更新 privileged critic 路径。
 - BC 只初始化/训练 actor 路径，不依赖 privileged critic。
 

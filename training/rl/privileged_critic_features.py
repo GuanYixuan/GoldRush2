@@ -14,12 +14,18 @@ from simulator.state import GameState
 from simulator.types import Position
 
 
-FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v1"
-SPATIAL_CHANNELS = 26
-SCALAR_FEATURES = 17
+FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v2"
+V1_FEATURE_SCHEMA = "goldrush2_privileged_critic_feature_v1"
+REQUIRED_ACTOR_FEATURE_SCHEMA = "goldrush2_feature_v2"
+V1_SPATIAL_CHANNELS = 26
+V1_SCALAR_FEATURES = 17
+ACTOR_INFO_SPATIAL_CHANNELS = 13
+ACTOR_INFO_SCALAR_FEATURES = 3
+SPATIAL_CHANNELS = V1_SPATIAL_CHANNELS + ACTOR_INFO_SPATIAL_CHANNELS
+SCALAR_FEATURES = V1_SCALAR_FEATURES + ACTOR_INFO_SCALAR_FEATURES
 CENTER_GOLD_B = 0.06735
 
-_CHANNEL_NAMES = (
+_V1_CHANNEL_NAMES = (
     "gold_count",
     "bomb_mask",
     "obstacle_mask",
@@ -48,7 +54,7 @@ _CHANNEL_NAMES = (
     "region_5_right_mask",
 )
 
-_SCALAR_NAMES = (
+_V1_SCALAR_NAMES = (
     "game_phase_sin",
     "game_phase_cos",
     "remaining_rounds_scaled",
@@ -67,6 +73,33 @@ _SCALAR_NAMES = (
     "total_gold_on_map_scaled",
     "center_gold_on_map_scaled",
 )
+
+_ACTOR_INFO_CHANNEL_SOURCE_NAMES = (
+    "visible_mask_t0",
+    "visible_mask_t1",
+    "visible_mask_t2",
+    "visible_mask_t3",
+    "visible_mask_t4",
+    "bomb_belief_mask",
+    "obstacle_known_mask",
+    "obstacle_mask",
+    "static_2_mask",
+    "to_static2_distance",
+    "last_snapshot_gold_generated_map",
+    "last_snapshot_gold_remaining_map",
+    "prev_snapshot_gold_remaining_map",
+)
+_ACTOR_INFO_SCALAR_SOURCE_NAMES = (
+    "snapshot_sin",
+    "snapshot_cos",
+    "last_snapshot_valid",
+)
+_ACTOR_INFO_CHANNEL_FALLBACK_INDICES = (0, 1, 2, 3, 4, 40, 20, 21, 41, 42, 38, 35, 36)
+_ACTOR_INFO_SCALAR_FALLBACK_INDICES = (7, 8, 9)
+_ACTOR_INFO_CHANNEL_NAMES = tuple(f"actor_{name}" for name in _ACTOR_INFO_CHANNEL_SOURCE_NAMES)
+_ACTOR_INFO_SCALAR_NAMES = tuple(f"actor_{name}" for name in _ACTOR_INFO_SCALAR_SOURCE_NAMES)
+_CHANNEL_NAMES = _V1_CHANNEL_NAMES + _ACTOR_INFO_CHANNEL_NAMES
+_SCALAR_NAMES = _V1_SCALAR_NAMES + _ACTOR_INFO_SCALAR_NAMES
 
 
 def feature_schema() -> str:
@@ -99,14 +132,43 @@ def extract_privileged_critic_features(
     template: MapTemplate,
     outer_state: Any,
     agent_player_id: int,
+    actor_features: dict[str, Any],
+    round_count: int = ROUND_COUNT,
+) -> dict[str, Any]:
+    v1 = extract_privileged_critic_v1_features(
+        state=state,
+        template=template,
+        outer_state=outer_state,
+        agent_player_id=agent_player_id,
+        round_count=round_count,
+    )
+    actor_planes, actor_scalars = select_actor_info_state_planes_and_scalars(actor_features)
+    planes = np.concatenate((v1["planes"], actor_planes), axis=0).astype(np.float32, copy=False)
+    scalars = np.concatenate((v1["scalars"], actor_scalars), axis=0).astype(np.float32, copy=False)
+    return {
+        "feature_schema": FEATURE_SCHEMA,
+        "required_actor_feature_schema": REQUIRED_ACTOR_FEATURE_SCHEMA,
+        "planes": planes,
+        "scalars": scalars,
+        "channel_names": _CHANNEL_NAMES,
+        "scalar_names": _SCALAR_NAMES,
+    }
+
+
+def extract_privileged_critic_v1_features(
+    *,
+    state: GameState,
+    template: MapTemplate,
+    outer_state: Any,
+    agent_player_id: int,
     round_count: int = ROUND_COUNT,
 ) -> dict[str, Any]:
     _validate_inputs(state=state, template=template, outer_state=outer_state, agent_player_id=agent_player_id, round_count=round_count)
 
-    planes = np.zeros((SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
-    scalars = np.zeros((SCALAR_FEATURES,), dtype=np.float32)
-    channel_index = {name: idx for idx, name in enumerate(_CHANNEL_NAMES)}
-    scalar_index = {name: idx for idx, name in enumerate(_SCALAR_NAMES)}
+    planes = np.zeros((V1_SPATIAL_CHANNELS, GRID_SIZE, GRID_SIZE), dtype=np.float32)
+    scalars = np.zeros((V1_SCALAR_FEATURES,), dtype=np.float32)
+    channel_index = {name: idx for idx, name in enumerate(_V1_CHANNEL_NAMES)}
+    scalar_index = {name: idx for idx, name in enumerate(_V1_SCALAR_NAMES)}
 
     own_player = state.players[agent_player_id]
     enemy_player_id = 3 - agent_player_id
@@ -200,12 +262,56 @@ def extract_privileged_critic_features(
     scalars[scalar_index["center_gold_on_map_scaled"]] = _clip(float(center_map_gold) / 1000.0, 0.0, 3.0)
 
     return {
-        "feature_schema": FEATURE_SCHEMA,
+        "feature_schema": V1_FEATURE_SCHEMA,
         "planes": planes,
         "scalars": scalars,
-        "channel_names": _CHANNEL_NAMES,
-        "scalar_names": _SCALAR_NAMES,
+        "channel_names": _V1_CHANNEL_NAMES,
+        "scalar_names": _V1_SCALAR_NAMES,
     }
+
+
+def select_actor_info_state_planes_and_scalars(actor_features: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    if actor_features.get("feature_schema") != REQUIRED_ACTOR_FEATURE_SCHEMA:
+        raise SimulatorRuleError(
+            f"actor feature schema must be {REQUIRED_ACTOR_FEATURE_SCHEMA!r}, got {actor_features.get('feature_schema')!r}"
+        )
+    actor_planes = np.asarray(actor_features.get("planes"), dtype=np.float32)
+    actor_scalars = np.asarray(actor_features.get("scalars"), dtype=np.float32)
+    if actor_planes.shape != (43, GRID_SIZE, GRID_SIZE):
+        raise SimulatorRuleError(f"actor planes must have shape 43x17x17, got {actor_planes.shape}")
+    if actor_scalars.shape != (10,):
+        raise SimulatorRuleError(f"actor scalars must have shape 10, got {actor_scalars.shape}")
+
+    channel_indices = _actor_indices(
+        actor_features.get("channel_names"),
+        _ACTOR_INFO_CHANNEL_SOURCE_NAMES,
+        _ACTOR_INFO_CHANNEL_FALLBACK_INDICES,
+        kind="channel",
+    )
+    scalar_indices = _actor_indices(
+        actor_features.get("scalar_names"),
+        _ACTOR_INFO_SCALAR_SOURCE_NAMES,
+        _ACTOR_INFO_SCALAR_FALLBACK_INDICES,
+        kind="scalar",
+    )
+    return actor_planes[list(channel_indices)].copy(), actor_scalars[list(scalar_indices)].copy()
+
+
+def _actor_indices(
+    names: Any,
+    source_names: tuple[str, ...],
+    fallback_indices: tuple[int, ...],
+    *,
+    kind: str,
+) -> tuple[int, ...]:
+    if names is None:
+        return fallback_indices
+    name_tuple = tuple(str(name) for name in names)
+    lookup = {name: idx for idx, name in enumerate(name_tuple)}
+    missing = [name for name in source_names if name not in lookup]
+    if missing:
+        raise SimulatorRuleError(f"actor feature {kind} names missing required entries: {missing}")
+    return tuple(lookup[name] for name in source_names)
 
 
 def _validate_inputs(
@@ -305,15 +411,23 @@ def _clip(value: float, low: float, high: float) -> float:
 
 
 __all__ = [
+    "ACTOR_INFO_SCALAR_FEATURES",
+    "ACTOR_INFO_SPATIAL_CHANNELS",
     "CENTER_GOLD_B",
     "FEATURE_SCHEMA",
+    "REQUIRED_ACTOR_FEATURE_SCHEMA",
     "SCALAR_FEATURES",
     "SPATIAL_CHANNELS",
+    "V1_FEATURE_SCHEMA",
+    "V1_SCALAR_FEATURES",
+    "V1_SPATIAL_CHANNELS",
     "channel_names",
     "extract_privileged_critic_features",
+    "extract_privileged_critic_v1_features",
     "feature_schema",
     "privileged_critic_channel_names",
     "privileged_critic_feature_schema",
     "privileged_critic_scalar_names",
     "scalar_names",
+    "select_actor_info_state_planes_and_scalars",
 ]

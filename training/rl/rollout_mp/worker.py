@@ -220,7 +220,7 @@ def run_worker_episode(
             fast_scalars = np.asarray(prepared["fast_scalars"], dtype=np.float32)
         if actor_features["feature_schema"] != "goldrush2_feature_v2":
             raise SimulatorRuleError(f"unexpected feature schema: {actor_features['feature_schema']!r}")
-        critic_features = _extract_critic_features(env, task.agent_player_id, int(static_config["round_count"]))
+        critic_features = _extract_critic_features(env, task.agent_player_id, int(static_config["round_count"]), actor_features)
         actor_planes = np.asarray(actor_features["planes"], dtype=np.float32)
         actor_scalars = np.asarray(actor_features["scalars"], dtype=np.float32)
         critic_planes = np.asarray(critic_features["planes"], dtype=np.float32)
@@ -461,7 +461,12 @@ def _copy_event_counts(events: dict[str, dict[int, int]]) -> dict[str, dict[int,
     return {field: dict(per_player) for field, per_player in events.items()}
 
 
-def _extract_critic_features(env: SingleAgentGoldRushEnv, agent_player_id: int, round_count: int) -> dict[str, Any]:
+def _extract_critic_features(
+    env: SingleAgentGoldRushEnv,
+    agent_player_id: int,
+    round_count: int,
+    actor_features: dict[str, Any],
+) -> dict[str, Any]:
     if env.round_env is None:
         raise SimulatorRuleError("single-agent env has no round_env while extracting critic features")
     if env.round_env.state is None or env.round_env.template is None or env.round_env.outer_state is None:
@@ -471,5 +476,6 @@ def _extract_critic_features(env: SingleAgentGoldRushEnv, agent_player_id: int, 
         template=env.round_env.template,
         outer_state=env.round_env.outer_state,
         agent_player_id=agent_player_id,
+        actor_features=actor_features,
         round_count=round_count,
     )

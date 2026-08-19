@@ -11,16 +11,16 @@ actor_spatial_planes: B x 43 x 17 x 17
 actor_scalars: B x 10
 fast_scalars: B x 2
 actor_feature_schema: goldrush2_feature_v2
-action_head_schema: candidate_cell_residual_v1_fast_threshold_calibrated_base_v1
+action_head_schema: candidate_cell_residual_v1_fast_threshold_calibrated_base_v1_vp_final_position_v1
 ```
 
 critic 输入使用训练期 privileged critic feature：
 
 ```text
-critic_spatial_planes: B x 26 x 17 x 17
-critic_scalars: B x 17
+critic_spatial_planes: B x 39 x 17 x 17
+critic_scalars: B x 20
 fast_scalars: B x 2
-critic_feature_schema: goldrush2_privileged_critic_feature_v1
+critic_feature_schema: goldrush2_privileged_critic_feature_v2
 ```
 
 网络输出官方动作字段和 value：
@@ -62,17 +62,17 @@ Backbone:
     8 x SE-ResidualBlock(width=96, reduction=4)
 ```
 
-critic encoder 使用同型结构，但 stem 输入为 `26`，scalar tower 输入为 `17`：
+critic encoder 使用同型结构，但 stem 输入为 `39`，scalar tower 输入为 `20`：
 
 ```text
 Critic stem:
-    Conv3x3(26 -> 96)
+    Conv3x3(39 -> 96)
     SiLU
     Conv3x3(96 -> 96)
     SiLU
 
 Critic scalar tower:
-    Linear(17 -> 96)
+    Linear(20 -> 96)
     SiLU
     Linear(96 -> 96)
     SiLU
@@ -273,7 +273,7 @@ own_unit1_mask:      channel 25
 
 NPC 不阻挡玩家。可见敌人的执行时位置不确定，不进入 hard mask。被确定阻挡的动作 logits 被 mask；`STAY` 始终提供合法等待。采样动作后只更新当前执行角色的位置，后一步继续使用更新后的两个位置。
 
-这里模拟的是当前 obstacle belief，不是真实地图保证。feature v1 的对称障碍推断无法与直接观测区分；该风险由 feature schema 本身决定。
+这里模拟的是当前 obstacle belief，不是真实地图保证。障碍推断与直接观测的区分能力由 actor feature schema 本身决定。
 
 实现约束：
 
@@ -338,7 +338,7 @@ fast option 的 success/miss/path-fail/fallback、belief、first-rate 和 one-st
 
 policy loss、KL 和 entropy 只读取 actor feature；value loss、old value 对齐和 explained variance 只读取 critic feature。`old_logprob` 仍来自 actor 路径，`old_value` 来自 critic 路径。
 
-当前 entropy 权重保持旧量级：
+PPO entropy bonus 按动作子头分别加权，默认值保持旧量级；实验中可通过 `PpoConfig.entropy_action_coef`、`PpoConfig.entropy_ko_coef`、`PpoConfig.entropy_vp_coef` 单独调整三路探索强度：
 
 ```text
 action_entropy = mean_t H(action_t | prefix_t) / log(5)
@@ -347,11 +347,13 @@ vp_entropy = H(vp) / log(3)
 threshold_entropy = H(Normal(mu_raw, std_raw))
 
 entropy_bonus =
-    0.0100 * action_entropy
-  + 0.0040 * ko_entropy
-  + 0.0003 * vp_entropy
+    entropy_action_coef * action_entropy
+  + entropy_ko_coef * ko_entropy
+  + entropy_vp_coef * vp_entropy
   + beta_threshold_entropy * threshold_entropy
 ```
+
+默认值为 `entropy_action_coef=0.0100`、`entropy_ko_coef=0.0040`、`entropy_vp_coef=0.0003`。
 
 `beta_threshold_entropy` 第一版应很小或为 `0`，先通过 `threshold_log_std` 初始化提供探索，避免 threshold 噪声长期主导 fast 行为。action entropy 暂以完整五类 `log(5)` 归一化；mask 后只有少量合法动作时指标会自然下降。masked logits 使用 dtype 有限最小值，避免 `0 * -inf` 产生 NaN。
 
@@ -364,7 +366,7 @@ multiprocess rollout 的 worker 负责提取两套 feature：
 ```text
 policy_runtime.FeatureExtractor.observe(GameInput) -> actor feature
 Fast Full-Realization Belief runtime state -> fast_scalars
-extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent_player_id) -> critic feature
+extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent_player_id, actor_features) -> critic feature
 ```
 
 主进程/GPU 只负责批量推理。shared memory 与 PPO batch 保存两套 feature，shape 固定为：
@@ -372,7 +374,7 @@ extract_privileged_critic_features(GameState, MapTemplate, OuterGoldState, agent
 ```text
 actor:  43 x 17 x 17, scalars 10
 fast:   scalars 2
-critic: 26 x 17 x 17, scalars 17
+critic: 39 x 17 x 17, scalars 20
 ```
 
 自回归前的完整模型双实例基线约为：
@@ -391,6 +393,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - `ko/vp/decoder_action` 输出层使用 `std=0.01` 小初始化。
 - `candidate_action_head` 最后一层权重和 bias 为 0，使 residual 初始严格为 0。
 - `threshold_mlp` 最后一层权重和 bias 为 0，使 threshold residual 初始严格为 0；初始 threshold 由 calibrated base 决定。
+- `vp_head` 接收 `actor_context` 与动作解码后的两个己方角色 final-position local feature；从旧 fast-threshold checkpoint inflation 时，旧 `actor_context` 权重照抄，新增 final-position 列置 0。
 - `threshold_log_std` 初始约为 `-1.3`，训练时 clamp 到稳定范围。
 - `vp` bias 保持初始先验 `(0.90,0.07,0.03)`。
 - GRU input weight 使用 Xavier，hidden weight 使用 orthogonal，bias 为 0。
@@ -398,7 +401,11 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - value 输出层使用小初始化，使初始 value 接近 0。
 - BC 训练只优化 actor 参数。PPO 从 BC checkpoint 初始化时，只加载 actor 路径；critic encoder 与 critic head 按 privileged critic schema 随机初始化或从专门 critic checkpoint 加载，不能默认拷贝 actor encoder，因为 actor/critic 输入 channel 与语义不同。
 
-主线不维护隐式部分加载。fast threshold calibrated-base 接入时，显式 inflation 工具只支持当前稳定的 feature v2 / `action_head_schema=candidate_cell_residual_v1` checkpoint：补齐 fast threshold residual head，并在 critic value 第一层追加 2 个 `fast_scalars` 输入列且置零，使初始普通动作分布和旧 value 输出保持不变。
+主线不维护隐式部分加载。当前迁移链路由显式 inflation 工具承担：
+
+1. fast threshold calibrated-base inflation 只支持 feature v2 / `action_head_schema=candidate_cell_residual_v1` checkpoint：补齐 fast threshold residual head，并在 critic value 第一层追加 2 个 `fast_scalars` 输入列且置零，使初始普通动作分布和旧 value 输出保持不变。输出 schema 为 `candidate_cell_residual_v1_fast_threshold_calibrated_base_v1`。
+2. VP final-position inflation 只支持 `candidate_cell_residual_v1_fast_threshold_calibrated_base_v1` checkpoint：默认把 `vp_head.weight` 从 `[3, actor_hidden]` 扩展到 `[3, actor_hidden + 2 * width]`，旧列照抄，新增 final-position 列置零，使初始 VP logits 完全不变。若旧 VP head 已饱和到几乎永不买视野，可显式使用 `--reset-vp-head-prior P0 P1 P2`，将 `vp_head.weight` 全置 0、bias 设为 `log([P0, P1, P2])`，用非零 VP 先验换取探索样本。输出 schema 为当前主线 schema。
+3. privileged critic feature v2 inflation 应在动作头 schema 已经升级到当前主线后执行，只支持 critic feature v1 shape 的 PPO checkpoint：把 critic stem 从 `26 -> 39`、critic scalar tower 从 `17 -> 20`，旧输入权重照抄，新增 actor-info 通道/列置零，使初始 value 与旧 critic 完全一致。输出 `critic_feature_schema=goldrush2_privileged_critic_feature_v2`。
 
 旧 factorized checkpoint、旧 shared-encoder PPO checkpoint、缺少 `action_head_schema=candidate_cell_residual_v1` 的旧 autoregressive head checkpoint、旧 `candidate_cell_residual_v1_fast_threshold_v1` checkpoint，以及 schema 元信息缺失或不匹配的 checkpoint 均不兼容当前模型，应 fail-fast。inflation 后不继承旧 optimizer state。
 
@@ -414,6 +421,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 - rollout 与 teacher forcing logprob 等价。
 - candidate-cell residual head 初始为零扰动；旧 head checkpoint inflation 后在同一随机种子或 deterministic 检查下官方动作完全等价。
 - fast threshold residual head 初始为零扰动；`p_fast_full_realization` 为 0.8 时 calibrated base 输出 `threshold_int=6`，为 0.3/0.6 时分别输出约 11/6。
+- VP final-position head inflation 后旧 `actor_context` logits 完全等价，新增 final-position 列为 0；teacher-forced actions 改变 final positions 时 VP logits 能条件化变化。
 - threshold raw teacher forcing logprob 等价，部署 stochastic 采样语义与训练分布一致。
 - PPO 双输入中 actor feature 只影响 policy/logprob，critic feature 只影响 value。
 - critic 四角色 gather 的 channel index、shape 和 P1/P2 视角。

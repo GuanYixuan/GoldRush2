@@ -17,6 +17,7 @@ from training.models import (
     policy_action_to_game_output,
     safe_game_output,
 )
+from training.models.policy_network import _EncodedState
 from training.opponents import OpponentSpec
 from training.rl import BatchRolloutSampler, RuntimePolicyWrapper, SingleAgentEnvConfig
 
@@ -46,9 +47,9 @@ class PolicyNetworkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "scalars must have 10 features"):
             model.act_actor_only(spatial, scalars[:, :9])
         with self.assertRaisesRegex(ValueError, "critic_planes must have shape"):
-            model.act(spatial, scalars, critic_spatial[:, :25], critic_scalars)
-        with self.assertRaisesRegex(ValueError, "critic_scalars must have 17 features"):
-            model.act(spatial, scalars, critic_spatial, critic_scalars[:, :16])
+            model.act(spatial, scalars, critic_spatial[:, :38], critic_scalars)
+        with self.assertRaisesRegex(ValueError, "critic_scalars must have 20 features"):
+            model.act(spatial, scalars, critic_spatial, critic_scalars[:, :19])
         with self.assertRaisesRegex(ValueError, "actor/critic batch size mismatch"):
             model.act(spatial, scalars, *_critic_feature_tensors(batch_size=2))
 
@@ -111,6 +112,47 @@ class PolicyNetworkTests(unittest.TestCase):
         base_logits = model.decoder_action_head(hidden)
 
         self.assertTrue(torch.allclose(logits, base_logits, atol=0.0, rtol=0.0))
+
+    def test_vp_head_can_condition_on_decoded_final_positions(self) -> None:
+        model = _small_model()
+        with torch.no_grad():
+            model.vp_head.weight.zero_()
+            model.vp_head.bias.zero_()
+            model.vp_head.weight[1, model.config.actor_hidden] = 1.0
+        spatial, scalars = _feature_tensors(batch_size=1, unit0=(1, 1), unit1=(15, 15))
+        encoded = model._encode(spatial, scalars)
+        controlled_features = torch.zeros_like(encoded.spatial_features)
+        controlled_features[:, 0, 1, 1] = 1.0
+        controlled_features[:, 0, 3, 3] = 3.0
+        controlled_encoded = _EncodedState(
+            spatial_features=controlled_features,
+            actor_context=torch.zeros_like(encoded.actor_context),
+            known_obstacles=encoded.known_obstacles,
+            unit0_position=encoded.unit0_position,
+            unit1_position=encoded.unit1_position,
+        )
+        stay_decoded = model._decode(
+            encoded,
+            torch.tensor([12]),
+            deterministic=False,
+            forced_actions=torch.tensor([[Action.STAY] * 6], dtype=torch.long),
+        )
+        move_decoded = model._decode(
+            encoded,
+            torch.tensor([12]),
+            deterministic=False,
+            forced_actions=torch.tensor(
+                [[Action.DOWN, Action.DOWN, Action.RIGHT, Action.RIGHT, Action.STAY, Action.STAY]],
+                dtype=torch.long,
+            ),
+        )
+
+        stay_logits = model._vp_logits(controlled_encoded, stay_decoded)
+        move_logits = model._vp_logits(controlled_encoded, move_decoded)
+
+        self.assertEqual(stay_decoded.final_unit0_position.item(), 1 * 17 + 1)
+        self.assertEqual(move_decoded.final_unit0_position.item(), 3 * 17 + 3)
+        self.assertGreater(move_logits[0, 1].item(), stay_logits[0, 1].item())
 
     def test_actor_and_critic_parameters_are_disjoint(self) -> None:
         model = _small_model()
@@ -479,8 +521,8 @@ def _feature_tensors(
 def _critic_feature_tensors(
     *, batch_size: int, unit0: tuple[int, int] = (1, 1), unit1: tuple[int, int] = (15, 15)
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    spatial = torch.zeros(batch_size, 26, 17, 17)
-    scalars = torch.zeros(batch_size, 17)
+    spatial = torch.zeros(batch_size, 39, 17, 17)
+    scalars = torch.zeros(batch_size, 20)
     spatial[:, 9, unit0[0], unit0[1]] = 1.0
     spatial[:, 10, unit1[0], unit1[1]] = 1.0
     spatial[:, 11, 2, 14] = 1.0

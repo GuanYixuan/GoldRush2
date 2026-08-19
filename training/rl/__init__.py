@@ -24,9 +24,11 @@ from .ppo import (
 from .ppo_buffer import PpoBatch, PpoMiniBatch, PpoTransition
 from .privileged_critic_features import (
     extract_privileged_critic_features,
+    extract_privileged_critic_v1_features,
     privileged_critic_channel_names,
     privileged_critic_feature_schema,
     privileged_critic_scalar_names,
+    select_actor_info_state_planes_and_scalars,
 )
 from .rewards import TerminalWinMarginGoldGainReward, WinLossReward
 from .rollout import EpisodeBatch, Trajectory, Transition
@@ -71,8 +73,10 @@ __all__ = [
     "evaluate_fast_runtime_crn_pair",
     "evaluate_parallel",
     "extract_privileged_critic_features",
+    "extract_privileged_critic_v1_features",
     "privileged_critic_channel_names",
     "privileged_critic_feature_schema",
     "privileged_critic_scalar_names",
+    "select_actor_info_state_planes_and_scalars",
     "ppo_update",
 ]

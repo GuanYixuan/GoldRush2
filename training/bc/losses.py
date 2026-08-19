@@ -37,9 +37,10 @@ def bc_loss(model: GoldRushPolicyNetwork, batch: BcBatch, config: BcLossConfig |
 
     with torch.no_grad():
         encoded = model._encode(batch.planes, batch.scalars)
-        ko_logits = model.ko_head(encoded.actor_context)
-        vp_logits = model.vp_head(encoded.actor_context)
         target_ko = 2 * batch.k.long() + batch.order.long()
+        ko_logits = model.ko_head(encoded.actor_context)
+        decoded = model._decode(encoded, target_ko, deterministic=False, forced_actions=batch.actions.long())
+        vp_logits = model._vp_logits(encoded, decoded)
         accuracy_ko = (ko_logits.argmax(dim=1) == target_ko).float().mean()
         accuracy_vp = (vp_logits.argmax(dim=1) == batch.vp.long()).float().mean()
 
