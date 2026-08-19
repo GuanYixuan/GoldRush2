@@ -128,6 +128,7 @@ def built_in_public_map_pool() -> MapPool:
             _template_from_cells(3, "official_map_3", _MAP3_OBSTACLES, _MAP3_SPECIAL),
             _template_from_static_rows(4, "official_map_4", _MAP4_STATIC_ROWS),
             _template_from_static_rows(5, "official_map_5", _MAP5_STATIC_ROWS),
+            _template_from_static_rows(6, "official_map_6", _MAP6_STATIC_ROWS),
         )
     )
 
@@ -142,6 +143,9 @@ def built_in_training_map_pool() -> MapPool:
     map5_rot90 = rotate_template(public_templates[4], turns=1, map_key="official_map_5_rot90", name="official_map_5_rot90")
     map5_rot180 = rotate_template(public_templates[4], turns=2, map_key="official_map_5_rot180", name="official_map_5_rot180")
     map5_rot270 = rotate_template(public_templates[4], turns=3, map_key="official_map_5_rot270", name="official_map_5_rot270")
+    map6_rot90 = rotate_template(public_templates[5], turns=1, map_key="official_map_6_rot90", name="official_map_6_rot90")
+    map6_rot180 = rotate_template(public_templates[5], turns=2, map_key="official_map_6_rot180", name="official_map_6_rot180")
+    map6_rot270 = rotate_template(public_templates[5], turns=3, map_key="official_map_6_rot270", name="official_map_6_rot270")
     map101 = _template_from_static_rows(101, "training_axis_cross_101", _MAP101_STATIC_ROWS)
     map101_rot90 = rotate_template(map101, turns=1, map_key="training_axis_cross_101_rot90", name="training_axis_cross_101_rot90")
     map111 = _template_from_static_rows(111, "training_left_right_111", _MAP111_STATIC_ROWS)
@@ -167,6 +171,10 @@ def built_in_training_map_pool() -> MapPool:
             map5_rot90,
             map5_rot180,
             map5_rot270,
+            public_templates[5],
+            map6_rot90,
+            map6_rot180,
+            map6_rot270,
             map101,
             map101_rot90,
             map111,
@@ -576,6 +584,27 @@ _MAP5_STATIC_ROWS = (
     "00000000000000000",
     "11111110001111111",
     "00002000000020000",
+)
+
+
+_MAP6_STATIC_ROWS = (
+    "00000000000000000",
+    "00000100000100000",
+    "00000100000100000",
+    "00002100000100000",
+    "00001111011110022",
+    "11111110001111111",
+    "20001111011110000",
+    "20001011011010000",
+    "20000000000000000",
+    "20001011011010000",
+    "20001111011110000",
+    "11111110001111111",
+    "00001111011110022",
+    "00002100000100000",
+    "00000100000100000",
+    "00000100000100000",
+    "00000000000000000",
 )
 
 

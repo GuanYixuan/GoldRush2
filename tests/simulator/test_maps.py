@@ -24,13 +24,13 @@ class MapsTests(unittest.TestCase):
     def test_built_in_public_pool_contains_observed_templates(self) -> None:
         pool = built_in_public_map_pool()
 
-        self.assertEqual([template.map_id for template in pool.templates], [1, 2, 3, 4, 5])
+        self.assertEqual([template.map_id for template in pool.templates], [1, 2, 3, 4, 5, 6])
         self.assertEqual(
             [template.map_key for template in pool.templates],
-            ["official_map_1", "official_map_2", "official_map_3", "official_map_4", "official_map_5"],
+            ["official_map_1", "official_map_2", "official_map_3", "official_map_4", "official_map_5", "official_map_6"],
         )
-        self.assertEqual([len(template.obstacles) for template in pool.templates], [40, 24, 78, 119, 58])
-        self.assertEqual([len(template.special_cells) for template in pool.templates], [20, 20, 20, 6, 7])
+        self.assertEqual([len(template.obstacles) for template in pool.templates], [40, 24, 78, 119, 58, 84])
+        self.assertEqual([len(template.special_cells) for template in pool.templates], [20, 20, 20, 6, 7, 11])
 
     def test_built_in_training_pool_extends_public_pool(self) -> None:
         public_pool = built_in_public_map_pool()
@@ -50,6 +50,10 @@ class MapsTests(unittest.TestCase):
             "official_map_5_rot90",
             "official_map_5_rot180",
             "official_map_5_rot270",
+            "official_map_6",
+            "official_map_6_rot90",
+            "official_map_6_rot180",
+            "official_map_6_rot270",
             "training_axis_cross_101",
             "training_axis_cross_101_rot90",
             "training_left_right_111",
@@ -67,6 +71,7 @@ class MapsTests(unittest.TestCase):
             3, 3,
             4, 4, 4, 4,
             5, 5, 5, 5,
+            6, 6, 6, 6,
             101, 101,
             111, 111, 111, 111,
             121, 121, 121, 121,
@@ -76,8 +81,11 @@ class MapsTests(unittest.TestCase):
         self.assertEqual(training_pool.get_by_key("official_map_3_rot90").static_grid, rotate_static_grid_90(public_pool.get(3).static_grid))
         self.assertEqual(training_pool.get_by_key("official_map_4_rot90").static_grid, rotate_static_grid_90(public_pool.get(4).static_grid))
         self.assertEqual(training_pool.get_by_key("official_map_5_rot90").static_grid, rotate_static_grid_90(public_pool.get(5).static_grid))
+        self.assertEqual(training_pool.get_by_key("official_map_6_rot90").static_grid, rotate_static_grid_90(public_pool.get(6).static_grid))
         self.assertEqual(len(training_pool.get(5).obstacles), 58)
         self.assertEqual(len(training_pool.get(5).special_cells), 7)
+        self.assertEqual(len(training_pool.get(6).obstacles), 84)
+        self.assertEqual(len(training_pool.get(6).special_cells), 11)
         self.assertEqual(len(training_pool.get(101).obstacles), 60)
         self.assertEqual(len(training_pool.get(101).special_cells), 20)
         self.assertEqual(len(training_pool.get(111).obstacles), 51)
@@ -109,6 +117,7 @@ class MapsTests(unittest.TestCase):
             3: {"official_map_3", "official_map_3_rot90"},
             4: {"official_map_4", "official_map_4_rot90", "official_map_4_rot180", "official_map_4_rot270"},
             5: {"official_map_5", "official_map_5_rot90", "official_map_5_rot180", "official_map_5_rot270"},
+            6: {"official_map_6", "official_map_6_rot90", "official_map_6_rot180", "official_map_6_rot270"},
             101: {"training_axis_cross_101", "training_axis_cross_101_rot90"},
             111: {
                 "training_left_right_111",
@@ -129,7 +138,7 @@ class MapsTests(unittest.TestCase):
                 template = pool.get_by_key(key)
                 self.assertEqual(template.map_id, map_id)
                 build_initial_state(template)
-                if map_id not in {4, 5}:
+                if map_id not in {4, 5, 6}:
                     validate_competition_training_map(template)
             sampled = {pool.sample_variant(map_id, random.Random(seed)).map_key for seed in range(2026081600, 2026081700)}
             self.assertEqual(sampled, expected_keys)
@@ -165,6 +174,15 @@ class MapsTests(unittest.TestCase):
             counts[region_id(pos)] += 1
 
         self.assertEqual(counts, {2: 2, 3: 2, 4: 2, 5: 1})
+
+    def test_public_map_six_has_sparse_static_two_cells(self) -> None:
+        template = built_in_public_map_pool().get(6)
+
+        counts = {region: 0 for region in (2, 3, 4, 5)}
+        for pos in template.special_cells:
+            counts[region_id(pos)] += 1
+
+        self.assertEqual(counts, {2: 1, 3: 5, 4: 1, 5: 4})
 
     def test_training_map_validation_rejects_non_axis_symmetric_obstacles(self) -> None:
         grid = _valid_training_grid()
@@ -212,7 +230,7 @@ class MapsTests(unittest.TestCase):
         ids2 = [pool.sample(rng2).map_id for _ in range(20)]
 
         self.assertEqual(ids1, ids2)
-        self.assertEqual(set(ids1), {1, 2, 3, 4, 5})
+        self.assertEqual(set(ids1), {1, 2, 3, 4, 5, 6})
 
     def test_spawn_over_obstacle_fails_fast(self) -> None:
         template = built_in_public_map_pool().get(1)
