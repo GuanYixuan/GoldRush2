@@ -2,16 +2,22 @@
 
 `onnxruntime_c_api/` 保存已验证可用于提交 `.so` 组装的 ONNX Runtime C API headers。`tools/submission/build_cpp_policy.py` 会复制这些 headers 到生成目录，并在 C++ 侧通过 `dlopen` / `dlsym` 动态调用平台环境中的 `libonnxruntime.so`，避免编译期链接。
 
-`policy_runtime/` 承载训练和最终 C++ 提交策略共享的确定性运行时逻辑。当前实现冻结为 actor 侧 `goldrush2_feature_v2`，具体 feature 语义见 `docs/features/actor_feature_v2.md`。
+`policy_runtime/` 承载训练和最终 C++ 提交策略共享的确定性运行时逻辑，包括 actor 侧 `goldrush2_feature_v2`、conditional fast controller、跨回合 `FastRuntimeState` 及 pending/backfill。具体 feature 语义见 `docs/features/actor_feature_v2.md`，fast 行为与 threshold 语义见 `docs/fast_option_design.md`。
 
-训练期 privileged critic feature 不在本 runtime 中实现。critic feature 读取 simulator full state，由训练栈 Python 侧提供，schema 见 `docs/features/privileged_critic_feature_v1.md`。
+训练期 privileged critic feature 不在本 runtime 中实现。critic feature 读取 simulator full state，由训练栈 Python 侧提供，当前 schema 见 `docs/features/privileged_critic_feature_v2.md`。
+
+## Conditional fast runtime
+
+比赛后期主线已使用这套 runtime。每回合先尝试依据上一回合保存的 `threshold_int` 执行 fast controller；命中时直接返回动作并保存最小 pending，未命中时由 `prepare_neural()` 补齐历史、更新 fast belief、生成 actor feature，再进入神经网络。普通神经回合结束后由 `commit_neural()` 提交动作状态并保存下一回合 threshold。
+
+训练入口的 `--enable-fast-runtime-features` 控制 rollout/eval 是否接入这套行为，默认关闭。提交构建参数 `--fast-runtime-mode release/debug` 只选择是否保留调试信息和热路径实现方式，不是 fast option 的开关；正式提交使用 `release`。
 
 ## 边界
 
 - C++ core 直接使用官方 `official_sdk/code/game_api.h` 的 `GameInput` / `GameOutput`。
 - Python binding 只负责把 simulator 的 Python `GameInput` / `GameOutput` dataclass 转成官方 C++ struct。
 - `observe()` 只能写入 observation 中可见事实。
-- `commit_action()` 预留给跨回合策略状态使用，当前 actor v1 feature 不输出上一动作相关特征。
+- 普通 feature-only 调用通过 `commit_action()` 记录动作；conditional fast 路径由 `FastRuntimeState` 的 `prepare_neural()`、`commit_neural()` 和 pending backfill 维护同一份跨回合语义。
 
 ## 构建
 

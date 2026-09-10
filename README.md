@@ -4,16 +4,17 @@
 
 规则事实来源统一见 `gamerules/gamerules.md`。平台接口、提交限制和 replay 格式分别见 `gamerules/platform.md`、`gamerules/submission.md`、`gamerules/replay.md`。
 
-## 当前主线
+## 当前代码主线
 
-当前神经策略主线是慢速后手 PPO：
+基础神经路径按慢速后手 PPO 训练；比赛后期主线在其上加入 conditional fast option，并由最终训练主线继续继承。fast 命中时 C++ controller 直接返回动作，未命中时回到慢速神经路径。当前通用训练 CLI 保留完整实现，但 `--enable-fast-runtime-features` 默认关闭。
 
 - actor 使用可部署的 `goldrush2_feature_v2`，由 `policy_runtime/` 的 C++ runtime 提供。
-- critic 使用训练期 privileged full-state feature，具体 schema 见 `docs/features/privileged_critic_feature_v1.md`。
+- critic 使用训练期 privileged full-state feature，具体 schema 见 `docs/features/privileged_critic_feature_v2.md`。
+- threshold head 输出下一回合 fast controller 使用的阈值；比赛后期最终训练主线为其设置了独立学习率。
 - 网络结构见 `docs/policy_network_design.md`。
-- PPO、reward 和训练栈入口见 `training/README.md`、`docs/rl_architecture.md`、`docs/reward_design.md`。
+- PPO、reward、fast option 和训练栈入口见 `training/README.md`、`docs/rl_architecture.md`、`docs/fast_option_design.md`、`docs/reward_design.md`。
 
-主线 PPO 入口：
+通用 PPO 入口：
 
 ```bash
 PYTHONPATH=. conda run --no-capture-output -n goldrush \
@@ -32,7 +33,7 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 - `gamerules/`：规则、平台 API、提交限制和官方 replay 口径。
 - `docs/`：正式架构、schema、feature、reward、网络、推理和研究设计文档；入口见 `docs/README.md`。
 - `training/`：BC、PPO、opponent league、评估、rollout 和模型训练入口；入口见 `training/README.md`。
-- `policy_runtime/`：actor 侧 C++ feature extractor runtime，服务训练与最终 C++ 提交。
+- `policy_runtime/`：训练和提交共享的 C++ actor feature extractor、fast controller 与跨回合 runtime state。
 - `simulator/`：本地游戏环境、机制近似、round-step/duel runner 和 simulator full replay。
 - `mechanism/`：隐藏机制的数据采集、双视角合并、离线特征抽取和机理分析。
 - `fast_probing/`：快速 C++ 专家策略实验，`v3`/`fast_probe_v3_like` 也是当前 BC 与 opponent 先验的重要来源。

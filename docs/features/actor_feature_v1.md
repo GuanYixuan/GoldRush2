@@ -1,6 +1,6 @@
 # Actor Feature v1 设计
 
-本文冻结 GoldRush2.0 actor 可提交路径的网络输入语义。v1 按 CNN 主线设计，只输出 spatial planes 与 scalars，不引入 tokens。feature 总览见 `docs/features/README.md`，RL 栈总览见 `docs/rl_architecture.md`，运行时工程入口见 `policy_runtime/README.md`。
+本文冻结 GoldRush2.0 actor 可提交路径的历史 v1 网络输入语义。v1 按 CNN 主线设计，只输出 spatial planes 与 scalars，不引入 tokens；文中的“当前”和“后续”均指 v1 冻结时的状态。仓库当前使用 feature v2，并已实现 conditional fast runtime，入口见 `docs/features/README.md`、`docs/rl_architecture.md` 和 `policy_runtime/README.md`。
 
 ## 定位
 

@@ -2,20 +2,26 @@
 
 本文是 GoldRush2 RL 栈的高层导航。游戏规则以 `gamerules/gamerules.md` 为准；平台提交与推理约束见 `gamerules/submission.md` 和 `docs/neural_inference.md`；训练代码入口见 `training/README.md`。
 
-## 核心假设
+## 执行顺序与条件快速路径
 
-本项目默认训练 **慢速神经网络后手策略**，主要通过快速 opponent league 做 against-league 训练。
+比赛前期的基础策略是常态后手的神经网络策略，主要通过快速 opponent league 做 against-league 训练。比赛后期，主线加入 conditional fast option：局部条件满足时由 C++ fast controller 直接返回动作，否则才运行神经网络。最终训练主线同时启用了 fast runtime，并训练了控制下一回合触发阈值的 threshold head。
 
-依据：
+这一设计基于：
 
 - GoldRush2 行动顺序由双方 `moveDecision` 响应耗时决定。
 - 神经网络策略通常慢于手写规则策略，实战中大概率后手。
 - 同构同步 self-play 会高估神经网络策略先手或同步行动时的表现。
 
-主训练分布近似为：
+普通神经路径仍近似为：
 
 ```text
 fast opponent action -> NPC action -> neural agent action
+```
+
+fast 命中时则近似为：
+
+```text
+fast agent action -> NPC action -> opponent action
 ```
 
 平台真实顺序为：
@@ -24,7 +30,7 @@ fast opponent action -> NPC action -> neural agent action
 faster player action -> NPC action -> slower player action
 ```
 
-因此训练环境必须显式建模行动顺序，不应在算法层隐式假定双方同步。
+因此训练环境必须显式建模两条路径的行动顺序，不应在算法层隐式假定双方同步。通用训练入口保留显式开关，`--enable-fast-runtime-features` 默认关闭；这只是 CLI 默认值，不代表比赛后期主线未使用 fast runtime。完整实现与历史结论见 `docs/fast_option_design.md`。
 
 ## 模块边界
 
@@ -33,7 +39,7 @@ simulator/
   游戏环境、官方规则、机制近似、观测生成、回放导出
 
 policy_runtime/
-  训练和部署共享的 actor feature extractor 与 actor-only runtime
+  训练和部署共享的 actor feature extractor、fast controller 与跨回合 runtime state
 
 training/
   models/
@@ -61,10 +67,12 @@ training/
 ```text
 RoundStepEnv action-time state
   -> official-shaped GameInput
-  -> policy_runtime actor feature extractor
-  -> simulator full-state privileged critic feature extractor
-  -> GoldRushPolicyNetwork actor/critic 双输入
-  -> official-shaped GameOutput
+  -> policy_runtime FastRuntimeState
+     -> fast 命中：直接生成 official-shaped GameOutput
+     -> fast 未命中：backfill pending，提取 actor feature
+        -> simulator full-state privileged critic feature extractor
+        -> GoldRushPolicyNetwork actor/critic 双输入
+        -> 普通动作 + 下一回合 threshold
   -> simulator transition/reward
   -> PpoBatch
   -> GAE
@@ -87,9 +95,11 @@ actor feature extractor 同时用于 Python 训练和最终 C++/ONNX 提交策�
 
 BC 当前用于 actor-only warm start。它不进入 `env.step()` reward，也不替代官方评估口径。相关细节见 `docs/reward_design.md` 和 `training/bc/README.md`。
 
-### Fast option 是未来扩展
+### Fast option 是已实现的可选路径
 
-conditional fast option 用于缓解神经网络常态后手问题，但不属于当前主线训练入口。相关设计见 `docs/fast_option_design.md`。
+fast option、threshold head、pending/backfill 和训练/部署共享的 C++ runtime core 已完成实现，并在比赛后期进入主线。当前通用训练 CLI 不默认启用这条路径；需要训练或评估 fast 行为时必须显式打开 `--enable-fast-runtime-features`，需要独立控制 threshold head 学习率时再传入 `--fast-threshold-learning-rate`。
+
+赛后冻结评估确认 fast controller 相对关闭 fast 有明显收益，但没有确认 learned threshold residual 优于 calibrated prior。这里应区分“fast path 整体有效”和“threshold 学习带来额外增益”两项结论，具体数据见 `docs/fast_option_design.md`。
 
 ## 评估口径
 

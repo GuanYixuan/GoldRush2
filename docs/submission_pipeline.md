@@ -23,7 +23,7 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 
 - 检查 checkpoint schema 为 `ppo_train_v1`。
 - 检查 actor feature shape 与当前 `goldrush2_feature_v2` 一致。
-- 检查 action head schema 与当前 `candidate_cell_residual_v1` 一致。
+- 检查 action head schema 与 `training.models.policy_network.ACTION_HEAD_SCHEMA` 一致；当前值为 `candidate_cell_residual_v1_fast_threshold_calibrated_base_v1_vp_final_position_v1`。
 - 校验 PyTorch 输出与 ONNXRuntime 输出完全一致。
 - 检查 ONNX 图中没有平台不稳定随机算子。
 - 写出 `actor.metadata.json`，包含 checkpoint update、模型配置、输入输出 shape 和算子类型。
@@ -53,6 +53,8 @@ PYTHONPATH=. conda run --no-capture-output -n goldrush \
 
 - `release`：正式平台提交模式，`POLICY_RUNTIME_FAST_DEBUG=0`，关闭 fast debug result 热路径，并将 fast core 复制到生成目录由 `player.cpp` 同编译单元 include。
 - `debug`：本地训练/调试模式，`POLICY_RUNTIME_FAST_DEBUG=1`，保留完整 fast debug result。
+
+该参数选择 release/debug 编译口径，不负责启用或关闭 fast option；两种模式都包含 fast controller，差别在于调试信息与热路径实现。
 
 正式平台 self-play、挑战版本和最终提交均应使用 `release`。不要省略该参数；工具会 fail-fast。
 

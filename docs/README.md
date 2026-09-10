@@ -8,7 +8,7 @@
 - `policy_network_design.md`：当前 actor/critic 分离网络、自回归动作头、critic gather 和 ONNX 约束。
 - `reward_design.md`：当前 PPO reward 项、dense gold/net gold、BC 与 PPO 的关系。
 - `features/README.md`：actor/critic feature schema 索引。
-- `features/actor_feature_v1.md`：可部署 actor feature schema。
+- `features/actor_feature_v2.md`：当前可部署 actor feature schema；v1 文档仅用于历史追溯和 checkpoint inflation。
 - `features/privileged_critic_feature_v2.md`：当前训练期 privileged critic feature schema；v1 文档仅用于历史追溯和 checkpoint inflation。
 
 ## Replay 与派生格式
@@ -22,7 +22,7 @@
 
 - `submission_pipeline.md`：checkpoint 到 ONNX、C++ `.so`、本地 smoke、平台 self-play 和供挑战上传的正式流程。
 - `neural_inference.md`：C++/ONNX Runtime 提交路线、平台速度和量化实验归档。
-- `fast_option_design.md`：conditional fast option 的未来设计，不是当前已实现主线能力。
+- `fast_option_design.md`：比赛后期进入主线的 conditional fast option、threshold head、runtime 状态与赛后冻结评估结论。
 
 ## 维护原则
 

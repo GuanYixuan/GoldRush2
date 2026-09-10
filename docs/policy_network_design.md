@@ -39,7 +39,7 @@ logprob/value/entropy diagnostics: B
 
 ## Encoder
 
-actor 和 critic 使用两套参数独立的 encoder。第一版两套 encoder 主体结构相同，但输入 channel/scalar 数量和 schema 不同，不共享任何可训练参数：
+actor 和 critic 使用两套参数独立的 encoder。当前两套 encoder 主体结构相同，但输入 channel/scalar 数量和 schema 不同，不共享任何可训练参数：
 
 ```text
 Actor stem:
@@ -81,7 +81,7 @@ Critic scalar tower:
 
 SE residual block 不使用 normalization。FiLM 最后一层零初始化；residual branch 第二个卷积使用小 gain；SE gate 最后一层零初始化。默认激活为 SiLU，ReLU 只保留为部署实验配置。
 
-第一版 FiLM 只在 stem 后、进入 residual blocks 前作用一次。多层 FiLM/per-block FiLM 暂缓，不进入本版默认结构；如后续 critic EV 仍不足，可作为独立网络消融项加入配置。
+当前 FiLM 只在 stem 后、进入 residual blocks 前作用一次。多层 FiLM/per-block FiLM 不进入当前默认结构；如后续 critic EV 仍不足，可作为独立网络消融项加入配置。
 
 actor encoder 输出 `H_actor: B x 96 x 17 x 17`。actor 使用全局 average/max pooling 和两个己方角色初始位置处的 feature gather：
 
@@ -147,7 +147,7 @@ p(ko, vp, a_exec[0:6], threshold_raw | state)
   * p(threshold_raw | state, ko, vp, a_exec[0:6])
 ```
 
-`vp` 不影响本回合移动，首版保持独立。六步动作使用共享 GRU decoder，默认 `decoder_hidden=128`、embedding width `16`。每步输入：
+`vp` 不影响本回合移动，当前保持独立。六步动作使用共享 GRU decoder，默认 `decoder_hidden=128`、embedding width `16`。每步输入：
 
 ```text
 actor context
@@ -189,7 +189,7 @@ logits = base_logits + candidate_delta
 
 ## Fast Threshold Head
 
-threshold 是下一回合 fast controller 的参数，第一版不进入 actor scalar schema，避免扰动现有 actor encoder FiLM。模型额外接收：
+threshold 是下一回合 fast controller 的参数。当前实现不把它并入 actor scalar schema，以免扰动现有 actor encoder FiLM；模型另行接收：
 
 ```text
 fast_scalars: B x 2
@@ -242,7 +242,7 @@ threshold_int = clamp(threshold_int, 4, 30)
 
 训练和 C++ runtime 必须使用同一口径，不能使用 Python `round()` 的 banker rounding。
 
-第一版使用全局 learnable `threshold_log_std`，不做 state-dependent std。推荐初始化：
+当前实现使用全局 learnable `threshold_log_std`，不做 state-dependent std。初始化为：
 
 ```text
 residual_raw = 0
@@ -250,9 +250,9 @@ residual_raw = 0
 threshold_log_std ~= -1.3
 ```
 
-`threshold_mlp` 最后一层权重和 bias 都为 `0`，使接入初期完全等于 calibrated base。`threshold_log_std` 训练和导出时应 clamp 到稳定范围，例如 `[-3.0, 0.0]`。
+`threshold_mlp` 最后一层权重和 bias 都为 `0`，使接入初期完全等于 calibrated base。`threshold_log_std` 训练和导出时 clamp 到 `[-3.0, 0.0]`。
 
-部署默认也使用 stochastic action 口径。C++ runtime 应从模型输出的分布参数采样普通动作和 `threshold_raw`，再执行同一 sigmoid 与整数化逻辑；随机流必须由 runtime 显式维护，避免训练、评估和平台提交之间出现隐式语义漂移。
+部署也使用 stochastic action 口径。C++ runtime 生成 `rand_ko`、`rand_vp`、`rand_action` 并作为 ONNX 输入，普通动作的 Gumbel argmax 选择在导出图内完成；ONNX 输出最终普通动作和 threshold 的 `mu_raw/log_std`，C++ 再采样 `threshold_raw`，执行同一 sigmoid 与整数化逻辑。随机流由 runtime 显式维护，避免训练、评估和平台提交之间出现隐式语义漂移。
 
 ## Belief 位置模拟
 
@@ -304,9 +304,9 @@ evaluate_actions(
 
 `act()` 使用 actor feature 按 `deterministic` 参数采样或取贪心 `ko/vp/actions`，再基于已选动作后的模拟终点采样或取中心值 `threshold_raw`，并使用 critic feature 通过 critic encoder 输出 value。训练和默认部署均使用 stochastic 路径；deterministic 只用于等价测试、导出 smoke 或明确指定的消融。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder，并用保存的 `threshold_raw` 重算 threshold logprob；value 由 critic feature 重算。
 
-部署/BC/ONNX 路径应保留 actor-only 入口。该入口只能返回 action、threshold、logprob/entropy 或使用占位 value，不得要求 privileged critic feature。PPO 训练路径必须使用双输入接口。
+部署/BC/ONNX 路径保留 actor-only 入口。该入口只返回 action、threshold、logprob/entropy 或使用占位 value，不要求 privileged critic feature。PPO 训练路径使用双输入接口。
 
-`forward()` 是导出友好的 actor-only 包装，不用于 PPO 更新。默认提交路径应支持 stochastic 采样；若导出图本身只输出 logits/mu/log_std，则采样由 C++ runtime 在 ONNX 推理后完成。
+`forward()` 是导出友好的 actor-only 包装，不用于 PPO 更新。当前导出图接收 C++ runtime 生成的普通动作随机张量，在图内完成普通动作选择，并输出 threshold 的 `mu_raw/log_std`；threshold 的采样与整数化在 ONNX 推理后由 C++ runtime 完成。
 
 若 teacher-forced 动作被同一规则 mask 判为非法，立即报错。这通常表示槽位映射、位置递推或 feature 不一致，禁止静默赋予极小概率。
 
@@ -332,9 +332,9 @@ actions/k/order/vp/threshold_raw/threshold_int/old_logprob/value
 
 decoder hidden、执行顺序动作、`ko`、连续 `threshold` 和 threshold head 输入均可由现有字段确定，不进入 buffer。`threshold_int` 保存用于对齐环境执行和诊断。PPO 更新必须 teacher force buffer 动作和 `threshold_raw`，禁止重新采样或用当前 argmax/均值作为 prefix。模型参数不变时，rollout logprob 与重算 logprob 必须在浮点误差内一致。
 
-threshold 是 delayed action component：第 `t` 条 transition 保存 `threshold_raw_t` 和对应 logprob，第 `t+1` 回合 fast controller 的后果通过标准 reward/return/GAE 回传到 `advantage_t`。第一版不拆 `threshold_loss`，也不把 `threshold_logprob_t` 搬到第 `t+1` 条 transition；所有 actor component 共用同一个 PPO clipped objective 和同一个 `advantage_t`。
+threshold 是 delayed action component：第 `t` 条 transition 保存 `threshold_raw_t` 和对应 logprob，第 `t+1` 回合 fast controller 的后果通过标准 reward/return/GAE 回传到 `advantage_t`。当前实现不拆 `threshold_loss`，也不把 `threshold_logprob_t` 搬到第 `t+1` 条 transition；所有 actor component 共用同一个 PPO clipped objective 和同一个 `advantage_t`。
 
-fast option 的 success/miss/path-fail/fallback、belief、first-rate 和 one-step delta 等诊断按 update 聚合，不作为模型输入或 PPO logprob 重算字段保存。第一版不加入逐次 debug-only 字段。
+fast option 的 success/miss/path-fail/fallback、belief、first-rate 和 one-step delta 等诊断按 update 聚合，不作为模型输入或 PPO logprob 重算字段保存。当前默认 batch 不加入逐次 debug-only 字段。
 
 policy loss、KL 和 entropy 只读取 actor feature；value loss、old value 对齐和 explained variance 只读取 critic feature。`old_logprob` 仍来自 actor 路径，`old_value` 来自 critic 路径。
 
@@ -355,7 +355,7 @@ entropy_bonus =
 
 默认值为 `entropy_action_coef=0.0100`、`entropy_ko_coef=0.0040`、`entropy_vp_coef=0.0003`。
 
-`beta_threshold_entropy` 第一版应很小或为 `0`，先通过 `threshold_log_std` 初始化提供探索，避免 threshold 噪声长期主导 fast 行为。action entropy 暂以完整五类 `log(5)` 归一化；mask 后只有少量合法动作时指标会自然下降。masked logits 使用 dtype 有限最小值，避免 `0 * -inf` 产生 NaN。
+`beta_threshold_entropy` 当前为 `0`，由 `threshold_log_std` 初始化提供探索，避免 threshold 噪声长期主导 fast 行为。action entropy 暂以完整五类 `log(5)` 归一化；mask 后只有少量合法动作时指标会自然下降。masked logits 使用 dtype 有限最小值，避免 `0 * -inf` 产生 NaN。
 
 ## Rollout 与性能
 
@@ -411,7 +411,7 @@ decoder 引入六步串行 GPU 数据依赖。修改 decoder hidden、worker 数
 
 ## 部署与验证
 
-部署使用 stochastic 路径：ONNX 输出普通动作 logits、threshold `mu_raw/log_std` 等分布参数，C++ runtime 负责采样、动作选择、`threshold_raw -> threshold_int` 转换和 fast controller 调用。固定六步循环可在 ONNX 导出时展开，优先使用 Gather、ScatterElements、Where、Sigmoid 和基础整数/布尔算子；若采样放在 C++ 侧，训练用 `torch.multinomial`、Normal sampling 和 threshold logprob 不进入 ONNX 图。
+部署使用 stochastic 路径：C++ runtime 生成普通动作所需随机张量，ONNX 在固定展开的六步循环中输出已选 `actions/k/order/vp` 以及 threshold `mu_raw/log_std`；C++ runtime 再采样 threshold、完成 `threshold_raw -> threshold_int` 转换并维护 fast controller。导出图优先使用 Gather、ScatterElements、Where、Sigmoid 和基础整数/布尔算子，不包含 `Random*`、`Multinomial` 或 Normal sampling。
 
 最低测试要求：
 
