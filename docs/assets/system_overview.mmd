@@ -1,0 +1,14 @@
+flowchart LR
+    A[官方规则与对局回放] --> B[隐藏机制观测与拟合]
+    A --> C[确定性规则实现]
+    B --> D[可替换的机制近似]
+    C --> E[本地模拟器]
+    D --> E
+    E --> F[BC / PPO 训练]
+    G[快速规则策略] --> F
+    H[可部署特征提取器] --> F
+    F --> I[策略 checkpoint]
+    I --> J[Actor-only ONNX]
+    H --> K[C++ runtime]
+    J --> K
+    K --> L[平台提交]

@@ -1,0 +1,48 @@
+---
+config:
+  layout: elk
+---
+flowchart LR
+    subgraph ACTOR["Actor：训练与部署共享"]
+        direction TB
+        A0["局部观测特征<br/>43 × 17 × 17 空间特征 + 10 个标量"]
+        A1["Actor encoder<br/>卷积 stem + scalar FiLM<br/>8 × SE-ResidualBlock, width 96"]
+        A2["全局 avg/max pooling<br/>+ 两个己方角色位置 gather"]
+        A3["Actor context<br/>256 维"]
+        KO["动作分配与执行顺序<br/>14 类 k/order"]
+        DEC["共享自回归 GRU × 6<br/>读取角色、前序动作与候选落点特征<br/>每步递推模拟位置并更新合法动作 mask"]
+        VP["视野购买 head<br/>读取六步后的模拟终点"]
+        MOVE["六步移动动作<br/>scatter 回官方槽位"]
+        TH["阈值 head<br/>校准基线 + 神经网络残差"]
+        FAST_A["快速路径统计量 × 2"]
+        OUT["策略输出<br/>官方动作字段 + 快速路径阈值"]
+
+        A0 --> A1 --> A2 --> A3 --> KO --> DEC
+        A1 --> DEC
+        DEC --> VP --> OUT
+        DEC --> MOVE --> OUT
+        A3 --> VP
+        DEC --> TH --> OUT
+        A3 --> TH
+        FAST_A --> TH
+    end
+
+    subgraph CRITIC["Privileged Critic：仅 PPO 训练"]
+        direction TB
+        C0["完整状态 + Actor 信息态<br/>39 × 17 × 17 空间特征 + 20 个标量"]
+        C1["独立 Critic encoder<br/>与 Actor 不共享参数"]
+        C2["全局 avg/max pooling<br/>+ 四个真实角色位置 gather"]
+        FAST_C["同一组快速路径统计量 × 2"]
+        C3["Value MLP<br/>256 → 128 → 1"]
+        V["V(s)"]
+
+        C0 --> C1 --> C2 --> C3 --> V
+        FAST_C --> C3
+    end
+
+    ACTOR ~~~ CRITIC
+
+    classDef deploy fill:#e8f5e9,stroke:#2e7d32,color:#1b1b1b;
+    classDef train fill:#fff3e0,stroke:#ef6c00,color:#1b1b1b;
+    class A0,A1,A2,A3,KO,DEC,VP,MOVE,FAST_A,TH,OUT deploy;
+    class C0,C1,C2,FAST_C,C3,V train;
