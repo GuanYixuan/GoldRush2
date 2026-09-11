@@ -19,7 +19,7 @@ GoldRush2.0 在 `17 × 17` 网格上进行，两名玩家各控制两个角色�
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/system_overview-dark.svg">
-  <img src="docs/assets/system_overview-light.svg" alt="GoldRush2 系统总览：从规则与回放出发，经机制建模、模拟器和训练得到可部署策略">
+  <img src="docs/assets/system_overview-light.svg" alt="GoldRush2 系统总览：规则与回放支持对局可视化、机制建模和模拟器实现，随后完成策略训练与部署">
 </picture>
 
 [查看系统图原图：浅色](docs/assets/system_overview-light.svg) · [深色](docs/assets/system_overview-dark.svg)
