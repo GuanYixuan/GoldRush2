@@ -187,24 +187,26 @@ k, order, actions[0:6], vp
 
 ### Loss 形态
 
-基础动作 BC loss 建议按动作头拆分：
+当前 `training/bc/losses.py` 使用与 PPO 相同的自回归 actor 概率模型，以 teacher 动作重算三项负对数似然：
 
-- `k`：分类交叉熵。
-- `order`：二分类交叉熵。
-- `vp`：分类交叉熵。
-- `actions[0:6]`：逐步分类交叉熵。
+- `ko = 2 * k + order`：14 类联合分类，不拆独立 `k/order` loss。
+- `actions[0:6]`：按 teacher 的 `ko` 和六步动作 teacher force decoder，逐步 logprob 求和后除以 `6`。
+- `vp`：以 teacher 动作恢复的两个角色模拟终点计算 logits，再监督 teacher 的视野购买标签。
 
-总 BC loss 可按头加权：
+总 BC loss 为：
 
 ```text
+nll_ko = -mean(log p(teacher_ko | state))
+nll_action = -mean(sum_j log p(teacher_action_j | teacher_prefix_j) / 6)
+nll_vp = -mean(log p(teacher_vp | state, teacher_final_positions))
+
 bc_loss =
-    w_k * CE(k)
-  + w_order * CE(order)
-  + w_vp * CE(vp)
-  + w_actions * mean_t CE(action_t)
+    w_ko * nll_ko
+  + w_action * nll_action
+  + w_vp * nll_vp
 ```
 
-如果某些 teacher 只提供部分动作标签，loss 应支持 mask；不要为了补齐标签引入伪监督。
+默认权重为 `w_ko=1.0`、`w_action=1.0`、`w_vp=0.2`。BC 需要完整的 `k/order/actions/vp` 标签，目前没有部分标签 mask；teacher 动作违反同一移动 mask 时会 fail-fast。BC 不监督 threshold，训练时保持 threshold head 冻结。
 
 ### 当前使用阶段
 

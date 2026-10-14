@@ -74,10 +74,13 @@ RoundStepEnv action-time state
         -> GoldRushPolicyNetwork actor/critic 双输入
         -> 普通动作 + 下一回合 threshold
   -> simulator transition/reward
+  -> 按神经决策组装 PPO transition；下一回合 fast 命中时折叠其 reward
   -> PpoBatch
-  -> GAE
+  -> 按跨越环境回合数 tau 计算 GAE
   -> PPO update
 ```
+
+神经决策序号与环境回合号不再一一对应；一次 PPO transition 跨一个普通神经回合，或一个神经回合及紧接的 fast 回合。具体 reward 折叠和 GAE 语义见 `docs/fast_option_design.md`。
 
 部署路径只使用 actor feature 和 actor-only 网络入口；privileged critic feature 只存在于训练期 value function。
 
@@ -122,7 +125,6 @@ EvalTask(seed, map_id, opponent_spec, agent_player_id=2)
 ## 文档导航
 
 - `training/README.md`：训练栈入口、主线 PPO 能力和常用测试。
-- `training/AGENTS.md`：训练代码修改规则。
 - `training/rl/README.md`：RL 模块 API、rollout、PPO update、checkpoint 语义。
 - `training/bc/README.md`：BC 数据和 actor-only 训练。
 - `training/opponents/README.md`：opponent league 和 scripted opponents。

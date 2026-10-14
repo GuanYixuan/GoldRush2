@@ -140,14 +140,16 @@ order = ko % 2
 联合概率分解为：
 
 ```text
-p(ko, vp, a_exec[0:6], threshold_raw | state)
+p(ko, a_exec[0:6], vp, threshold_raw | state, fast_scalars)
 = p(ko | state)
-  * p(vp | state)
-  * product_t p(a_exec[t] | state, ko, prefix[0:t], simulated_positions[t])
-  * p(threshold_raw | state, ko, vp, a_exec[0:6])
+  * product_j p(a_exec[j] | state, ko, prefix[0:j], simulated_positions[j])
+  * p(vp | state, final_positions)
+  * p(threshold_raw | state, final_positions, fast_scalars)
 ```
 
-`vp` 不影响本回合移动，当前保持独立。六步动作使用共享 GRU decoder，默认 `decoder_hidden=128`、embedding width `16`。每步输入：
+`state` 表示 actor 输入，`final_positions` 由 `ko` 和六步动作的模拟递推确定。采样顺序为 `ko -> actions -> vp -> threshold_raw`。VP head 与 threshold head 均读取两个己方角色终点处的 feature；threshold head 额外读取 `fast_scalars`，不读取已采样的 `vp`。视野购买下回合生效，因此移动 decoder 不依赖 `vp`，但 VP 决策依赖本回合模拟终点。
+
+六步动作使用共享 GRU decoder，默认 `decoder_hidden=128`、embedding width `16`。每步输入：
 
 ```text
 actor context
@@ -302,7 +304,7 @@ evaluate_actions(
 ) -> PolicyEvaluation
 ```
 
-`act()` 使用 actor feature 按 `deterministic` 参数采样或取贪心 `ko/vp/actions`，再基于已选动作后的模拟终点采样或取中心值 `threshold_raw`，并使用 critic feature 通过 critic encoder 输出 value。训练和默认部署均使用 stochastic 路径；deterministic 只用于等价测试、导出 smoke 或明确指定的消融。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder，并用保存的 `threshold_raw` 重算 threshold logprob；value 由 critic feature 重算。
+`act()` 使用 actor feature 按 `deterministic` 参数依次采样或取贪心 `ko` 和六步动作，再基于模拟终点决定 `vp` 并采样或取中心值 `threshold_raw`；value 由 critic feature 通过 critic encoder 输出。训练和默认部署均使用 stochastic 路径；deterministic 只用于等价测试、导出 smoke 或明确指定的消融。`evaluate_actions()` 从保存的 `k/order` 恢复 `ko`，按保存动作 teacher force 同一个 decoder，以恢复的模拟终点重算 VP logits，再用保存的 `vp` 和 `threshold_raw` 重算对应 logprob；value 由 critic feature 重算。
 
 部署/BC/ONNX 路径保留 actor-only 入口。该入口只返回 action、threshold、logprob/entropy 或使用占位 value，不要求 privileged critic feature。PPO 训练路径使用双输入接口。
 
@@ -316,9 +318,9 @@ rollout 保存的联合 logprob：
 
 ```text
 log p(ko | state)
-+ log p(vp | state)
-+ sum_t log p(a_exec[t] | prefix_t, simulated_positions[t])
-+ log p(threshold_raw | state, ko, vp, a_exec[0:6])
++ sum_j log p(a_exec[j] | state, ko, prefix_j, simulated_positions[j])
++ log p(vp | state, final_positions)
++ log p(threshold_raw | state, final_positions, fast_scalars)
 ```
 
 PPO buffer 和 multiprocess shared memory 保存：
@@ -328,13 +330,14 @@ actor_spatial_planes/actor_scalars
 fast_scalars
 critic_spatial_planes/critic_scalars
 actions/k/order/vp/threshold_raw/threshold_int/old_logprob/value
+reward/reward_sum/tau/done/fast_success/fast_status
 ```
 
 decoder hidden、执行顺序动作、`ko`、连续 `threshold` 和 threshold head 输入均可由现有字段确定，不进入 buffer。`threshold_int` 保存用于对齐环境执行和诊断。PPO 更新必须 teacher force buffer 动作和 `threshold_raw`，禁止重新采样或用当前 argmax/均值作为 prefix。模型参数不变时，rollout logprob 与重算 logprob 必须在浮点误差内一致。
 
-threshold 是 delayed action component：第 `t` 条 transition 保存 `threshold_raw_t` 和对应 logprob，第 `t+1` 回合 fast controller 的后果通过标准 reward/return/GAE 回传到 `advantage_t`。当前实现不拆 `threshold_loss`，也不把 `threshold_logprob_t` 搬到第 `t+1` 条 transition；所有 actor component 共用同一个 PPO clipped objective 和同一个 `advantage_t`。
+PPO transition 以神经决策为单位。若下一环境回合 fast 命中，该回合的 reward 折叠进前一次神经决策，`tau=2`；否则 `tau=1`。GAE 使用折扣后的 `reward_sum` 和按 `tau` 计算的折扣因子，具体公式见 `docs/fast_option_design.md`。threshold logprob 包含在联合 `old_logprob` 中，不单独存储；所有 actor component 共用同一 PPO clipped objective 和该宏 transition 的 advantage。
 
-fast option 的 success/miss/path-fail/fallback、belief、first-rate 和 one-step delta 等诊断按 update 聚合，不作为模型输入或 PPO logprob 重算字段保存。当前默认 batch 不加入逐次 debug-only 字段。
+`fast_success` / `fast_status` 随 transition 保存，用于记录折叠与触发结果，不参与模型输入或 logprob 重算。其余 belief、first-rate、one-step delta 和 fallback 等诊断按 update 聚合，默认 batch 不加入额外逐次 debug-only 字段。`PpoBatch` 中 reward 与跨度的批量字段名为 `rewards`、`reward_sums`、`taus` 和 `dones`。
 
 policy loss、KL 和 entropy 只读取 actor feature；value loss、old value 对齐和 explained variance 只读取 critic feature。`old_logprob` 仍来自 actor 路径，`old_value` 来自 critic 路径。
 
@@ -343,7 +346,7 @@ PPO entropy bonus 按动作子头分别加权，默认值保持旧量级；实�
 ```text
 action_entropy = mean_t H(action_t | prefix_t) / log(5)
 ko_entropy = H(ko) / log(14)
-vp_entropy = H(vp) / log(3)
+vp_entropy = H(vp | state, final_positions) / log(3)
 threshold_entropy = H(Normal(mu_raw, std_raw))
 
 entropy_bonus =
@@ -359,7 +362,7 @@ entropy_bonus =
 
 ## Rollout 与性能
 
-serial 和 multiprocess rollout 均应在 action-time state 下同时构造 actor feature 和 critic feature，再调用 PPO 双输入 `model.act()`。一次 feature request 仍只返回完整 `GameOutput`、logprob 和 value；六步 decoder 不与 worker 中途通信。
+每次神经决策均在 action-time state 下同时构造 actor feature 和 critic feature，再调用 PPO 双输入 `model.act()`。主线 multiprocess rollout 的 fast 回合直接执行 controller，并折叠进前一次神经决策，不另提 feature request。一次神经推理返回完整 `GameOutput`、threshold、logprob 和 value；六步 decoder 不与 worker 中途通信。
 
 multiprocess rollout 的 worker 负责提取两套 feature：
 

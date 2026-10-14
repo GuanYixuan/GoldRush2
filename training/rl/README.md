@@ -32,6 +32,8 @@ PPO 主线 reward 为 `TerminalWinMarginGoldGainReward`，schema 为 `terminal_w
 
 主线 PPO 训练只支持多进程 rollout，使用 `MultiprocessRolloutPool`。主进程持有 model/GPU 并批量推理，worker 只运行 simulator、opponent 和 feature extractor。`collect_ppo_rollouts()` 是早期单进程 PPO rollout 辅助，暂只用于低层单元测试和局部调试，不作为 `training.scripts.train_ppo` 的兼容入口。
 
+主线 PPO transition 以神经决策为单位。打开 fast runtime 后，下一环境回合 fast 命中时，将其折叠进前一次决策，保存 `reward_sum` 和 `tau=2`；未命中时 `tau=1`。fast 回合不另做神经推理或保存独立 logprob。`PpoBatch.compute_gae()` 按 `taus` 计算折扣，完整 episode 和终局 bootstrap 为 `0` 的约束仍成立；详细归因公式与字段见 `docs/fast_option_design.md`。
+
 多进程入口保持 on-policy 语义：每个 update 的 rollout batch 来自当前冻结模型。推荐较大训练配置使用：
 
 ```bash

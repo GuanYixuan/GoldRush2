@@ -152,14 +152,7 @@ new_npc_at_target = npc_now_at_target && !npc_prev_at_target
 - 对越界、`grid < 0` 或可见敌方占位导致的非法移动，该步不执行，后续动作继续尝试，尽量贴近官方非法移动语义。
 - 不模拟未知炸弹、已知炸弹损失、踩踏、NPC、敌方行动或赛后视野花费。
 
-该 proxy 的语义是：
-
-```text
-fast_effective_score_sample =
-  1 if 实际持币变化完整覆盖预期收益 else 0
-```
-
-它不是“真实先手概率”，而是“fast 是否完整兑现自身已知金币计划”的概率。若某目标没有竞争，后手也能完整吃到，该样本仍会被记为 success，因此该 proxy 仍偏乐观；但如果近期 fast trigger 经常只吃残值或拿不到预期金币，threshold 应自然变保守。
+模拟收益与实际持币变化共同构成上述 Beta 更新的证据。收益未兑现时记失败；完整兑现时还需新的 NPC 终态证据才记成功，其余成功样本跳过。该 belief 表达这一筛选口径下的抢金兑现率，不是真实先手概率。
 
 ### 依赖的 Fast-Path 性质
 
@@ -225,45 +218,56 @@ else:
 
 `p_fast` 是环境隐藏变量，不直接进入 actor/critic feature。训练和部署都只暴露 `p_fast_full_realization`、`fast_effective_confidence` 等由抢金效果 proxy 更新出的 belief；这样可以避免训练时把真实先手率泄露给网络，而部署时无法复现。rollout metrics 应记录 `latent_first_rate`、实际 fast 先手率、fast trigger 数和 fast full-realization score，便于区分“速度 regime 不利”和“threshold 学坏”。
 
-### 标准 PPO 归因
+### 神经决策的宏 transition 与 PPO 归因
 
-`threshold_t` 是第 `t` 回合采样的 action component，但它控制第 `t+1` 回合是否能走 fast path。当前实现按标准 delayed-action MDP 处理，不拆独立 threshold loss：
+下文用 `t` 表示环境回合，`i` 表示神经决策及对应 PPO transition 的序号。第 `t` 回合的神经决策同时采样普通动作和控制第 `t+1` 回合的 `threshold_raw`。多进程 rollout 先暂存这次决策，待下一回合 fast 尝试完成后再写入 buffer：
 
-```text
-state_t = 当前 action-time observation + runtime pending threshold_{t-1}
-action_t = normal_action_t + threshold_t
-```
+- fast 未命中或路径构造失败：写入单回合 transition，`tau=1`、`reward_sum=r_t`，随后在第 `t+1` 回合重新运行神经网络。
+- fast 命中：直接执行 fast 动作，将该回合折叠进前一次神经决策，`tau=2`、`reward_sum=r_t + gamma * r_{t+1}`。fast 回合没有独立的神经策略采样或 logprob；下一次神经决策从第 `t+2` 回合开始。
+- 任一回合终局时，将对应 transition 标为 `done=True`；神经回合本身终局时不再尝试下一回合 fast。
 
-rollout 中 `threshold_raw_t` 和 `threshold_logprob_t` 记录在第 `t` 条 transition 上。第 `t+1` 回合如果 fast controller 触发，其收益进入后续 reward/return，再通过普通 GAE 回传到 `A_t`，并与第 `t` 条 transition 的联合 logprob 一起参与 PPO ratio。
-
-因此 PPO actor loss 只有一套标准联合目标：
+因此每条 PPO transition 跨越一个或两个环境回合，保存神经决策时的 actor/critic feature、联合动作和 value。GAE 按实际跨度折扣：
 
 ```text
-old_logprob_t =
-  logprob(normal_action_t)
-  + logprob(threshold_raw_t)
-
-policy_loss_t =
-  PPOClip(old_logprob_t, new_logprob_t, advantage_t)
+t_i = 第 i 次神经决策所在的环境回合
+R_i = sum_{j=0}^{tau_i-1} gamma^j * r_{t_i+j}
+delta_i = R_i + gamma^tau_i * (1 - done_i) * V_{i+1} - V_i
+A_i = delta_i + (gamma * lambda)^tau_i * (1 - done_i) * A_{i+1}
 ```
 
-不把 `threshold_logprob_t` 搬到第 `t+1` 条 transition，也不额外构造 `threshold_loss`、`A_threshold_t` 或 one-step fast delta 辅助目标。这样实现最接近标准 PPO，避免一开始引入额外权重和长期/短期收益冲突。
+`R_i` 对应 `reward_sum`；终局 bootstrap 为 `0`。threshold 的后果通过同一宏 transition 的 reward/return 进入 `A_i`，与普通动作共用 PPO clipped objective：
 
-为降低分析盲区，rollout metrics 仍把第 `t` 的 threshold 与第 `t+1` 的 fast 后果串起来聚合统计。这些只用于诊断，不进入 PPO loss。
+```text
+old_logprob_i =
+  logprob(normal_action_i)
+  + logprob(threshold_raw_i)
+
+policy_loss_i =
+  PPOClip(old_logprob_i, new_logprob_i, A_i)
+```
+
+threshold 的 logprob 已包含在联合 `old_logprob` 中，不单独存储，也不移到 fast 回合。当前实现不拆独立 `threshold_loss`、`A_threshold` 或 one-step fast delta 辅助目标。rollout metrics 将一次神经决策的 threshold 与其下一回合 fast 后果配对聚合，仅用于诊断。
 
 ### PPO 必需字段
 
-PPO batch / shared memory 必须保存能重算 logprob/value 的字段：
+除普通动作和 actor/critic feature 外，fast 路径在 transition / shared memory 中保存以下字段，用于重算联合 logprob/value、计算 return 和记录 fast 结果：
 
 ```text
-fast_scalars_t
-threshold_raw_sample_t
-threshold_logprob_t
-threshold_int_t
-old_logprob_t   # normal action + threshold_raw
+fast_scalars
+threshold_raw
+threshold_int
+old_logprob   # normal action + threshold_raw 的联合 logprob
+reward        # 神经决策回合的即时 reward
+reward_sum    # 宏 transition 内按 gamma 折扣的 reward 总和
+tau           # 跨越的环境回合数
+done
+fast_success
+fast_status
 ```
 
-PPO 更新时必须 teacher-force rollout 中采样到的 `threshold_raw_sample_t`，禁止用当前模型重新采样。critic 仍只输出普通 state value，不为 threshold 单独输出 value head。
+`PpoBatch` 中对应的批量字段为 `rewards`、`reward_sums`、`taus` 和 `dones`；其余字段名称保持不变。`fast_success` 表示该 transition 是否折叠了成功 fast 回合，`fast_status` 记录 success/miss/path-fail 或未尝试状态；它们不进入模型输入或 logprob 计算。
+
+PPO 更新时必须 teacher-force rollout 中采样到的 `threshold_raw`，禁止用当前模型重新采样。critic 只在神经决策状态估计 value，不为 threshold 单独输出 value head。
 
 ### 默认诊断指标
 
