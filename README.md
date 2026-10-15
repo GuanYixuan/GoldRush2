@@ -149,4 +149,4 @@ PYTHONPATH=. python -m training.scripts.train_ppo \
 
 ## 结果与延伸阅读
 
-本系统最终取得九坤 GoldRush2.0 官方 32 强成绩。本项目的叙事复盘与反思将在个人博客中公开。
+本系统最终取得九坤 GoldRush2.0 官方 32 强成绩。本项目的复盘及相应学习笔记可参见 [个人博客](https://guanyixuan.github.io/blogs/tags/?tag=goldrush2) 。
